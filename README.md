@@ -1,5 +1,6 @@
 # MD4: Simplified and Generalized Masked Diffusion for Discrete Data
 
+<img src="imgs/imagenet64.gif" width="600" />
 
 ## Installation
 
@@ -24,13 +25,14 @@ mkdir data_dir
 python prepare_openwebtext_data.py
 ```
 
-train a MD4-S model over text data (using openwebtext).
+train a MD4-S model over text data (OpenWebText, Fineweb-EDU).
 
 ```
 python md4/main.py --config=md4/configs/md4/openwebtext.py --sharded=false --workdir=./expt
 ```
 
-alternatively, you can train a MD4-S model over image data (using cifar10).
+alternatively, you can train a MD4-S model over image data (CIFAR-10,
+ImageNet-64).
 
 ```
 python md4/main.py --config=md4/configs/md4/cifar10.py --sharded=false --workdir=./expt
@@ -47,7 +49,7 @@ size of `32`.
 
 Add citation details here, usually a pastable BibTeX snippet:
 
-```latex
+```
 @inproceedings{shi2024simplified,
   title={Simplified and Generalized Masked Diffusion for Discrete Data},
   author={Shi, Jiaxin and Han, Kehang and Wang, Zhe and Doucet, Arnaud and Titsias, Michalis K.},
