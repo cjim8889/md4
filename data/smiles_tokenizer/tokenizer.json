@@ -1,0 +1,508 @@
+{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [
+    {
+      "id": 0,
+      "content": "[PAD]",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 1,
+      "content": "[UNK]",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 2,
+      "content": "[CLS]",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    },
+    {
+      "id": 3,
+      "content": "[SEP]",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    }
+  ],
+  "normalizer": null,
+  "pre_tokenizer": {
+    "type": "Sequence",
+    "pretokenizers": [
+      {
+        "type": "Split",
+        "pattern": {
+          "String": "(\\[|\\]|\\(|\\)|=|#|@|\\+|\\-|%|\\d+)"
+        },
+        "behavior": "Isolated",
+        "invert": false
+      },
+      {
+        "type": "Whitespace"
+      }
+    ]
+  },
+  "post_processor": {
+    "type": "TemplateProcessing",
+    "single": [
+      {
+        "SpecialToken": {
+          "id": "[CLS]",
+          "type_id": 0
+        }
+      },
+      {
+        "Sequence": {
+          "id": "A",
+          "type_id": 0
+        }
+      },
+      {
+        "SpecialToken": {
+          "id": "[SEP]",
+          "type_id": 0
+        }
+      }
+    ],
+    "pair": [
+      {
+        "Sequence": {
+          "id": "A",
+          "type_id": 0
+        }
+      },
+      {
+        "Sequence": {
+          "id": "B",
+          "type_id": 1
+        }
+      }
+    ],
+    "special_tokens": {
+      "[CLS]": {
+        "id": "[CLS]",
+        "ids": [
+          2
+        ],
+        "tokens": [
+          "[CLS]"
+        ]
+      },
+      "[SEP]": {
+        "id": "[SEP]",
+        "ids": [
+          3
+        ],
+        "tokens": [
+          "[SEP]"
+        ]
+      }
+    }
+  },
+  "decoder": null,
+  "model": {
+    "type": "BPE",
+    "dropout": null,
+    "unk_token": "[UNK]",
+    "continuing_subword_prefix": null,
+    "end_of_word_suffix": null,
+    "fuse_unk": false,
+    "byte_fallback": false,
+    "ignore_merges": false,
+    "vocab": {
+      "[PAD]": 0,
+      "[UNK]": 1,
+      "[CLS]": 2,
+      "[SEP]": 3,
+      "#": 4,
+      "%": 5,
+      "(": 6,
+      ")": 7,
+      "+": 8,
+      "-": 9,
+      "0": 10,
+      "1": 11,
+      "2": 12,
+      "3": 13,
+      "4": 14,
+      "5": 15,
+      "6": 16,
+      "7": 17,
+      "8": 18,
+      "9": 19,
+      "=": 20,
+      "A": 21,
+      "B": 22,
+      "C": 23,
+      "D": 24,
+      "E": 25,
+      "F": 26,
+      "G": 27,
+      "H": 28,
+      "I": 29,
+      "K": 30,
+      "L": 31,
+      "M": 32,
+      "N": 33,
+      "O": 34,
+      "P": 35,
+      "R": 36,
+      "S": 37,
+      "T": 38,
+      "U": 39,
+      "V": 40,
+      "W": 41,
+      "X": 42,
+      "Y": 43,
+      "Z": 44,
+      "[": 45,
+      "]": 46,
+      "a": 47,
+      "b": 48,
+      "c": 49,
+      "d": 50,
+      "e": 51,
+      "f": 52,
+      "g": 53,
+      "h": 54,
+      "i": 55,
+      "l": 56,
+      "m": 57,
+      "n": 58,
+      "o": 59,
+      "p": 60,
+      "r": 61,
+      "s": 62,
+      "t": 63,
+      "u": 64,
+      "y": 65,
+      "cc": 66,
+      "CC": 67,
+      "c1": 68,
+      "(=": 69,
+      "ccc": 70,
+      "c2": 71,
+      "CCC": 72,
+      "+]": 73,
+      "c1cc": 74,
+      "NC": 75,
+      "OC": 76,
+      "NH": 77,
+      "c1ccc": 78,
+      "c3": 79,
+      "CCCC": 80,
+      "cc1": 81,
+      "ccccc": 82,
+      ")(": 83,
+      "C1": 84,
+      "c1cccc": 85,
+      "Cl": 86,
+      "CC1": 87,
+      ")[": 88,
+      "nc": 89,
+      "CO": 90,
+      "-]": 91,
+      "(-": 92,
+      "n1": 93,
+      "C2": 94,
+      "c2ccc": 95,
+      "-])": 96,
+      "cc2": 97,
+      "ccccc2": 98,
+      "c1ccccc1": 99,
+      "c2cc": 100,
+      "CC2": 101,
+      "NH2": 102,
+      "c2ccccc2": 103,
+      ")(=": 104,
+      "N1": 105,
+      "([": 106,
+      "n2": 107,
+      "CCO": 108,
+      "nH": 109,
+      ")=": 110,
+      "c1c": 111,
+      "Br": 112,
+      "CCN": 113,
+      "c4": 114,
+      "Cc1ccc": 115,
+      "+](": 116,
+      "CN": 117,
+      "c3ccc": 118,
+      "NH3": 119,
+      "CCCCC": 120,
+      "ccccc3": 121,
+      "N2": 122,
+      "c1n": 123,
+      "cc3": 124,
+      "COC": 125,
+      "c3ccccc3": 126,
+      "ccc1": 127
+    },
+    "merges": [
+      [
+        "c",
+        "c"
+      ],
+      [
+        "C",
+        "C"
+      ],
+      [
+        "c",
+        "1"
+      ],
+      [
+        "(",
+        "="
+      ],
+      [
+        "cc",
+        "c"
+      ],
+      [
+        "c",
+        "2"
+      ],
+      [
+        "CC",
+        "C"
+      ],
+      [
+        "+",
+        "]"
+      ],
+      [
+        "c1",
+        "cc"
+      ],
+      [
+        "N",
+        "C"
+      ],
+      [
+        "O",
+        "C"
+      ],
+      [
+        "N",
+        "H"
+      ],
+      [
+        "c1",
+        "ccc"
+      ],
+      [
+        "c",
+        "3"
+      ],
+      [
+        "CC",
+        "CC"
+      ],
+      [
+        "cc",
+        "1"
+      ],
+      [
+        "cc",
+        "ccc"
+      ],
+      [
+        ")",
+        "("
+      ],
+      [
+        "C",
+        "1"
+      ],
+      [
+        "c1cc",
+        "cc"
+      ],
+      [
+        "C",
+        "l"
+      ],
+      [
+        "CC",
+        "1"
+      ],
+      [
+        ")",
+        "["
+      ],
+      [
+        "n",
+        "c"
+      ],
+      [
+        "C",
+        "O"
+      ],
+      [
+        "-",
+        "]"
+      ],
+      [
+        "(",
+        "-"
+      ],
+      [
+        "n",
+        "1"
+      ],
+      [
+        "C",
+        "2"
+      ],
+      [
+        "c2",
+        "ccc"
+      ],
+      [
+        "-]",
+        ")"
+      ],
+      [
+        "cc",
+        "2"
+      ],
+      [
+        "ccccc",
+        "2"
+      ],
+      [
+        "c1cccc",
+        "c1"
+      ],
+      [
+        "c2",
+        "cc"
+      ],
+      [
+        "CC",
+        "2"
+      ],
+      [
+        "NH",
+        "2"
+      ],
+      [
+        "c2",
+        "ccccc2"
+      ],
+      [
+        ")",
+        "(="
+      ],
+      [
+        "N",
+        "1"
+      ],
+      [
+        "(",
+        "["
+      ],
+      [
+        "n",
+        "2"
+      ],
+      [
+        "CC",
+        "O"
+      ],
+      [
+        "n",
+        "H"
+      ],
+      [
+        ")",
+        "="
+      ],
+      [
+        "c1",
+        "c"
+      ],
+      [
+        "B",
+        "r"
+      ],
+      [
+        "CC",
+        "N"
+      ],
+      [
+        "c",
+        "4"
+      ],
+      [
+        "C",
+        "c1ccc"
+      ],
+      [
+        "+]",
+        "("
+      ],
+      [
+        "C",
+        "N"
+      ],
+      [
+        "c3",
+        "ccc"
+      ],
+      [
+        "NH",
+        "3"
+      ],
+      [
+        "CC",
+        "CCC"
+      ],
+      [
+        "ccccc",
+        "3"
+      ],
+      [
+        "N",
+        "2"
+      ],
+      [
+        "c1",
+        "n"
+      ],
+      [
+        "cc",
+        "3"
+      ],
+      [
+        "C",
+        "OC"
+      ],
+      [
+        "c3",
+        "ccccc3"
+      ],
+      [
+        "cc",
+        "c1"
+      ]
+    ]
+  }
+}
