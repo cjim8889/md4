@@ -12,6 +12,7 @@ import tensorflow_datasets as tfds
 import transformers
 from datasets import load_dataset
 from ml_collections import config_dict
+from tqdm import tqdm
 
 from md4 import rdkit_utils
 
@@ -77,7 +78,7 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=2048):
         # Process training data
         print("Processing training SMILES...")
         pubchem_set_raw = set(df_train["smiles"])
-        pubchem_smiles_list = list(pubchem_set_raw)[:20000]
+        pubchem_smiles_list = list(pubchem_set_raw)
 
         # Process SMILES to InChI for deduplication
         pubchem_inchis = rdkit_utils.process_pubchem_data(pubchem_smiles_list)
@@ -97,7 +98,7 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=2048):
         # Convert InChI back to SMILES and generate features
         print("Generating features for training data...")
         train_data = []
-        for inchi in pubchem_train_inchis[:10000]:
+        for inchi in tqdm(pubchem_train_inchis, desc="Processing training data"):
             smiles = rdkit_utils.inchi_to_smiles(inchi)
             if smiles:
                 features = rdkit_utils.get_molecule_features(
@@ -113,7 +114,7 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=2048):
 
         print("Generating features for validation data...")
         val_data = []
-        for inchi in pubchem_val_inchis[:10000]:
+        for inchi in tqdm(pubchem_val_inchis, desc="Processing validation data"):
             smiles = rdkit_utils.inchi_to_smiles(inchi)
             if smiles:
                 features = rdkit_utils.get_molecule_features(
@@ -131,8 +132,8 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=2048):
         pubchem_train_df = pd.DataFrame(train_data)
         pubchem_val_df = pd.DataFrame(val_data)
 
-        pubchem_train_df.to_parquet(pubchem_train_path, index=False)
-        pubchem_val_df.to_parquet(pubchem_val_path, index=False)
+        pubchem_train_df.to_parquet(pubchem_train_path, index=True)
+        pubchem_val_df.to_parquet(pubchem_val_path, index=True)
 
         print(
             f"Saved {len(train_data)} training examples and {len(val_data)} validation examples"
