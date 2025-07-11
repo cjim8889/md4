@@ -108,6 +108,8 @@ def create_train_state(
 
   if config.classes > 0:
     conditioning = jnp.zeros(input_shape[0], dtype="int32")
+  elif config.fingerprint_dim > 0:
+    conditioning = jnp.zeros((input_shape[0], config.fingerprint_dim), dtype="int32")
   else:
     conditioning = None
   rng, sample_rng, init_rng = jax.random.split(rng, 3)
@@ -213,11 +215,15 @@ def loss_fn(params, state, rng, model, batch, train=False):
     x = batch["image"]
   elif "text" in batch:
     x = batch["text"]
+  elif "smiles" in batch:
+    x = batch["smiles"]
   else:
     raise ValueError("Unsupported targets/tasks.")
 
   if "label" in batch:
     conditioning = batch["label"].astype("int32")
+  elif "fingerprint" in batch:
+    conditioning = batch["fingerprint"].astype("int32")
   else:
     conditioning = None
 
@@ -257,122 +263,122 @@ def train_step(
     ema_rate: float = 0.0,
     num_microbatches: int | None = None,
 ) -> tuple[TrainState, metrics.Collection]:
-  """Perform a single training step."""
-  logging.info("train_step(batch=%s)", batch)
-  rng, new_rng = jax.random.split(train_state.rng)
-  rng = jax.random.fold_in(rng, jax.lax.axis_index("batch"))
+    """Perform a single training step."""
+    logging.info("train_step(batch=%s)", batch)
+    rng, new_rng = jax.random.split(train_state.rng)
+    rng = jax.random.fold_in(rng, jax.lax.axis_index("batch"))
 
-  grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  if num_microbatches is None or num_microbatches <= 1:
-    (_, (new_state, metrics_dict)), grads = grad_fn(
-        train_state.params, train_state.state, rng, model, batch, train=True
+    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    if num_microbatches is None or num_microbatches <= 1:
+        (_, (new_state, metrics_dict)), grads = grad_fn(
+            train_state.params, train_state.state, rng, model, batch, train=True
+        )
+    else:
+        batch_size = next(iter(batch.values())).shape[0]
+        assert batch_size % num_microbatches == 0, (
+            "Batch size isn't divided evenly by num_microbatches."
+        )
+        microbatch_size = batch_size // num_microbatches
+        logging.info(
+            "using microbatches: %d microbatches, %d size",
+            num_microbatches,
+            microbatch_size,
+        )
+
+        def get_microbatch(
+            batch: Mapping[str, jnp.ndarray], idx: int
+        ) -> Mapping[str, jnp.ndarray]:
+            """Fetch microbatch slice from possibly-packed input data."""
+            offset = idx * microbatch_size
+            length = microbatch_size
+            starts = {k: [offset] + [0] * (b.ndim - 1) for k, b in batch.items()}
+            limits = {k: [length] + list(b.shape[1:]) for k, b in batch.items()}
+            return {
+                k: jax.lax.dynamic_slice(b, starts[k], limits[k])
+                for k, b in batch.items()
+            }
+
+        def metrics_and_grad(loop_cnt, rng, train_state_state):
+            _, mbrng = jax.random.split(rng)
+            mb = get_microbatch(batch, loop_cnt)
+
+            (_, (new_state, metrics_dict)), grads = grad_fn(
+                train_state.params, train_state_state, mbrng, model, mb, train=True
+            )
+            return metrics_dict, grads, new_state
+
+        def per_microbatch_train_step(loop_cnt, carry):
+            (rng, grad_accum, prev_metrics_dict, train_state_state) = carry
+            metrics_dict, grads, train_state_state = metrics_and_grad(
+                loop_cnt, rng, train_state_state
+            )
+
+            grad_accum = jax.tree.map(jnp.add, grad_accum, grads)
+            metrics_dict = jax.lax.cond(
+                loop_cnt == 0,
+                lambda _: metrics_dict,
+                lambda _: merge_metrics(prev_metrics_dict, metrics_dict),
+                None,
+            )
+            return rng, grad_accum, metrics_dict, train_state_state
+
+        # Initialize gradient accumulation loop state.
+        accum_dtype = jnp.float32
+        grad_accum_init = jax.tree.map(
+            lambda x: jnp.zeros(x.shape, accum_dtype), train_state.params
+        )
+        initial_metrics_shape, _, _ = jax.eval_shape(
+            metrics_and_grad,
+            loop_cnt=0,
+            rng=rng,
+            train_state_state=train_state.state,
+        )
+
+        initial_metrics = {
+            k: jnp.zeros(shape=v.shape, dtype=v.dtype)
+            for k, v in initial_metrics_shape.items()
+        }
+
+        loop_init = (
+            rng,
+            grad_accum_init,
+            initial_metrics,
+            train_state.state,
+        )
+        _, grads, metrics_dict, train_state_state = jax.lax.fori_loop(
+            0, num_microbatches, per_microbatch_train_step, loop_init
+        )
+        metrics_dict = jax.tree.map(lambda x: x / num_microbatches, metrics_dict)
+        new_state = train_state_state
+
+    # Compute average gradient across multiple workers.
+    grads = jax.lax.pmean(grads, axis_name="batch")
+    updates, new_opt_state = optimizer.update(
+        grads, train_state.opt_state, train_state.params
     )
-  else:
-    batch_size = next(iter(batch.values())).shape[0]
-    assert (
-        batch_size % num_microbatches == 0
-    ), "Batch size isn't divided evenly by num_microbatches."
-    microbatch_size = batch_size // num_microbatches
-    logging.info(
-        "using microbatches: %d microbatches, %d size",
-        num_microbatches,
-        microbatch_size,
+    new_params = optax.apply_updates(train_state.params, updates)
+    if ema_rate > 0.0:
+        new_ema_params = jax.tree_util.tree_map(
+            lambda x, y: x + (1.0 - ema_rate) * (y - x),
+            train_state.ema_params,
+            new_params,
+        )
+    else:
+        new_ema_params = None
+    new_train_state = train_state.replace(
+        step=train_state.step + 1,
+        rng=new_rng,
+        params=new_params,
+        ema_params=new_ema_params,
+        opt_state=new_opt_state,
+        state=new_state,
     )
 
-    def get_microbatch(
-        batch: Mapping[str, jnp.ndarray], idx: int
-    ) -> Mapping[str, jnp.ndarray]:
-      """Fetch microbatch slice from possibly-packed input data."""
-      offset = idx * microbatch_size
-      length = microbatch_size
-      starts = {k: [offset] + [0] * (b.ndim - 1) for k, b in batch.items()}
-      limits = {k: [length] + list(b.shape[1:]) for k, b in batch.items()}
-      return {
-          k: jax.lax.dynamic_slice(b, starts[k], limits[k])
-          for k, b in batch.items()
-      }
-
-    def metrics_and_grad(loop_cnt, rng, train_state_state):
-      _, mbrng = jax.random.split(rng)
-      mb = get_microbatch(batch, loop_cnt)
-
-      (_, (new_state, metrics_dict)), grads = grad_fn(
-          train_state.params, train_state_state, mbrng, model, mb, train=True
-      )
-      return metrics_dict, grads, new_state
-
-    def per_microbatch_train_step(loop_cnt, carry):
-      (rng, grad_accum, prev_metrics_dict, train_state_state) = carry
-      metrics_dict, grads, train_state_state = metrics_and_grad(
-          loop_cnt, rng, train_state_state
-      )
-
-      grad_accum = jax.tree.map(jnp.add, grad_accum, grads)
-      metrics_dict = jax.lax.cond(
-          loop_cnt == 0,
-          lambda _: metrics_dict,
-          lambda _: merge_metrics(prev_metrics_dict, metrics_dict),
-          None,
-      )
-      return rng, grad_accum, metrics_dict, train_state_state
-
-    # Initialize gradient accumulation loop state.
-    accum_dtype = jnp.float32
-    grad_accum_init = jax.tree.map(
-        lambda x: jnp.zeros(x.shape, accum_dtype), train_state.params
+    metrics_update = train_metrics_class.gather_from_model_output(
+        learning_rate=learning_rate_fn(train_state.step),
+        **metrics_dict,
     )
-    initial_metrics_shape, _, _ = jax.eval_shape(
-        metrics_and_grad,
-        loop_cnt=0,
-        rng=rng,
-        train_state_state=train_state.state,
-    )
-
-    initial_metrics = {
-        k: jnp.zeros(shape=v.shape, dtype=v.dtype)
-        for k, v in initial_metrics_shape.items()
-    }
-
-    loop_init = (
-        rng,
-        grad_accum_init,
-        initial_metrics,
-        train_state.state,
-    )
-    _, grads, metrics_dict, train_state_state = jax.lax.fori_loop(
-        0, num_microbatches, per_microbatch_train_step, loop_init
-    )
-    metrics_dict = jax.tree.map(lambda x: x / num_microbatches, metrics_dict)
-    new_state = train_state_state
-
-  # Compute average gradient across multiple workers.
-  grads = jax.lax.pmean(grads, axis_name="batch")
-  updates, new_opt_state = optimizer.update(
-      grads, train_state.opt_state, train_state.params
-  )
-  new_params = optax.apply_updates(train_state.params, updates)
-  if ema_rate > 0.0:
-    new_ema_params = jax.tree_util.tree_map(
-        lambda x, y: x + (1.0 - ema_rate) * (y - x),
-        train_state.ema_params,
-        new_params,
-    )
-  else:
-    new_ema_params = None
-  new_train_state = train_state.replace(
-      step=train_state.step + 1,
-      rng=new_rng,
-      params=new_params,
-      ema_params=new_ema_params,
-      opt_state=new_opt_state,
-      state=new_state,
-  )
-
-  metrics_update = train_metrics_class.gather_from_model_output(
-      learning_rate=learning_rate_fn(train_state.step),
-      **metrics_dict,
-  )
-  return new_train_state, metrics_update
+    return new_train_state, metrics_update
 
 
 def eval_step(
@@ -597,9 +603,11 @@ def train_and_evaluate(
             _, sample_rng = jax.random.split(rng)
             dummy_loader = train_loader
             dummy_batch = utils.reshape_batch(next(iter(dummy_loader)))
-            dummy_inputs = dummy_batch[config.task_type]
+            dummy_inputs = dummy_batch[config.task_type] if "smiles" not in dummy_batch else dummy_batch["smiles"]
             if "label" in dummy_batch:
               conditioning = dummy_batch["label"].astype("int32")
+            elif "fingerprint" in dummy_batch:
+              conditioning = dummy_batch["fingerprint"].astype("int32")
             else:
               conditioning = None
 

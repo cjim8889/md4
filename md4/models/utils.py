@@ -49,6 +49,7 @@ def get_model(config: ml_collections.ConfigDict):
         sampling_grid=config.sampling_grid,
         topp=config.topp,
         model_sharding=config.get("model_sharding", False),
+        fingerprint_dim=config.get("fingerprint_dim", 0),
     )
   elif config.model_type == "genmd4":
     return genmd4.GenMD4(
