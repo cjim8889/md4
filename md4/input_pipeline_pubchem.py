@@ -29,7 +29,7 @@ class Tokenize(grain.MapTransform):
     def map(self, features):
         smiles = features["smiles"]
         features["smiles"] = self.tokenizer.encode(
-            str(smiles),
+            smiles.decode() if isinstance(smiles, bytes) else smiles,
             add_special_tokens=True,
             padding="max_length",
             truncation=True,
@@ -143,10 +143,11 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=2048):
         """Convert DataFrame to TensorFlow dataset."""
         # Convert fingerprint arrays to proper 2D numpy array
         fingerprints = np.stack(split_df["fingerprint"].values).astype(np.int32)
+        smiles = np.stack(split_df["smiles"].values).astype(np.dtype(str))
 
         ds = tf.data.Dataset.from_tensor_slices(
             {
-                "smiles": split_df["smiles"].values,
+                "smiles": smiles,
                 "fingerprint": fingerprints,
             }
         )
