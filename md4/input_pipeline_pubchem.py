@@ -6,7 +6,7 @@ from typing import Any
 
 import grain.python as grain
 import numpy as np
-import pandas as pd
+import polars as pl
 import tensorflow as tf
 import tensorflow_datasets as tfds
 import transformers
@@ -66,8 +66,8 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=2048):
     # Check if preprocessed data already exists
     if os.path.exists(pubchem_train_path) and os.path.exists(pubchem_val_path):
         print("Loading existing preprocessed PubChem data...")
-        pubchem_train_df = pd.read_parquet(pubchem_train_path)
-        pubchem_val_df = pd.read_parquet(pubchem_val_path)
+        pubchem_train_df = pl.read_parquet(pubchem_train_path)
+        pubchem_val_df = pl.read_parquet(pubchem_val_path)
     else:
         print("Downloading and preprocessing PubChem data...")
 
@@ -129,11 +129,11 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=2048):
                     )
 
         # Save to parquet
-        pubchem_train_df = pd.DataFrame(train_data)
-        pubchem_val_df = pd.DataFrame(val_data)
+        pubchem_train_df = pl.DataFrame(train_data)
+        pubchem_val_df = pl.DataFrame(val_data)
 
-        pubchem_train_df.to_parquet(pubchem_train_path, index=True)
-        pubchem_val_df.to_parquet(pubchem_val_path, index=True)
+        pubchem_train_df.write_parquet(pubchem_train_path)
+        pubchem_val_df.write_parquet(pubchem_val_path)
 
         print(
             f"Saved {len(train_data)} training examples and {len(val_data)} validation examples"
