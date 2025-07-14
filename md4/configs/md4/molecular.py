@@ -22,12 +22,12 @@ def get_config() -> config_dict.ConfigDict:
   # timesteps: int or None
   config.timesteps = 500
   # linear, cosine, poly[exponent], e.g., poly3
-  config.noise_schedule = "cosine"
+  config.noise_schedule = "linear"
   config.outside_embed = True
   # t or none (removes time dependence)
   config.time_features = "t"
   config.cont_time = True
-  config.fingerprint_dim = 2048
+  config.fingerprint_dim = 4096
 
   config.feature_dim = 64
   config.n_layers = 12
@@ -44,7 +44,7 @@ def get_config() -> config_dict.ConfigDict:
 
   config.learning_rate = 3e-4
   config.learning_rate_schedule = "cosine"
-  config.warmup_steps = 2000
+  config.warmup_steps = 10000
   config.weight_decay = 0.0
   config.clip = 0.0
   config.b2 = 0.999
@@ -52,10 +52,10 @@ def get_config() -> config_dict.ConfigDict:
   config.ema_rate = 0.9999
   # If num_train_steps==-1 then the number of training steps is calculated from
   # num_epochs.
-  config.num_train_steps = 3_000_000
+  config.num_train_steps = 10_000_000
   # Evaluates for a full epoch if num_eval_steps==-1.
   config.num_eval_steps = 1000
-  config.batch_size = 64
+  config.batch_size = 128
   config.num_microbatches = 1
   config.per_device_batch_size = -1
   # If batches should be added to evaluate the entire dataset.
@@ -70,13 +70,13 @@ def get_config() -> config_dict.ConfigDict:
   # for topp sampler
   config.topp = 0.98
 
-  config.log_loss_every_steps = 500
-  config.eval_every_steps = 5000
-  config.checkpoint_every_steps = 20000
-  config.checkpoint_keep_period = 10000
+  config.log_loss_every_steps = 10000
+  config.eval_every_steps = 100000
+  config.checkpoint_every_steps = 100000
+  config.checkpoint_keep_period = 400000
 
   # Single integer or tuple. If None will use (XManager ID, work unit).
-  config.seed = 42
+  config.seed = 88
 
   # Number of workers for Grain loaders.
   config.grain_num_workers = 15
