@@ -114,8 +114,19 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096):
         val_data = [result for result in results if result is not None]
 
         # Save to parquet
-        pubchem_train_df = pl.DataFrame(train_data)
-        pubchem_val_df = pl.DataFrame(val_data)
+
+
+        train_data_dict = {
+            "smiles": [item["smiles"] for item in train_data],
+            "fingerprint": [item["fingerprint"] for item in train_data],
+        }
+        val_data_dict = {
+            "smiles": [item["smiles"] for item in val_data],
+            "fingerprint": [item["fingerprint"] for item in val_data],
+        }
+        
+        pubchem_train_df = pl.DataFrame(train_data_dict)
+        pubchem_val_df = pl.DataFrame(val_data_dict)
 
         pubchem_train_df.write_parquet(pubchem_train_path)
         pubchem_val_df.write_parquet(pubchem_val_path)
@@ -127,7 +138,7 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096):
     def load_pubchem_split(split_df):
         """Convert DataFrame to TensorFlow dataset."""
         # Convert fingerprint arrays to proper 2D numpy array
-        fingerprints = np.stack(split_df["fingerprint"]).astype(np.int32)
+        fingerprints = split_df["fingerprint"].to_numpy().astype(np.int32)
         smiles = np.stack(split_df["smiles"].values).astype(np.dtype(str))
         ds = tf.data.Dataset.from_tensor_slices(
             {
