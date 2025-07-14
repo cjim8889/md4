@@ -134,31 +134,29 @@ def generate_samples_for_batch(
 ) -> List[List[str]]:
     """Generate multiple SMILES samples for a batch of fingerprints."""
     batch_size = fingerprints.shape[0]
-    all_generated = []
     
-    for sample_idx in range(num_samples):
-        rng, sample_rng = jax.random.split(rng)
-        
-        # Prepare conditioning (fingerprints)
-        conditioning = jnp.array(fingerprints, dtype=jnp.int32)
-        
-        # Generate samples using simple_generate (no pmap needed)
-        samples = sampling.simple_generate(
-            sample_rng,
-            train_state,
-            batch_size,
-            model,
-            conditioning=conditioning,
-        )
-        
-        all_generated.append(samples)
+    # Repeat fingerprints num_samples times
+    # Shape: (batch_size * num_samples, fingerprint_dim)
+    conditioning = jnp.repeat(jnp.array(fingerprints, dtype=jnp.int32), num_samples, axis=0)
     
-    # Transpose to get samples per data point
+    # Generate all samples in one call
+    samples = sampling.simple_generate(
+        rng,
+        train_state,
+        batch_size * num_samples,
+        model,
+        conditioning=conditioning,
+    )
+    
+    # Reshape samples to (batch_size, num_samples, sequence_length)
+    samples = samples.reshape(batch_size, num_samples, -1)
+    
+    # Convert to list of lists of SMILES strings
     batch_results = []
     for batch_idx in range(batch_size):
         sample_list = []
         for sample_idx in range(num_samples):
-            tokens = all_generated[sample_idx][batch_idx]
+            tokens = samples[batch_idx, sample_idx]
             # Detokenize
             smiles = tokenizer.decode(tokens, skip_special_tokens=True)
             sample_list.append(smiles)
@@ -184,28 +182,23 @@ def run_evaluation(
         generated_smiles=[],
     )
     
-    # Process in batches
+    # Process in batches, drop incomplete last batch
     batch_size = config.batch_size
-    num_batches = (len(eval_df) + batch_size - 1) // batch_size
+    num_complete_batches = len(eval_df) // batch_size
+    num_samples_processed = num_complete_batches * batch_size
     
-    logging.info(f"Processing {len(eval_df)} samples in {num_batches} batches")
+    logging.info(f"Processing {num_samples_processed}/{len(eval_df)} samples in {num_complete_batches} complete batches")
+    if num_samples_processed < len(eval_df):
+        logging.info(f"Dropping {len(eval_df) - num_samples_processed} samples from incomplete last batch")
     
-    for batch_idx in tqdm(range(num_batches), desc="Generating samples"):
+    for batch_idx in tqdm(range(num_complete_batches), desc="Generating samples"):
         start_idx = batch_idx * batch_size
-        end_idx = min(start_idx + batch_size, len(eval_df))
+        end_idx = start_idx + batch_size
         batch_df = eval_df[start_idx:end_idx]
         
         # Extract data
         batch_smiles = batch_df["smiles"].to_list()
         batch_fingerprints = np.array(batch_df["fingerprint"].to_list())
-        
-        # Pad batch if needed
-        current_batch_size = len(batch_smiles)
-        if current_batch_size < batch_size:
-            # Pad with the last item
-            while len(batch_smiles) < batch_size:
-                batch_smiles.append(batch_smiles[-1])
-                batch_fingerprints = np.vstack([batch_fingerprints, batch_fingerprints[-1:]])
         
         rng, batch_rng = jax.random.split(rng)
         
@@ -220,8 +213,8 @@ def run_evaluation(
             batch_rng,
         )
         
-        # Collect results (only up to current_batch_size to avoid duplicates from padding)
-        for i in range(current_batch_size):
+        # Collect results
+        for i in range(batch_size):
             results.original_smiles.append(batch_smiles[i])
             results.original_fingerprints.append(batch_fingerprints[i])
             results.generated_smiles.append(batch_generated[i])
