@@ -99,7 +99,6 @@ class SimpleMLP(nn.Module):
         for i, feat in enumerate(self.features[:-1]):
             x = nn.Dense(features=feat, name=f"cond_dense_{i}")(x)
             x = nn.swish(x)
-        
         # The final layer is the output layer and typically doesn't have an
         # activation function applied here (it might be applied in the loss function).
         x = nn.Dense(features=self.features[-1], name="cond_dense_out")(x)
@@ -143,7 +142,7 @@ class MD4(nn.Module):
         if self.classes > 0:
             self.cond_embeddings = nn.Embed(self.classes, self.feature_dim)
         if self.fingerprint_dim > 0:
-            self.cond_embeddings = SimpleMLP(features=[self.fingerprint_dim // 2, self.feature_dim, self.feature_dim])
+            self.cond_embeddings = SimpleMLP(features=[self.fingerprint_dim // 2, self.feature_dim * 4, self.feature_dim * 2, self.feature_dim])
 
         self.classifier = backward.DiscreteClassifier(
             n_layers=self.n_layers,
