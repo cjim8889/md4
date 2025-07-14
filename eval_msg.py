@@ -174,24 +174,27 @@ def save_batch_results(
     intermediate_dir: str,
 ):
     """Save results for a single batch to CSV."""
+    import json
+    
     os.makedirs(intermediate_dir, exist_ok=True)
     
     # Convert batch to rows
     batch_data = []
     batch_size = len(batch_smiles)
+
+    original_smiles_list = []
+    generated_smiles_list = []
     
     for i in range(batch_size):
         for j, gen_smi in enumerate(batch_generated[i]):
-            batch_data.append({
-                "batch_idx": batch_idx,
-                "sample_id": batch_idx * batch_size + i,  # Global sample ID
-                "batch_sample_id": i,  # Within-batch sample ID
-                "original_smiles": batch_smiles[i],
-                "generated_smiles": gen_smi,
-                "generation_idx": j,
-                "original_fingerprint": batch_fingerprints[i].tolist(),
-            })
-    
+            original_smiles_list.append(batch_smiles[i])
+            generated_smiles_list.append(gen_smi)
+
+    batch_data = {
+        "original_smiles": original_smiles_list,
+        "generated_smiles": generated_smiles_list,
+    }
+
     # Save to CSV
     batch_df = pl.DataFrame(batch_data)
     batch_file = os.path.join(intermediate_dir, f"batch_{batch_idx:04d}.csv")
