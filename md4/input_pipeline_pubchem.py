@@ -144,7 +144,6 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=2048):
         # Convert fingerprint arrays to proper 2D numpy array
         fingerprints = np.stack(split_df["fingerprint"].values).astype(np.int32)
         smiles = np.stack(split_df["smiles"].values).astype(np.dtype(str))
-
         ds = tf.data.Dataset.from_tensor_slices(
             {
                 "smiles": smiles,

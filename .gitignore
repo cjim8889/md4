@@ -25,3 +25,7 @@ MANIFEST
 
 expt/
 data/
+
+*.csv
+*.sh
+final_test/
