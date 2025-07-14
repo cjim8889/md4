@@ -23,7 +23,8 @@ from md4.configs.md4 import molecular
 FLAGS = flags.FLAGS
 flags.DEFINE_string("checkpoint_dir", "", "Directory containing checkpoints")
 flags.DEFINE_string("eval_data", "./data/msg/msg_processed.parquet", "Path to MSG eval dataset")
-flags.DEFINE_string("output_file", "./results/msg_eval_results.parquet", "Output file for results")
+flags.DEFINE_string("output_file", "./results/msg_eval_results.csv", "Output file for results")
+flags.DEFINE_string("intermediate_dir", "./results/intermediate", "Directory for intermediate batch results")
 flags.DEFINE_integer("num_samples", 10, "Number of SMILES to generate per data point")
 flags.DEFINE_integer("checkpoint_step", -1, "Checkpoint step to load (-1 for latest)")
 flags.DEFINE_string("tokenizer_path", "data/smiles_tokenizer", "Path to SMILES tokenizer")
@@ -165,6 +166,40 @@ def generate_samples_for_batch(
     return batch_results
 
 
+def save_batch_results(
+    batch_idx: int,
+    batch_smiles: List[str],
+    batch_fingerprints: np.ndarray,
+    batch_generated: List[List[str]],
+    intermediate_dir: str,
+):
+    """Save results for a single batch to CSV."""
+    os.makedirs(intermediate_dir, exist_ok=True)
+    
+    # Convert batch to rows
+    batch_data = []
+    batch_size = len(batch_smiles)
+    
+    for i in range(batch_size):
+        for j, gen_smi in enumerate(batch_generated[i]):
+            batch_data.append({
+                "batch_idx": batch_idx,
+                "sample_id": batch_idx * batch_size + i,  # Global sample ID
+                "batch_sample_id": i,  # Within-batch sample ID
+                "original_smiles": batch_smiles[i],
+                "generated_smiles": gen_smi,
+                "generation_idx": j,
+                "original_fingerprint": batch_fingerprints[i].tolist(),
+            })
+    
+    # Save to CSV
+    batch_df = pl.DataFrame(batch_data)
+    batch_file = os.path.join(intermediate_dir, f"batch_{batch_idx:04d}.csv")
+    batch_df.write_csv(batch_file)
+    
+    logging.info(f"Saved batch {batch_idx} results to {batch_file}")
+
+
 def run_evaluation(
     model: nn.Module,
     train_state: train.TrainState,
@@ -172,6 +207,7 @@ def run_evaluation(
     tokenizer: transformers.PreTrainedTokenizerFast,
     config: ml_collections.ConfigDict,
     num_samples: int,
+    intermediate_dir: str,
 ) -> EvalResults:
     """Run evaluation on the dataset."""
     rng = utils.get_rng(42)  # Fixed seed for reproducible evaluation
@@ -188,6 +224,7 @@ def run_evaluation(
     num_samples_processed = num_complete_batches * batch_size
     
     logging.info(f"Processing {num_samples_processed}/{len(eval_df)} samples in {num_complete_batches} complete batches")
+    logging.info(f"Intermediate batch results will be saved to: {intermediate_dir}")
     if num_samples_processed < len(eval_df):
         logging.info(f"Dropping {len(eval_df) - num_samples_processed} samples from incomplete last batch")
     
@@ -213,6 +250,15 @@ def run_evaluation(
             batch_rng,
         )
         
+        # Save batch results to intermediate CSV
+        save_batch_results(
+            batch_idx,
+            batch_smiles,
+            batch_fingerprints,
+            batch_generated,
+            intermediate_dir,
+        )
+        
         # Collect results
         for i in range(batch_size):
             results.original_smiles.append(batch_smiles[i])
@@ -221,6 +267,42 @@ def run_evaluation(
     
     logging.info(f"Generated {len(results.original_smiles)} sets of samples")
     return results
+
+
+def combine_intermediate_results(intermediate_dir: str, output_file: str):
+    """Combine all intermediate batch CSV files into final output."""
+    if not os.path.exists(intermediate_dir):
+        logging.warning(f"Intermediate directory {intermediate_dir} not found, skipping combination")
+        return
+    
+    # Find all batch CSV files
+    batch_files = sorted([
+        f for f in os.listdir(intermediate_dir) 
+        if f.startswith("batch_") and f.endswith(".csv")
+    ])
+    
+    if not batch_files:
+        logging.warning(f"No batch files found in {intermediate_dir}")
+        return
+    
+    logging.info(f"Combining {len(batch_files)} batch files into {output_file}")
+    
+    # Read and combine all batch files
+    all_dfs = []
+    for batch_file in batch_files:
+        batch_path = os.path.join(intermediate_dir, batch_file)
+        batch_df = pl.read_csv(batch_path)
+        all_dfs.append(batch_df)
+    
+    # Combine all DataFrames
+    combined_df = pl.concat(all_dfs)
+    
+    # Save as parquet (more efficient for large files)
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    combined_df.write_csv(output_file)
+    
+    logging.info(f"Combined results saved to {output_file}")
+    logging.info(f"Total samples: {len(combined_df)}")
 
 
 def save_results(results: EvalResults, output_file: str):
@@ -280,11 +362,14 @@ def main(argv):
     
     # Run evaluation
     results = run_evaluation(
-        model, train_state, eval_df, tokenizer, config, FLAGS.num_samples
+        model, train_state, eval_df, tokenizer, config, FLAGS.num_samples, FLAGS.intermediate_dir
     )
     
-    # Save results
-    save_results(results, FLAGS.output_file)
+    # Combine intermediate results into final output
+    combine_intermediate_results(FLAGS.intermediate_dir, FLAGS.output_file)
+    
+    # Also save using the traditional method as backup
+    save_results(results, FLAGS.output_file.replace('.parquet', '_backup.parquet'))
     
     logging.info("Evaluation completed successfully!")
 
