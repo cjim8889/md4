@@ -340,39 +340,39 @@ def save_results(results: EvalResults, output_file: str):
 def main(argv):
     del argv  # Unused
     
-    # Validate inputs
-    if not FLAGS.checkpoint_dir:
-        raise ValueError("Must specify --checkpoint_dir")
+    # # Validate inputs
+    # if not FLAGS.checkpoint_dir:
+    #     raise ValueError("Must specify --checkpoint_dir")
     
-    if not os.path.exists(FLAGS.checkpoint_dir):
-        raise ValueError(f"Checkpoint directory not found: {FLAGS.checkpoint_dir}")
+    # if not os.path.exists(FLAGS.checkpoint_dir):
+    #     raise ValueError(f"Checkpoint directory not found: {FLAGS.checkpoint_dir}")
     
-    logging.info("Starting MSG evaluation...")
+    # logging.info("Starting MSG evaluation...")
     
-    # Load configuration
-    config = load_config()
-    logging.info(f"Loaded config with vocab_size={config.vocab_size}")
+    # # Load configuration
+    # config = load_config()
+    # logging.info(f"Loaded config with vocab_size={config.vocab_size}")
     
-    # Load model and checkpoint
-    model, train_state = load_model_and_state(config, FLAGS.checkpoint_dir)
-    logging.info("Model and checkpoint loaded successfully")
+    # # Load model and checkpoint
+    # model, train_state = load_model_and_state(config, FLAGS.checkpoint_dir)
+    # logging.info("Model and checkpoint loaded successfully")
     
-    # Load tokenizer
-    tokenizer = load_tokenizer(FLAGS.tokenizer_path)
+    # # Load tokenizer
+    # tokenizer = load_tokenizer(FLAGS.tokenizer_path)
     
-    # Load evaluation data
-    eval_df = load_eval_data(FLAGS.eval_data)
+    # # Load evaluation data
+    # eval_df = load_eval_data(FLAGS.eval_data)
     
-    # Run evaluation
-    results = run_evaluation(
-        model, train_state, eval_df, tokenizer, config, FLAGS.num_samples, FLAGS.intermediate_dir
-    )
+    # # Run evaluation
+    # results = run_evaluation(
+    #     model, train_state, eval_df, tokenizer, config, FLAGS.num_samples, FLAGS.intermediate_dir
+    # )
     
     # Combine intermediate results into final output
     combine_intermediate_results(FLAGS.intermediate_dir, FLAGS.output_file)
     
     # Also save using the traditional method as backup
-    save_results(results, FLAGS.output_file.replace('.parquet', '_backup.parquet'))
+    # save_results(results, FLAGS.output_file.replace('.parquet', '_backup.parquet'))
     
     logging.info("Evaluation completed successfully!")
 
