@@ -29,7 +29,7 @@ def get_config() -> config_dict.ConfigDict:
   config.cont_time = True
   config.fingerprint_dim = 4096
 
-  config.feature_dim = 64
+  config.feature_dim = 128
   config.n_layers = 12
   config.ch_mult = (1,)  # not used
   config.n_dit_layers = 0  # not used
