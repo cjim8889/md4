@@ -52,7 +52,7 @@ def get_config() -> config_dict.ConfigDict:
   config.ema_rate = 0.9999
   # If num_train_steps==-1 then the number of training steps is calculated from
   # num_epochs.
-  config.num_train_steps = 5_000_000
+  config.num_train_steps = 2_000_000
   # Evaluates for a full epoch if num_eval_steps==-1.
   config.num_eval_steps = 1000
   config.batch_size = 256
@@ -71,8 +71,8 @@ def get_config() -> config_dict.ConfigDict:
   config.topp = 0.98
 
   config.log_loss_every_steps = 10000
-  config.eval_every_steps = 100000
-  config.checkpoint_every_steps = 100000
+  config.eval_every_steps = 20000
+  config.checkpoint_every_steps = 20000
   config.checkpoint_keep_period = 400000
 
   # Single integer or tuple. If None will use (XManager ID, work unit).
