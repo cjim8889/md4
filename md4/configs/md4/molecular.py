@@ -20,7 +20,7 @@ def get_config() -> config_dict.ConfigDict:
   config.data_shape = (config.max_length,)
 
   # timesteps: int or None
-  config.timesteps = 500
+  config.timesteps = 1000
   # linear, cosine, poly[exponent], e.g., poly3
   config.noise_schedule = "linear"
   config.outside_embed = True
