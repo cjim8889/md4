@@ -22,7 +22,7 @@ def get_config() -> config_dict.ConfigDict:
   # timesteps: int or None
   config.timesteps = 1000
   # linear, cosine, poly[exponent], e.g., poly3
-  config.noise_schedule = "linear"
+  config.noise_schedule = "cosine"
   config.outside_embed = True
   # t or none (removes time dependence)
   config.time_features = "t"
@@ -35,7 +35,7 @@ def get_config() -> config_dict.ConfigDict:
   config.n_dit_layers = 0  # not used
   config.dit_num_heads = 12  # not used
   config.dit_hidden_size = 768  # not used
-  config.dropout_rate = 0.0
+  config.dropout_rate = 0.02
 
   config.num_heads = 8
   config.mlp_type = "glu"
@@ -45,7 +45,7 @@ def get_config() -> config_dict.ConfigDict:
   config.learning_rate = 3e-4
   config.learning_rate_schedule = "cosine"
   config.warmup_steps = 10000
-  config.weight_decay = 0.0
+  config.weight_decay = 1e-06
   config.clip = 0.0
   config.b2 = 0.999
   config.num_epochs = -1
