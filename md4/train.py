@@ -91,7 +91,9 @@ def _get_checkpoint_manager(
         checkpointers=checkpointers,
         options=orbax_checkpoint.CheckpointManagerOptions(
             create=True,
-            preservation_policy=orbax_checkpoint.checkpoint_managers.LatestN(n=10),
+            preservation_policy=orbax_checkpoint.checkpoint_managers.BestN(
+                n=10, get_metric_fn=lambda x: x["validation_loss"]
+            )
         ),
     )
 
@@ -643,6 +645,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                             ),
                             train_iter=train_iter,
                         ),
+                        metrics=eval_metrics_cpu
                     )
 
     logging.info("Finishing training at step %d", num_train_steps)
