@@ -236,8 +236,8 @@ class MD4(nn.Module):
     
     def bracket_loss(self, logits): 
         # 2. Probability mass for open / close brackets
-        open_idx  = jnp.array([6, 45,])
-        close_idx = jnp.array([7, 46])
+        open_idx  = jnp.array([6,])
+        close_idx = jnp.array([7,])
 
         open_p  = logits[:, open_idx].sum(-1)             # [L]
         close_p = logits[:, close_idx].sum(-1)            # [L]
@@ -248,7 +248,7 @@ class MD4(nn.Module):
 
         # 4. Penalties (same formula as PyTorch version)
         negative_balance = jnp.maximum(close_cum - open_cum, 0.0).mean()          # scalar
-        final_imbalance  = jnp.abs(open_cum[-1] - close_cum[-1])                  # scalar
+        final_imbalance  = jnp.abs(open_cum[-1] - close_cum[-1])               # scalar
         running_imb      = jnp.abs(open_cum - close_cum).mean()                   # scalar
 
         return negative_balance + final_imbalance + running_imb
