@@ -645,7 +645,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                             ),
                             train_iter=train_iter,
                         ),
-                        metrics=eval_metrics_cpu
+                        metrics=jax.tree_util.tree_map(lambda x: x.item(), eval_metrics_cpu)
                     )
 
     logging.info("Finishing training at step %d", num_train_steps)
