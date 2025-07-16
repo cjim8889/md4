@@ -20,22 +20,22 @@ def get_config() -> config_dict.ConfigDict:
   config.data_shape = (config.max_length,)
 
   # timesteps: int or None
-  config.timesteps = 1000
+  config.timesteps = 500
   # linear, cosine, poly[exponent], e.g., poly3
   config.noise_schedule = "cosine"
   config.outside_embed = True
   # t or none (removes time dependence)
   config.time_features = "t"
   config.cont_time = True
-  config.fingerprint_dim = 4096
+  config.fingerprint_dim = 1024
 
-  config.feature_dim = 128
+  config.feature_dim = 64
   config.n_layers = 12
   config.ch_mult = (1,)  # not used
   config.n_dit_layers = 0  # not used
   config.dit_num_heads = 12  # not used
   config.dit_hidden_size = 768  # not used
-  config.dropout_rate = 0.02
+  config.dropout_rate = 0.1
 
   config.num_heads = 8
   config.mlp_type = "glu"
@@ -52,7 +52,7 @@ def get_config() -> config_dict.ConfigDict:
   config.ema_rate = 0.9999
   # If num_train_steps==-1 then the number of training steps is calculated from
   # num_epochs.
-  config.num_train_steps = 2_000_000
+  config.num_train_steps = 4_000_000
   # Evaluates for a full epoch if num_eval_steps==-1.
   config.num_eval_steps = 1000
   config.batch_size = 256
@@ -71,8 +71,8 @@ def get_config() -> config_dict.ConfigDict:
   config.topp = 0.98
 
   config.log_loss_every_steps = 10000
-  config.eval_every_steps = 20000
-  config.checkpoint_every_steps = 20000
+  config.eval_every_steps = 50000
+  config.checkpoint_every_steps = 50000
   config.checkpoint_keep_period = 400000
 
   # Single integer or tuple. If None will use (XManager ID, work unit).

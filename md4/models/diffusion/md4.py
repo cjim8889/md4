@@ -142,7 +142,7 @@ class MD4(nn.Module):
         if self.classes > 0:
             self.cond_embeddings = nn.Embed(self.classes, self.feature_dim)
         if self.fingerprint_dim > 0:
-            self.cond_embeddings = SimpleMLP(features=[self.fingerprint_dim // 2, self.feature_dim * 4, self.feature_dim * 2, self.feature_dim])
+            self.cond_embeddings = SimpleMLP(features=[self.fingerprint_dim // 2, self.feature_dim * 2, self.feature_dim * 2, self.feature_dim])
 
         self.classifier = backward.DiscreteClassifier(
             n_layers=self.n_layers,
