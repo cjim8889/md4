@@ -35,7 +35,7 @@ def get_config() -> config_dict.ConfigDict:
   config.n_dit_layers = 0  # not used
   config.dit_num_heads = 12  # not used
   config.dit_hidden_size = 768  # not used
-  config.dropout_rate = 0.0
+  config.dropout_rate = 0.02
 
   config.num_heads = 8
   config.mlp_type = "glu"
@@ -71,9 +71,9 @@ def get_config() -> config_dict.ConfigDict:
   config.topp = 0.98
 
   config.log_loss_every_steps = 10000
-  config.eval_every_steps = 100000
-  config.checkpoint_every_steps = 100000
-  config.checkpoint_keep_period = 400000
+  config.eval_every_steps = 50000
+  config.checkpoint_every_steps = 50000
+  config.checkpoint_keep_period = 300000
 
   # Single integer or tuple. If None will use (XManager ID, work unit).
   config.seed = 88
