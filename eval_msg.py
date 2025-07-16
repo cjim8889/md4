@@ -250,9 +250,12 @@ def generate_samples_for_batch(
     """Generate multiple SMILES samples for a batch of fingerprints."""
     batch_size = fingerprints.shape[0]
     
+    # Process fingerprints: convert to binary (0/1) with threshold 0.5 and fold from 4096 to 2048 bits
+    processed_fingerprints = process_fingerprints(fingerprints, threshold=0.5, fold_factor=2)
+    
     # Repeat fingerprints num_samples times
     # Shape: (batch_size * num_samples, fingerprint_dim)
-    conditioning = jnp.repeat(jnp.array(fingerprints, dtype=jnp.int32), num_samples, axis=0)
+    conditioning = jnp.repeat(jnp.array(processed_fingerprints, dtype=jnp.int32), num_samples, axis=0)
     
     # Generate all samples in one call
     samples = sampling.simple_generate(
@@ -481,6 +484,54 @@ def save_results(results: EvalResults, output_file: str):
         logging.info(f"- Original format: InChI (converted to SMILES)")
     else:
         logging.info(f"- Original format: SMILES")
+
+
+def process_fingerprints(fingerprints: np.ndarray, threshold: float = 0.5, fold_factor: int = 2) -> np.ndarray:
+    """Process fingerprints by thresholding and folding.
+    
+    Args:
+        fingerprints: Input fingerprints array
+        threshold: Threshold for converting to binary (0/1)
+        fold_factor: Factor by which to fold the fingerprints
+    
+    Returns:
+        Processed fingerprints array
+    """
+    if not RDKIT_AVAILABLE:
+        logging.warning("RDKit not available, skipping fingerprint processing")
+        return fingerprints
+    
+    try:
+        # Convert to binary with threshold
+        binary_fingerprints = (fingerprints >= threshold).astype(np.int32)
+        
+        # Fold the fingerprints using numpy operations
+        # Simple folding by taking OR of adjacent bits
+        original_length = binary_fingerprints.shape[1]
+        target_length = original_length // fold_factor
+        
+        if target_length == 0:
+            target_length = 1
+        
+        folded_fingerprints = []
+        for fp in binary_fingerprints:
+            # Reshape to fold_factor x target_length and take OR
+            if len(fp) >= target_length * fold_factor:
+                # Trim to make divisible
+                fp_trimmed = fp[:target_length * fold_factor]
+                fp_reshaped = fp_trimmed.reshape(fold_factor, target_length)
+                folded_fp = np.any(fp_reshaped, axis=0).astype(np.int32)
+            else:
+                # If too small, just return as-is
+                folded_fp = fp
+            
+            folded_fingerprints.append(folded_fp)
+        
+        return np.array(folded_fingerprints)
+        
+    except Exception as e:
+        logging.warning(f"Failed to process fingerprints: {e}")
+        return fingerprints
 
 
 def main(argv):
