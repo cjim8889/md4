@@ -495,6 +495,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
 
     # Retrieve data from previous checkpoints if possible.
     checkpointed_state = dict(train_state=train_state, train_iter=train_iter)
+    print(f"Checkpoint state: {checkpointed_state.keys()}")
+
     if checkpoint_manager.latest_step() is not None:
         checkpointed_state = checkpoint_manager.restore(
             checkpoint_manager.latest_step(), items=checkpointed_state
