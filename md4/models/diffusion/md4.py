@@ -261,7 +261,7 @@ class MD4(nn.Module):
         # sample z_t
         zt = self.forward_sample(x, t)
         logits, _ = self.predict_x(zt, t, cond=cond, train=train)
-        loss_bracket = self.bracket_loss(logits)
+        loss_bracket = self.bracket_loss(logits)[0]
         log_p = jax.nn.log_softmax(logits, axis=-1)
         one_hot_x = jax.nn.one_hot(x, self.vocab_size)
         neg_cross_ent = one_hot_x * log_p
