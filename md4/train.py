@@ -91,8 +91,11 @@ def _get_checkpoint_manager(
         checkpointers=checkpointers,
         options=orbax_checkpoint.CheckpointManagerOptions(
             create=True,
-            preservation_policy=orbax_checkpoint.checkpoint_managers.BestN(
-                n=10, get_metric_fn=lambda x: x["validation_loss"]
+            # preservation_policy=orbax_checkpoint.checkpoint_managers.BestN(
+            #     n=10, get_metric_fn=lambda x: x["validation_loss"]
+            # )
+            preservation_policy= orbax_checkpoint.checkpoint_managers.LatestN(
+                n=20
             )
         ),
     )
@@ -542,6 +545,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
 
     # Unreplicating from TPU is costly, so we only do it once at the start.
     initial_step = int(flax.jax_utils.unreplicate(train_state.step))
+    eval_metrics_cpu = None
 
     with metric_writers.ensure_flushes(writer):
         # Steps are in interval [1, num_train_steps], not [0, num_train_steps - 1].
@@ -593,6 +597,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                     eval_metrics_cpu = {
                         split + "_" + k: v for k, v in eval_metrics_cpu.items()
                     }
+
+                    print(f"Eval metrics for {split}: {eval_metrics_cpu}")
                     writer.write_scalars(step, eval_metrics_cpu)
 
                 if hasattr(model, "sample_step"):
