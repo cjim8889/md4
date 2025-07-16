@@ -91,6 +91,7 @@ def _get_checkpoint_manager(
         checkpointers=checkpointers,
         options=orbax_checkpoint.CheckpointManagerOptions(
             create=True,
+            # preservation_policy=orbax_checkpoint.checkpoint_managers.LatestN(n=20),
             best_fn=lambda x: x["validation_loss"] if "validation_loss" in x else x["loss"],
             max_to_keep=20,
         ),
@@ -495,8 +496,6 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
 
     # Retrieve data from previous checkpoints if possible.
     checkpointed_state = dict(train_state=train_state, train_iter=train_iter)
-    print(f"Checkpoint state: {checkpointed_state.keys()}")
-
     if checkpoint_manager.latest_step() is not None:
         checkpointed_state = checkpoint_manager.restore(
             checkpoint_manager.latest_step(), items=checkpointed_state
@@ -543,7 +542,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
 
     # Unreplicating from TPU is costly, so we only do it once at the start.
     initial_step = int(flax.jax_utils.unreplicate(train_state.step))
-
+    eval_metrics_cpu = None
     with metric_writers.ensure_flushes(writer):
         # Steps are in interval [1, num_train_steps], not [0, num_train_steps - 1].
         for step in range(initial_step + 1, num_train_steps + 1):
@@ -646,6 +645,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                             ),
                             train_iter=train_iter,
                         ),
+                        metrics=eval_metrics_cpu
                     )
 
     logging.info("Finishing training at step %d", num_train_steps)
