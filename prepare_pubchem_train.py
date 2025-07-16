@@ -183,4 +183,4 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096):
 
 
 if __name__ == "__main__":
-    preprocess_pubchem(data_dir="data/pubchem")
+    preprocess_pubchem(data_dir="data/pubchem", fp_bits=2048)

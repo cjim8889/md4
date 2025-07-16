@@ -27,7 +27,7 @@ def get_config() -> config_dict.ConfigDict:
   # t or none (removes time dependence)
   config.time_features = "t"
   config.cont_time = True
-  config.fingerprint_dim = 1024
+  config.fingerprint_dim = 2048
 
   config.feature_dim = 64
   config.n_layers = 12
