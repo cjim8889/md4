@@ -29,3 +29,6 @@ data/
 *.csv
 *.sh
 final_test/
+
+results/
+*.parquet

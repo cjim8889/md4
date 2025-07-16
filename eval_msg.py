@@ -3,7 +3,7 @@
 
 import dataclasses
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import flax.linen as nn
 import jax
@@ -15,6 +15,13 @@ import transformers
 from absl import app, flags, logging
 from orbax import checkpoint as orbax_checkpoint
 from tqdm import tqdm
+
+try:
+    from rdkit import Chem
+    RDKIT_AVAILABLE = True
+except ImportError:
+    RDKIT_AVAILABLE = False
+    logging.warning("RDKit not available. InChI to SMILES conversion will not work.")
 
 # Import MD4 modules
 from md4 import sampling, train, utils
@@ -37,14 +44,18 @@ class EvalResults:
     original_smiles: List[str]
     original_fingerprints: List[np.ndarray]
     generated_smiles: List[List[str]]
+    original_inchi: Optional[List[str]] = None  # Store original InChI if available
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for saving."""
-        return {
+        result = {
             "original_smiles": self.original_smiles,
             "original_fingerprints": [fp.tolist() for fp in self.original_fingerprints],
             "generated_smiles": self.generated_smiles,
         }
+        if self.original_inchi:
+            result["original_inchi"] = self.original_inchi
+        return result
 
 
 def load_config() -> ml_collections.ConfigDict:
@@ -114,6 +125,109 @@ def load_eval_data(eval_data_path: str) -> pl.DataFrame:
     return df
 
 
+def inchi_to_smiles(inchi: str) -> Optional[str]:
+    """Convert InChI to SMILES using RDKit."""
+    if not RDKIT_AVAILABLE:
+        raise ImportError("RDKit is required for InChI to SMILES conversion")
+    
+    try:
+        mol = Chem.MolFromInchi(inchi)
+        if mol is None:
+            return None
+        return Chem.MolToSmiles(mol)
+    except Exception as e:
+        logging.warning(f"Failed to convert InChI to SMILES: {inchi[:50]}... Error: {e}")
+        return None
+
+
+def detect_molecular_format_and_prepare_data(eval_df: pl.DataFrame) -> Tuple[List[str], Optional[List[str]]]:
+    """
+    Detect whether the dataframe contains SMILES or InChI and prepare data accordingly.
+    
+    Returns:
+        Tuple of (smiles_list, original_inchi_list)
+        If original data was InChI, original_inchi_list will contain the original InChI strings
+        If original data was SMILES, original_inchi_list will be None
+    """
+    columns = eval_df.columns
+    
+    # Check for different possible column names
+    smiles_columns = [col for col in columns if 'smiles' in col.lower()]
+    inchi_columns = [col for col in columns if 'inchi' in col.lower()]
+    
+    if smiles_columns:
+        # SMILES data found
+        smiles_col = smiles_columns[0]  # Use first SMILES column found
+        logging.info(f"Found SMILES data in column: {smiles_col}")
+        smiles_list = eval_df[smiles_col].to_list()
+        return smiles_list, None
+        
+    elif inchi_columns:
+        # InChI data found
+        inchi_col = inchi_columns[0]  # Use first InChI column found
+        logging.info(f"Found InChI data in column: {inchi_col}")
+        
+        if not RDKIT_AVAILABLE:
+            raise ImportError(
+                "RDKit is required to convert InChI to SMILES. "
+                "Please install RDKit: conda install -c conda-forge rdkit"
+            )
+        
+        inchi_list = eval_df[inchi_col].to_list()
+        logging.info("Converting InChI to SMILES...")
+        
+        smiles_list = []
+        valid_inchi_list = []
+        conversion_failures = 0
+        
+        for i, inchi in enumerate(tqdm(inchi_list, desc="Converting InChI to SMILES")):
+            smiles = inchi_to_smiles(inchi)
+            if smiles is not None:
+                smiles_list.append(smiles)
+                valid_inchi_list.append(inchi)
+            else:
+                conversion_failures += 1
+                logging.warning(f"Failed to convert InChI at index {i}: {inchi[:50]}...")
+        
+        if conversion_failures > 0:
+            logging.warning(f"Failed to convert {conversion_failures}/{len(inchi_list)} InChI strings to SMILES")
+            logging.info(f"Proceeding with {len(smiles_list)} successfully converted molecules")
+        else:
+            logging.info(f"Successfully converted all {len(smiles_list)} InChI strings to SMILES")
+        
+        return smiles_list, valid_inchi_list
+    
+    else:
+        # Try to detect automatically based on content
+        possible_mol_columns = [col for col in columns if any(
+            keyword in col.lower() 
+            for keyword in ['mol', 'compound', 'structure', 'chemical']
+        )]
+        
+        if possible_mol_columns:
+            test_col = possible_mol_columns[0]
+            test_values = eval_df[test_col].head(10).to_list()
+            
+            # Check if values look like InChI (start with "InChI=")
+            inchi_count = sum(1 for val in test_values if isinstance(val, str) and val.startswith("InChI="))
+            
+            if inchi_count > len(test_values) // 2:  # More than half look like InChI
+                logging.info(f"Auto-detected InChI format in column: {test_col}")
+                return detect_molecular_format_and_prepare_data(
+                    eval_df.rename({test_col: "inchi"})
+                )
+            else:
+                logging.info(f"Auto-detected SMILES format in column: {test_col}")
+                return detect_molecular_format_and_prepare_data(
+                    eval_df.rename({test_col: "smiles"})
+                )
+        
+        raise ValueError(
+            f"Could not detect molecular format. Available columns: {columns}. "
+            "Expected columns containing 'smiles' or 'inchi' in their names."
+        )
+
+
 def load_tokenizer(tokenizer_path: str) -> transformers.PreTrainedTokenizerFast:
     """Load SMILES tokenizer."""
     try:
@@ -172,6 +286,7 @@ def save_batch_results(
     batch_fingerprints: np.ndarray,
     batch_generated: List[List[str]],
     intermediate_dir: str,
+    batch_inchi: Optional[List[str]] = None,
 ):
     """Save results for a single batch to CSV."""
     import json
@@ -179,21 +294,26 @@ def save_batch_results(
     os.makedirs(intermediate_dir, exist_ok=True)
     
     # Convert batch to rows
-    batch_data = []
     batch_size = len(batch_smiles)
 
     original_smiles_list = []
     generated_smiles_list = []
+    original_inchi_list = []
     
     for i in range(batch_size):
         for j, gen_smi in enumerate(batch_generated[i]):
             original_smiles_list.append(batch_smiles[i])
             generated_smiles_list.append(gen_smi)
+            if batch_inchi is not None:
+                original_inchi_list.append(batch_inchi[i])
 
     batch_data = {
         "original_smiles": original_smiles_list,
         "generated_smiles": generated_smiles_list,
     }
+    
+    if batch_inchi is not None:
+        batch_data["original_inchi"] = original_inchi_list
 
     # Save to CSV
     batch_df = pl.DataFrame(batch_data)
@@ -215,10 +335,22 @@ def run_evaluation(
     """Run evaluation on the dataset."""
     rng = utils.get_rng(42)  # Fixed seed for reproducible evaluation
     
+    # Detect molecular format and prepare data
+    smiles_list, original_inchi_list = detect_molecular_format_and_prepare_data(eval_df)
+    
+    # Filter the dataframe to only include successfully converted molecules
+    if original_inchi_list is not None:
+        # We had InChI data that was converted to SMILES
+        # Filter both the dataframe and inchi list to match the successful conversions
+        valid_indices = [i for i, (smiles, inchi) in enumerate(zip(smiles_list, original_inchi_list)) if smiles is not None]
+        eval_df = eval_df[valid_indices]
+        logging.info(f"Filtered dataset to {len(eval_df)} samples with successful InChI->SMILES conversion")
+    
     results = EvalResults(
         original_smiles=[],
         original_fingerprints=[],
         generated_smiles=[],
+        original_inchi=[] if original_inchi_list is not None else None,
     )
     
     # Process in batches, drop incomplete last batch
@@ -237,8 +369,9 @@ def run_evaluation(
         batch_df = eval_df[start_idx:end_idx]
         
         # Extract data
-        batch_smiles = batch_df["smiles"].to_list()
-        batch_fingerprints = np.array(batch_df["fingerprint"].to_list())
+        batch_smiles = smiles_list[start_idx:end_idx]
+        batch_fingerprints = np.array(batch_df["predicted_fingerprint"].to_list())
+        batch_inchi = original_inchi_list[start_idx:end_idx] if original_inchi_list is not None else None
         
         rng, batch_rng = jax.random.split(rng)
         
@@ -260,6 +393,7 @@ def run_evaluation(
             batch_fingerprints,
             batch_generated,
             intermediate_dir,
+            batch_inchi,
         )
         
         # Collect results
@@ -267,6 +401,8 @@ def run_evaluation(
             results.original_smiles.append(batch_smiles[i])
             results.original_fingerprints.append(batch_fingerprints[i])
             results.generated_smiles.append(batch_generated[i])
+            if results.original_inchi is not None and batch_inchi is not None:
+                results.original_inchi.append(batch_inchi[i])
     
     logging.info(f"Generated {len(results.original_smiles)} sets of samples")
     return results
@@ -318,13 +454,19 @@ def save_results(results: EvalResults, output_file: str):
         zip(results.original_smiles, results.original_fingerprints, results.generated_smiles)
     ):
         for j, gen_smi in enumerate(gen_smiles):
-            data.append({
+            row = {
                 "sample_id": i,
                 "original_smiles": orig_smiles,
                 "generated_smiles": gen_smi,
                 "generation_idx": j,
                 "original_fingerprint": orig_fp.tolist(),
-            })
+            }
+            
+            # Add original InChI if available
+            if results.original_inchi is not None:
+                row["original_inchi"] = results.original_inchi[i]
+            
+            data.append(row)
     
     df = pl.DataFrame(data)
     df.write_parquet(output_file)
@@ -335,38 +477,42 @@ def save_results(results: EvalResults, output_file: str):
     logging.info(f"- Total original molecules: {len(results.original_smiles)}")
     logging.info(f"- Samples per molecule: {FLAGS.num_samples}")
     logging.info(f"- Total generated samples: {len(data)}")
+    if results.original_inchi is not None:
+        logging.info(f"- Original format: InChI (converted to SMILES)")
+    else:
+        logging.info(f"- Original format: SMILES")
 
 
 def main(argv):
     del argv  # Unused
     
     # # Validate inputs
-    # if not FLAGS.checkpoint_dir:
-    #     raise ValueError("Must specify --checkpoint_dir")
+    if not FLAGS.checkpoint_dir:
+        raise ValueError("Must specify --checkpoint_dir")
     
-    # if not os.path.exists(FLAGS.checkpoint_dir):
-    #     raise ValueError(f"Checkpoint directory not found: {FLAGS.checkpoint_dir}")
+    if not os.path.exists(FLAGS.checkpoint_dir):
+        raise ValueError(f"Checkpoint directory not found: {FLAGS.checkpoint_dir}")
     
-    # logging.info("Starting MSG evaluation...")
+    logging.info("Starting MSG evaluation...")
     
-    # # Load configuration
-    # config = load_config()
-    # logging.info(f"Loaded config with vocab_size={config.vocab_size}")
+    # Load configuration
+    config = load_config()
+    logging.info(f"Loaded config with vocab_size={config.vocab_size}")
     
-    # # Load model and checkpoint
-    # model, train_state = load_model_and_state(config, FLAGS.checkpoint_dir)
-    # logging.info("Model and checkpoint loaded successfully")
+    # Load model and checkpoint
+    model, train_state = load_model_and_state(config, FLAGS.checkpoint_dir)
+    logging.info("Model and checkpoint loaded successfully")
     
-    # # Load tokenizer
-    # tokenizer = load_tokenizer(FLAGS.tokenizer_path)
+    # Load tokenizer
+    tokenizer = load_tokenizer(FLAGS.tokenizer_path)
     
-    # # Load evaluation data
-    # eval_df = load_eval_data(FLAGS.eval_data)
+    # Load evaluation data
+    eval_df = load_eval_data(FLAGS.eval_data)
     
-    # # Run evaluation
-    # results = run_evaluation(
-    #     model, train_state, eval_df, tokenizer, config, FLAGS.num_samples, FLAGS.intermediate_dir
-    # )
+    # Run evaluation
+    results = run_evaluation(
+        model, train_state, eval_df, tokenizer, config, FLAGS.num_samples, FLAGS.intermediate_dir
+    )
     
     # Combine intermediate results into final output
     combine_intermediate_results(FLAGS.intermediate_dir, FLAGS.output_file)
@@ -378,4 +524,4 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    app.run(main) 
+    app.run(main)
