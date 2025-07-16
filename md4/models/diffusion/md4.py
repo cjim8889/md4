@@ -312,7 +312,8 @@ class MD4(nn.Module):
         else:
             t = jax.random.uniform(rng1, shape=[bs])
 
-        loss_diff, loss_bracket = self.diffusion_loss(t, x, cond=cond, train=train).mean()
+        loss_diff, loss_bracket = self.diffusion_loss(t, x, cond=cond, train=train)
+        loss_diff = loss_diff.mean()
         loss = loss_diff + loss_prior + loss_recon + 0.1 * loss_bracket
 
         model_stats = {
