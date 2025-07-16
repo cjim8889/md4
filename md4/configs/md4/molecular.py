@@ -22,12 +22,12 @@ def get_config() -> config_dict.ConfigDict:
   # timesteps: int or None
   config.timesteps = 500
   # linear, cosine, poly[exponent], e.g., poly3
-  config.noise_schedule = "linear"
+  config.noise_schedule = "cosine"
   config.outside_embed = True
   # t or none (removes time dependence)
   config.time_features = "t"
   config.cont_time = True
-  config.fingerprint_dim = 4096
+  config.fingerprint_dim = 2048
 
   config.feature_dim = 64
   config.n_layers = 12
