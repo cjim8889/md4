@@ -23,6 +23,7 @@ import jax
 import jax.numpy as jnp
 import tensorflow_probability.substrates.jax as tfp
 
+from transformers import PreTrainedTokenizerFast
 from md4 import binary_search
 from md4 import utils
 from md4.models import backward
@@ -232,6 +233,25 @@ class MD4(nn.Module):
     def latent_loss(self):
         # negligible
         return jnp.array(0.0)
+    
+    def bracket_loss(self, logits): 
+        # 2. Probability mass for open / close brackets
+        open_idx  = jnp.array([6, 45,])
+        close_idx = jnp.array([7, 46])
+
+        open_p  = logits[:, open_idx].sum(-1)             # [L]
+        close_p = logits[:, close_idx].sum(-1)            # [L]
+
+        # 3. Running expected counts
+        open_cum  = jnp.cumsum(open_p,  axis=0)          # [L]
+        close_cum = jnp.cumsum(close_p, axis=0)          # [L]
+
+        # 4. Penalties (same formula as PyTorch version)
+        negative_balance = jnp.maximum(close_cum - open_cum, 0.0).mean()          # scalar
+        final_imbalance  = jnp.abs(open_cum[-1] - close_cum[-1])                  # scalar
+        running_imb      = jnp.abs(open_cum - close_cum).mean()                   # scalar
+
+        return negative_balance + final_imbalance + running_imb
 
     def diffusion_loss(self, t, x, cond=None, train=False):
         if not self.cont_time:
@@ -241,6 +261,7 @@ class MD4(nn.Module):
         # sample z_t
         zt = self.forward_sample(x, t)
         logits, _ = self.predict_x(zt, t, cond=cond, train=train)
+        loss_bracket = self.bracket_loss(logits)
         log_p = jax.nn.log_softmax(logits, axis=-1)
         one_hot_x = jax.nn.one_hot(x, self.vocab_size)
         neg_cross_ent = one_hot_x * log_p
@@ -268,7 +289,7 @@ class MD4(nn.Module):
             loss_diff = self.noise_schedule.dgamma_times_alpha(t) * masked_neg_cross_ent
 
         # loss_diff: [bs]
-        return loss_diff
+        return loss_diff, loss_bracket
 
     @nn.compact
     def __call__(self, x, cond=None, train=False):
@@ -291,14 +312,15 @@ class MD4(nn.Module):
         else:
             t = jax.random.uniform(rng1, shape=[bs])
 
-        loss_diff = self.diffusion_loss(t, x, cond=cond, train=train).mean()
-        loss = loss_diff + loss_prior + loss_recon
+        loss_diff, loss_bracket = self.diffusion_loss(t, x, cond=cond, train=train).mean()
+        loss = loss_diff + loss_prior + loss_recon + 0.1 * loss_bracket
 
         model_stats = {
             "loss": loss,
             "loss_diff": loss_diff,
             "loss_prior": loss_prior,
             "loss_recon": loss_recon,
+            "loss_bracket": loss_bracket,
         }
         model_stats = utils.loss2bpt(model_stats, self.data_shape)
         return model_stats
