@@ -163,7 +163,7 @@ def train_safe_tokenizer(
     return fast_tokenizer
 
 
-def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096, vocab_size=1000, min_frequency=200, pad_to_length=128):
+def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096, vocab_size=1000, min_frequency=200, pad_to_length=128, retrain_tokenizer=False):
     """Load and preprocess PubChem dataset with SAFE encoding and tokenizer training."""
 
     if not SAFE_AVAILABLE:
@@ -183,9 +183,12 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096, vocab_size=1000, min
         pubchem_train_df = pl.read_parquet(pubchem_train_path)
         pubchem_val_df = pl.read_parquet(pubchem_val_path)
         
-        # Extract SAFE data for tokenizer training if tokenizer doesn't exist
-        if not os.path.exists(tokenizer_path):
-            print("Training SAFE tokenizer on existing data...")
+        # Extract SAFE data for tokenizer training if tokenizer doesn't exist OR retrain flag is set
+        if not os.path.exists(tokenizer_path) or retrain_tokenizer:
+            if retrain_tokenizer and os.path.exists(tokenizer_path):
+                print("Retraining SAFE tokenizer (retrain_tokenizer flag is set)...")
+            else:
+                print("Training SAFE tokenizer on existing data...")
             safe_data = pubchem_train_df["safe"].to_list()
             train_safe_tokenizer(
                 safe_data=safe_data,
@@ -350,5 +353,6 @@ if __name__ == "__main__":
     parser.add_argument("--vocab_size", type=int, default=1024)
     parser.add_argument("--min_frequency", type=int, default=200)
     parser.add_argument("--pad_to_length", type=int, default=128)
+    parser.add_argument("--retrain_tokenizer", action="store_true", help="Retrain tokenizer even if it already exists")
     args = parser.parse_args()
-    preprocess_pubchem(data_dir=args.data_dir, fp_bits=args.fp_bits, vocab_size=args.vocab_size, min_frequency=args.min_frequency, pad_to_length=args.pad_to_length)
+    preprocess_pubchem(data_dir=args.data_dir, fp_bits=args.fp_bits, vocab_size=args.vocab_size, min_frequency=args.min_frequency, pad_to_length=args.pad_to_length, retrain_tokenizer=args.retrain_tokenizer)
