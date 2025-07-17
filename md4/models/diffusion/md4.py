@@ -334,7 +334,7 @@ class MD4(nn.Module):
             "loss_diff": loss_diff,
             "loss_prior": loss_prior,
             "loss_recon": loss_recon,
-            "loss_bracket": loss_bracket,
+            # "loss_bracket": loss_bracket,
         }
         model_stats = utils.loss2bpt(model_stats, self.data_shape)
         return model_stats
