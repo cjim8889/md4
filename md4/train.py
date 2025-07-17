@@ -93,6 +93,7 @@ def _get_checkpoint_manager(
             create=True,
             # preservation_policy=orbax_checkpoint.checkpoint_managers.LatestN(n=20),
             best_fn=lambda x: x["validation_loss"] if "validation_loss" in x else x["loss"],
+            best_mode='min',
             max_to_keep=20,
         ),
     )
