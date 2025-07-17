@@ -163,9 +163,10 @@ class ProcessMolecular(grain.MapTransform):
             
         if "atom_types" in features:
             features["atom_types"] = features["atom_types"].astype(np.int32)
-            
+        
         if "smiles" in features:
-            features["smiles"] = features["smiles"].astype(np.int32)
+            del features["smiles"]
+
         return features
 
 
