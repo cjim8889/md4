@@ -9,11 +9,14 @@ def get_config() -> config_dict.ConfigDict:
   config = config_dict.ConfigDict()
 
   # dataset configs
-  config.vocab_size = 128
+  config.vocab_size = 1024
   config.dataset = "pubchem"
   config.classes = -1
   config.max_length = 128
   config.tokenizer = "data/smiles_tokenizer"
+
+  config.min_frequency = 200
+  config.pad_to_length = 128
 
   config.task_type = "text"  # text or image
   config.model_type = "md4"
