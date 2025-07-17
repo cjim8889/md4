@@ -185,6 +185,7 @@ class MD4(nn.Module):
             if isinstance(conditioning, dict):
                 atom_contioning = self.atom_embeddings(conditioning["atom_types"])
                 atom_contioning = jax.vmap(self.atom_embeddings_agg)(atom_contioning)
+                atom_contioning = nn.swish(atom_contioning)
                 atom_contioning = jnp.sum(atom_contioning, axis=0)                
 
                 cond = jnp.concat([conditioning["fingerprint"], atom_contioning], axis=-1)
