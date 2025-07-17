@@ -83,7 +83,8 @@ def train_safe_tokenizer(
     safe_data: List[str],
     vocab_size: int = 1024,
     output_dir: str = "data",
-    tokenizer_name: str = "safe_tokenizer"
+    tokenizer_name: str = "safe_tokenizer",
+    min_frequency: int = 200
 ) -> transformers.PreTrainedTokenizerFast:
     """
     Train a BPE tokenizer on SAFE strings with special tokens.
@@ -116,8 +117,8 @@ def train_safe_tokenizer(
     trainer = BpeTrainer(
         vocab_size=vocab_size,
         special_tokens=special_tokens,
-        min_frequency=100,
-        show_progress=True
+        min_frequency=min_frequency,
+        show_progress=True  
     )
     
     if not safe_data:
@@ -161,7 +162,7 @@ def train_safe_tokenizer(
     return fast_tokenizer
 
 
-def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096, vocab_size=1000):
+def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096, vocab_size=1000, min_frequency=200):
     """Load and preprocess PubChem dataset with SAFE encoding and tokenizer training."""
 
     if not SAFE_AVAILABLE:
@@ -189,7 +190,8 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096, vocab_size=1000):
                 safe_data=safe_data,
                 vocab_size=vocab_size,
                 output_dir=data_dir,
-                tokenizer_name="safe_tokenizer"
+                tokenizer_name="safe_tokenizer",
+                min_frequency=min_frequency
             )
     else:
         print("Downloading and preprocessing PubChem data...")
@@ -255,7 +257,8 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096, vocab_size=1000):
             safe_data=safe_data,
             vocab_size=vocab_size,
             output_dir=data_dir,
-            tokenizer_name="safe_tokenizer"
+            tokenizer_name="safe_tokenizer",
+            min_frequency=min_frequency
         )
 
         # Save to parquet
@@ -332,4 +335,11 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096, vocab_size=1000):
 
 
 if __name__ == "__main__":
-    preprocess_pubchem(data_dir="data/pubchem", fp_bits=2048, vocab_size=1024)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_dir", type=str, default="data/pubchem")
+    parser.add_argument("--fp_bits", type=int, default=2048)
+    parser.add_argument("--vocab_size", type=int, default=1024)
+    parser.add_argument("--min_frequency", type=int, default=200)
+    args = parser.parse_args()
+    preprocess_pubchem(data_dir=args.data_dir, fp_bits=args.fp_bits, vocab_size=args.vocab_size, min_frequency=args.min_frequency)
