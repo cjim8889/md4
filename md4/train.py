@@ -224,8 +224,8 @@ def loss_fn(params, state, rng, model, batch, train=False):
         x = batch["image"]
     elif "text" in batch:
         x = batch["text"]
-    elif "smiles" in batch:
-        x = batch["smiles"]
+    elif "safe" in batch:
+        x = batch["safe"]
     else:
         raise ValueError("Unsupported targets/tasks.")
 
@@ -611,8 +611,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                         dummy_batch = utils.reshape_batch(next(iter(dummy_loader)))
                         dummy_inputs = (
                             dummy_batch[config.task_type]
-                            if "smiles" not in dummy_batch
-                            else dummy_batch["smiles"]
+                            if "safe" not in dummy_batch
+                            else dummy_batch["safe"]
                         )
                         if "label" in dummy_batch:
                             conditioning = dummy_batch["label"].astype("int32")

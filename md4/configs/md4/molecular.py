@@ -10,7 +10,7 @@ def get_config() -> config_dict.ConfigDict:
 
   # dataset configs
   config.vocab_size = 1024
-  config.dataset = "pubchem"
+  config.dataset = "pubchem_safe"
   config.classes = -1
   config.max_length = 128
   config.tokenizer = "data/smiles_tokenizer"
@@ -39,7 +39,7 @@ def get_config() -> config_dict.ConfigDict:
   config.n_dit_layers = 0  # not used
   config.dit_num_heads = 12  # not used
   config.dit_hidden_size = 768  # not used
-  config.dropout_rate = 0.02
+  config.dropout_rate = 0.05
 
   config.num_heads = 8
   config.mlp_type = "glu"
@@ -49,17 +49,17 @@ def get_config() -> config_dict.ConfigDict:
   config.learning_rate = 3e-4
   config.learning_rate_schedule = "cosine"
   config.warmup_steps = 10000
-  config.weight_decay = 0.0
+  config.weight_decay = 1e-06
   config.clip = 0.0
   config.b2 = 0.999
   config.num_epochs = -1
   config.ema_rate = 0.9999
   # If num_train_steps==-1 then the number of training steps is calculated from
   # num_epochs.
-  config.num_train_steps = 11_000_000
+  config.num_train_steps = 1_000_000
   # Evaluates for a full epoch if num_eval_steps==-1.
   config.num_eval_steps = 1000
-  config.batch_size = 64
+  config.batch_size = 512
   config.num_microbatches = 1
   config.per_device_batch_size = -1
   # If batches should be added to evaluate the entire dataset.
@@ -75,9 +75,9 @@ def get_config() -> config_dict.ConfigDict:
   config.topp = 0.98
 
   config.log_loss_every_steps = 10000
-  config.eval_every_steps = 50000
-  config.checkpoint_every_steps = 50000
-  config.checkpoint_keep_period = 300000
+  config.eval_every_steps = 40000
+  config.checkpoint_every_steps = 40000
+  config.checkpoint_keep_period = 200000
 
   # Single integer or tuple. If None will use (XManager ID, work unit).
   config.seed = 88
