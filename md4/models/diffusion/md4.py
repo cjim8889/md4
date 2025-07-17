@@ -274,7 +274,7 @@ class MD4(nn.Module):
         # sample z_t
         zt = self.forward_sample(x, t)
         logits, _ = self.predict_x(zt, t, cond=cond, train=train)
-        loss_bracket = self.bracket_loss(logits)[0]
+        # loss_bracket = self.bracket_loss(logits)[0]
         log_p = jax.nn.log_softmax(logits, axis=-1)
         one_hot_x = jax.nn.one_hot(x, self.vocab_size)
         neg_cross_ent = one_hot_x * log_p
@@ -302,7 +302,7 @@ class MD4(nn.Module):
             loss_diff = self.noise_schedule.dgamma_times_alpha(t) * masked_neg_cross_ent
 
         # loss_diff: [bs]
-        return loss_diff, loss_bracket
+        return loss_diff, 0.0
 
     @nn.compact
     def __call__(self, x, cond=None, train=False):
@@ -325,9 +325,9 @@ class MD4(nn.Module):
         else:
             t = jax.random.uniform(rng1, shape=[bs])
 
-        loss_diff, loss_bracket = self.diffusion_loss(t, x, cond=cond, train=train)
+        loss_diff, _ = self.diffusion_loss(t, x, cond=cond, train=train)
         loss_diff = loss_diff.mean()
-        loss = loss_diff + loss_prior + loss_recon + 0.1 * loss_bracket
+        loss = loss_diff + loss_prior + loss_recon
 
         model_stats = {
             "loss": loss,
