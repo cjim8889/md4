@@ -345,7 +345,7 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096, vocab_size=1000, min
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, default="data/pubchem")
+    parser.add_argument("--data_dir", type=str, default="data/pubchem_safe")
     parser.add_argument("--fp_bits", type=int, default=2048)
     parser.add_argument("--vocab_size", type=int, default=1024)
     parser.add_argument("--min_frequency", type=int, default=200)
