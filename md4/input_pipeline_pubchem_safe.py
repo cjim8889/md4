@@ -35,7 +35,7 @@ from md4 import rdkit_utils
 
 FlatFeatures = dict[str, Any]
 
-_SAFE_TOKENIZER = "data/safe_tokenizer"
+_SAFE_TOKENIZER = "data/pubchem_safe/safe_tokenizer"
 
 
 def smiles_to_safe(smiles):
