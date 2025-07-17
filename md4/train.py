@@ -110,10 +110,15 @@ def create_train_state(
 
     if config.classes > 0:
         conditioning = jnp.zeros(input_shape[0], dtype="int32")
-    elif config.fingerprint_dim > 0:
-        conditioning = jnp.zeros(
-            (input_shape[0], config.fingerprint_dim), dtype="int32"
-        )
+    elif config.fingerprint_dim > 0 and config.atom_type_size > 0:
+        conditioning = {
+            "fingerprint": jnp.zeros(
+                (input_shape[0], config.fingerprint_dim), dtype="int32"
+            ),
+            "atom_types": jnp.zeros(
+                (input_shape[0], config.pad_to_length), dtype="int32"
+            ),
+        }
     else:
         conditioning = None
     rng, sample_rng, init_rng = jax.random.split(rng, 3)
@@ -226,8 +231,11 @@ def loss_fn(params, state, rng, model, batch, train=False):
 
     if "label" in batch:
         conditioning = batch["label"].astype("int32")
-    elif "fingerprint" in batch:
-        conditioning = batch["fingerprint"].astype("int32")
+    elif "fingerprint" in batch and "atom_types" in batch:
+        conditioning = {
+            "fingerprint": batch["fingerprint"].astype("int32"),
+            "atom_types": batch["atom_types"].astype("int32"),
+        }
     else:
         conditioning = None
 
@@ -608,8 +616,11 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                         )
                         if "label" in dummy_batch:
                             conditioning = dummy_batch["label"].astype("int32")
-                        elif "fingerprint" in dummy_batch:
-                            conditioning = dummy_batch["fingerprint"].astype("int32")
+                        elif "fingerprint" in dummy_batch and "atom_types" in dummy_batch:
+                            conditioning = {
+                                "fingerprint": dummy_batch["fingerprint"].astype("int32"),
+                                "atom_types": dummy_batch["atom_types"].astype("int32"),
+                            }
                         else:
                             conditioning = None
 

@@ -17,6 +17,7 @@ def get_config() -> config_dict.ConfigDict:
 
   config.min_frequency = 200
   config.pad_to_length = 128
+  config.atom_type_size = 9
 
   config.task_type = "text"  # text or image
   config.model_type = "md4"

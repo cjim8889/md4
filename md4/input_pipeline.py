@@ -37,7 +37,7 @@ try:
 except ImportError:
     print("cv2 not found")
 try:
-    from md4 import input_pipeline_pubchem
+    from md4 import input_pipeline_pubchem, input_pipeline_pubchem_safe
 except ImportError as e:
     print("input_pipeline_pubchem not found", e)
 FlatFeatures = dict[str, Any]
@@ -358,6 +358,15 @@ def create_datasets(
             eval_transformations,
             pubchem_info,
         ) = input_pipeline_pubchem.create_pubchem_datasets(config, seed)
+        info.update(pubchem_info)
+    elif config.dataset == "pubchem_safe":
+        (
+            train_source,
+            train_transformations,
+            eval_source,
+            eval_transformations,
+            pubchem_info,
+        ) = input_pipeline_pubchem_safe.create_pubchem_datasets(config, seed)
         info.update(pubchem_info)
     elif (
         config.dataset.startswith("mnist")

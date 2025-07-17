@@ -137,6 +137,7 @@ class MD4(nn.Module):
     topp: float = 0.98
     model_sharding: bool = False
     fingerprint_dim: int = 0
+    atom_type_size: int = 0
 
     def setup(self):
         self.noise_schedule = MaskingSchedule(self.data_shape, self.noise_schedule_type)
@@ -145,6 +146,9 @@ class MD4(nn.Module):
             self.cond_embeddings = nn.Embed(self.classes, self.feature_dim)
         if self.fingerprint_dim > 0:
             self.cond_embeddings = SimpleMLP(features=[self.fingerprint_dim // 2, self.feature_dim, self.feature_dim])
+        if self.atom_type_size > 0:
+            self.atom_embeddings = nn.Embed(self.atom_type_size, self.feature_dim)
+            self.atom_embeddings_agg = nn.Dense(features=self.feature_dim, name="atom_embeddings_agg")
 
         self.classifier = backward.DiscreteClassifier(
             n_layers=self.n_layers,
@@ -178,6 +182,14 @@ class MD4(nn.Module):
 
     def get_cond_embedding(self, conditioning):
         if conditioning is not None:
+            if isinstance(conditioning, dict):
+                atom_contioning = self.atom_embeddings(conditioning["atom_types"])
+                atom_contioning = jax.vmap(self.atom_embeddings_agg)(atom_contioning)
+                atom_contioning = jnp.sum(atom_contioning, axis=0)                
+
+                cond = jnp.concat([conditioning["fingerprint"], atom_contioning], axis=-1)
+                return self.cond_embeddings(cond)
+
             return self.cond_embeddings(conditioning)
         return None
 
