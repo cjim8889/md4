@@ -45,11 +45,11 @@ def smiles_to_safe(smiles):
         return None
 
 
-def process_smiles_to_features(smiles, fp_radius=2, fp_bits=2048):
+def process_smiles_to_features(smiles, fp_radius=2, fp_bits=2048, pad_to_length=128):
     """Process a single SMILES to extract SMILES, SAFE, and molecular features."""
     # Get molecular features
     features = rdkit_utils.get_molecule_features(
-        smiles, radius=fp_radius, n_bits=fp_bits
+        smiles, radius=fp_radius, n_bits=fp_bits, pad_to_length=pad_to_length
     )
     if features is not None:
         # Convert SMILES to SAFE
@@ -59,6 +59,7 @@ def process_smiles_to_features(smiles, fp_radius=2, fp_bits=2048):
                 "smiles": smiles,
                 "safe": safe_repr,
                 "fingerprint": features["fingerprint"],
+                "atom_types": features["atom_types"],
             }
     return None
 
@@ -162,7 +163,7 @@ def train_safe_tokenizer(
     return fast_tokenizer
 
 
-def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096, vocab_size=1000, min_frequency=200):
+def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096, vocab_size=1000, min_frequency=200, pad_to_length=128):
     """Load and preprocess PubChem dataset with SAFE encoding and tokenizer training."""
 
     if not SAFE_AVAILABLE:
@@ -221,7 +222,7 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096, vocab_size=1000, min
 
         # Create partial function with fixed parameters
         process_func = partial(
-            process_smiles_to_features, fp_radius=fp_radius, fp_bits=fp_bits
+            process_smiles_to_features, fp_radius=fp_radius, fp_bits=fp_bits, pad_to_length=pad_to_length
         )
 
         # Generate features for training data using multiprocessing
@@ -266,11 +267,13 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096, vocab_size=1000, min
             "smiles": [item["smiles"] for item in train_data],
             "safe": [item["safe"] for item in train_data],
             "fingerprint": [item["fingerprint"] for item in train_data],
+            "atom_types": [item["atom_types"] for item in train_data],
         }
         val_data_dict = {
             "smiles": [item["smiles"] for item in val_data],
             "safe": [item["safe"] for item in val_data],
             "fingerprint": [item["fingerprint"] for item in val_data],
+            "atom_types": [item["atom_types"] for item in val_data],
         }
         
         pubchem_train_df = pl.DataFrame(train_data_dict)
@@ -289,12 +292,14 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096, vocab_size=1000, min
         fingerprints = np.stack(split_df["fingerprint"]).astype(np.int32)
         smiles = split_df["smiles"].to_numpy().astype(str)
         safe_reprs = split_df["safe"].to_numpy().astype(str)
-        
+        atom_types = np.stack(split_df["atom_types"]).astype(np.int32)
+
         ds = tf.data.Dataset.from_tensor_slices(
             {
                 "smiles": smiles,
                 "safe": safe_reprs,
                 "fingerprint": fingerprints,
+                "atom_types": atom_types,
             }
         )
 
@@ -318,6 +323,9 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096, vocab_size=1000, min
                     "fingerprint": tfds.features.Tensor(
                         shape=(fp_bits,), dtype=tf.int32
                     ),
+                    "atom_types": tfds.features.Tensor(
+                        shape=(128,), dtype=tf.int32
+                    ),
                 }
             ),
             split_datasets={
@@ -326,7 +334,7 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096, vocab_size=1000, min
             },
             config="pubchem_safe",
             data_dir=data_dir,
-            description=f"PubChem dataset with SAFE encoding, Morgan fingerprints (radius={fp_radius}, bits={fp_bits})",
+            description=f"PubChem dataset with SAFE encoding, Morgan fingerprints (radius={fp_radius}, bits={fp_bits}) and atom types",
             file_format="array_record",
             disable_shuffling=True,
         )
@@ -341,5 +349,6 @@ if __name__ == "__main__":
     parser.add_argument("--fp_bits", type=int, default=2048)
     parser.add_argument("--vocab_size", type=int, default=1024)
     parser.add_argument("--min_frequency", type=int, default=200)
+    parser.add_argument("--pad_to_length", type=int, default=128)
     args = parser.parse_args()
-    preprocess_pubchem(data_dir=args.data_dir, fp_bits=args.fp_bits, vocab_size=args.vocab_size, min_frequency=args.min_frequency)
+    preprocess_pubchem(data_dir=args.data_dir, fp_bits=args.fp_bits, vocab_size=args.vocab_size, min_frequency=args.min_frequency, pad_to_length=args.pad_to_length)

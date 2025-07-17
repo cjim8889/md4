@@ -28,7 +28,8 @@ ATOM_TYPES = {
     'F': 4,
     'Cl': 5,
     'H': 6,
-    'P': 7
+    'P': 7,
+    'PAD': 8
 }
 
 
@@ -148,7 +149,7 @@ def inchi_to_smiles(inchi):
         return None
 
 
-def get_molecule_features(smiles, radius=2, n_bits=2048, types=None):
+def get_molecule_features(smiles, radius=2, n_bits=2048, types=None, pad_to_length=None):
     """Get both fingerprint and atom type indices for a SMILES string."""
     if types is None:
         types = ATOM_TYPES
@@ -171,6 +172,9 @@ def get_molecule_features(smiles, radius=2, n_bits=2048, types=None):
             type_idx.append(types[symbol])
         
         atom_types = np.array(type_idx, dtype=np.int32)
+
+        if pad_to_length is not None:
+            atom_types = np.pad(atom_types, (0, pad_to_length - atom_types.shape[0]), 'constant', constant_values=types['PAD'])
         
         return {
             "fingerprint": fingerprint,
