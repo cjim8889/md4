@@ -230,7 +230,7 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096, vocab_size=1000, min
         with mp.Pool(processes=num_cores) as pool:
             results = list(
                 tqdm(
-                    pool.imap(process_func, pubchem_train_smiles),
+                    pool.map(process_func, pubchem_train_smiles),
                     total=len(pubchem_train_smiles),
                     desc="Processing training data",
                 )
@@ -243,7 +243,7 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=4096, vocab_size=1000, min
         with mp.Pool(processes=num_cores) as pool:
             results = list(
                 tqdm(
-                    pool.imap(process_func, pubchem_val_smiles),
+                    pool.map(process_func, pubchem_val_smiles),
                     total=len(pubchem_val_smiles),
                     desc="Processing validation data",
                 )
