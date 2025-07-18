@@ -232,16 +232,51 @@ def generate_samples_for_batch(
     
     # Repeat fingerprints num_samples times
     # Shape: (batch_size * num_samples, fingerprint_dim)
-    fingerprints = jnp.repeat(jnp.array(processed_fingerprints, dtype=jnp.int32), num_samples, axis=0)
-    atom_types = jnp.repeat(jnp.array(atom_types, dtype=jnp.int32), num_samples, axis=0)
+    expanded_fingerprints = jnp.repeat(jnp.array(processed_fingerprints, dtype=jnp.int32), num_samples, axis=0)
+    expanded_atom_types = jnp.repeat(jnp.array(atom_types, dtype=jnp.int32), num_samples, axis=0)
 
+    # Create dummy inputs with the correct shape for the generate function
+    total_samples = batch_size * num_samples
+    dummy_inputs = jnp.ones((total_samples, config.max_length), dtype="int32")
+    
+    # Prepare conditioning
     conditioning = {
-        "fingerprint": fingerprints,
-        "atom_types": atom_types,
+        "fingerprint": expanded_fingerprints,
+        "atom_types": expanded_atom_types,
     }
     
-    # Create dummy inputs with the correct shape for the generate function
-    dummy_inputs = jnp.ones((batch_size * num_samples, config.max_length), dtype="int32")
+    # Reshape for pmap: need to split across devices
+    num_devices = jax.device_count()
+    per_device_batch_size = total_samples // num_devices
+    
+    # Ensure total_samples is divisible by num_devices
+    if total_samples % num_devices != 0:
+        # Pad to make it divisible
+        padding_needed = num_devices - (total_samples % num_devices)
+        dummy_inputs = jnp.concatenate([
+            dummy_inputs,
+            jnp.ones((padding_needed, config.max_length), dtype="int32")
+        ], axis=0)
+        expanded_fingerprints = jnp.concatenate([
+            expanded_fingerprints,
+            jnp.zeros((padding_needed, expanded_fingerprints.shape[1]), dtype="int32")
+        ], axis=0)
+        expanded_atom_types = jnp.concatenate([
+            expanded_atom_types,
+            jnp.zeros((padding_needed, expanded_atom_types.shape[1]), dtype="int32")
+        ], axis=0)
+        total_samples_padded = total_samples + padding_needed
+        per_device_batch_size = total_samples_padded // num_devices
+    else:
+        total_samples_padded = total_samples
+        padding_needed = 0
+    
+    # Reshape for pmap: (num_devices, per_device_batch_size, ...)
+    dummy_inputs = dummy_inputs.reshape(num_devices, per_device_batch_size, config.max_length)
+    conditioning = {
+        "fingerprint": expanded_fingerprints.reshape(num_devices, per_device_batch_size, -1),
+        "atom_types": expanded_atom_types.reshape(num_devices, per_device_batch_size, -1),
+    }
     
     # Replicate the random number generator for pmap
     replicated_rng = flax_utils.replicate(rng)
@@ -255,8 +290,13 @@ def generate_samples_for_batch(
         conditioning=conditioning,
     )
     
-    # Unreplicate the samples since generate returns replicated results
+    # Unreplicate and flatten back
     samples = flax_utils.unreplicate(samples)
+    samples = samples.reshape(-1, config.max_length)
+    
+    # Remove padding if any
+    if padding_needed > 0:
+        samples = samples[:-padding_needed]
     
     # Reshape samples to (batch_size, num_samples, sequence_length)
     samples = samples.reshape(batch_size, num_samples, -1)
