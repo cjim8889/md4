@@ -23,3 +23,6 @@ dependencies = [
     "tfds-nightly>=4.9.9.dev202507180045",
     "transformers==4.51.2",
 ]
+
+[tool.uv]
+constraint-dependencies = ["multiprocess>0.70.9"]
