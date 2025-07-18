@@ -91,7 +91,7 @@ def load_model_and_state(config: ml_collections.ConfigDict, checkpoint_dir: str)
     model, optimizer, train_state, metrics_class = train.create_train_state(
         config,
         rng,
-        input_shape=(config.batch_size,) + data_shape,
+        input_shape=(config.batch_size * 10,) + data_shape,
         schedule_fn=schedule_fn,
     )
     
@@ -486,27 +486,10 @@ def process_fingerprints(fingerprints: np.ndarray, threshold: float = 0.5, fold_
         
         # Fold the fingerprints using numpy operations
         # Simple folding by taking OR of adjacent bits
-        original_length = binary_fingerprints.shape[1]
-        target_length = original_length // fold_factor
-        
-        if target_length == 0:
-            target_length = 1
-        
-        folded_fingerprints = []
-        for fp in binary_fingerprints:
-            # Reshape to fold_factor x target_length and take OR
-            if len(fp) >= target_length * fold_factor:
-                # Trim to make divisible
-                fp_trimmed = fp[:target_length * fold_factor]
-                fp_reshaped = fp_trimmed.reshape(fold_factor, target_length)
-                folded_fp = np.any(fp_reshaped[0], fp_reshaped[1]).astype(np.int32)
-            else:
-                # If too small, just return as-is
-                folded_fp = fp
-            
-            folded_fingerprints.append(folded_fp)
-        
-        return np.array(folded_fingerprints)
+        first_half = binary_fingerprints[:, :2048]
+        second_half = binary_fingerprints[:, 2048:]
+        folded_fingerprints = np.logical_or(first_half, second_half).astype(np.int32)
+        return folded_fingerprints
         
     except Exception as e:
         logging.warning(f"Failed to process fingerprints: {e}")
