@@ -170,26 +170,7 @@ class ProcessMolecular(grain.MapTransform):
         return features
 
 
-def process_smiles_to_features(smiles, fp_radius=2, fp_bits=2048, pad_to_length=128):
-    """Process a single SMILES to extract SMILES, SAFE, and molecular features."""
-    # Get molecular features
-    features = rdkit_utils.get_molecule_features(
-        smiles, radius=fp_radius, n_bits=fp_bits, pad_to_length=pad_to_length
-    )
-    if features is not None:
-        # Convert SMILES to SAFE
-        safe_repr = smiles_to_safe(smiles)
-        if safe_repr is not None:
-            return {
-                "smiles": smiles,
-                "safe": safe_repr,
-                "fingerprint": features["fingerprint"],
-                "atom_types": features["atom_types"],
-            }
-    return None
-
-
-def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=2048, vocab_size=1000, min_frequency=200, pad_to_length=128):
+def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048, pad_to_length=128):
     """Load and preprocess PubChem dataset with SAFE encoding and tokenizer training."""
 
     if not SAFE_AVAILABLE:
@@ -199,94 +180,37 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=2048, vocab_size=1000, min
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
 
-    pubchem_train_path = os.path.join(data_dir, "pubchem_train.parquet")
-    pubchem_val_path = os.path.join(data_dir, "pubchem_val.parquet")
-    tokenizer_path = os.path.join(data_dir, "safe_tokenizer")
 
-    # Check if preprocessed data already exists
-    if os.path.exists(pubchem_train_path) and os.path.exists(pubchem_val_path):
-        print("Loading existing preprocessed PubChem data...")
-        pubchem_train_df = pl.read_parquet(pubchem_train_path)
-        pubchem_val_df = pl.read_parquet(pubchem_val_path)
-        
-        # Extract SAFE data for tokenizer training if tokenizer doesn't exist
-        if not os.path.exists(tokenizer_path):
-            print("Training SAFE tokenizer on existing data...")
-            safe_data = pubchem_train_df["safe"].to_list()
-            train_safe_tokenizer(
-                safe_data=safe_data,
-                vocab_size=vocab_size,
-                output_dir=data_dir,
-                tokenizer_name="safe_tokenizer",
-                min_frequency=min_frequency
-            )
-    else:
-        print("Downloading and preprocessing PubChem data...")
+    try:
+        # Check if dataset already exists
+        pubchem_builder = tfds.builder("pubchem_large", data_dir=data_dir, config="pubchem_large")
+        print("Loading existing TFDS dataset...")
+    except Exception:
+        # Create dataset builder if it doesn't exist
+        print("Creating new TFDS dataset...")
+        ds = load_dataset("jablonkagroup/pubchem-smiles-molecular-formula", split="train", data_dir=data_dir)
 
-        # Load dataset from HuggingFace
-        ds = load_dataset("sagawa/pubchem-10m-canonicalized")
-        df_train = ds["train"].to_pandas()
-
-        # Process training data
-        print("Processing training SMILES...")
-        pubchem_set_raw = set(df_train["smiles"])
-        pubchem_smiles_list = list(pubchem_set_raw)
-
-        # Shuffle and split SMILES directly
-        import random
-
-        random.seed(42)
-        random.shuffle(pubchem_smiles_list)
-
-        split_idx = int(0.95 * len(pubchem_smiles_list))
-        pubchem_train_smiles = pubchem_smiles_list[:split_idx]
-        pubchem_val_smiles = pubchem_smiles_list[split_idx:]
-
-        # Get number of CPU cores for multiprocessing
         num_cores = mp.cpu_count()
         print(f"Using {num_cores} CPU cores for parallel processing")
 
         # Create partial function with fixed parameters
         process_func = partial(
-            process_smiles_to_features, fp_radius=fp_radius, fp_bits=fp_bits, pad_to_length=pad_to_length
+            rdkit_utils.process_smiles, fp_radius=fp_radius, fp_bits=fp_bits, pad_to_length=pad_to_length
         )
+
+        smiles_list = tqdm(ds["smiles"])
 
         # Generate features for training data using multiprocessing
         print("Generating features for training data...")
         with mp.Pool(processes=num_cores) as pool:
             results = list(
-                tqdm(
-                    pool.imap(process_func, pubchem_train_smiles),
-                    total=len(pubchem_train_smiles),
-                    desc="Processing training data",
-                )
+                pool.map(process_func, smiles_list)
             )
         # Filter out None results
-        train_data = [result for result in results if result is not None]
+        features_list = [result for result in results if result is not None]
 
-        # Generate features for validation data using multiprocessing
-        print("Generating features for validation data...")
-        with mp.Pool(processes=num_cores) as pool:
-            results = list(
-                tqdm(
-                    pool.imap(process_func, pubchem_val_smiles),
-                    total=len(pubchem_val_smiles),
-                    desc="Processing validation data",
-                )
-            )
-        # Filter out None results
-        val_data = [result for result in results if result is not None]
-
-        # Train tokenizer on SAFE representations
-        print("Training SAFE tokenizer...")
-        safe_data = [item["safe"] for item in train_data if item.get("safe")]
-        train_safe_tokenizer(
-            safe_data=safe_data,
-            vocab_size=vocab_size,
-            output_dir=data_dir,
-            tokenizer_name="safe_tokenizer",
-            min_frequency=min_frequency
-        )
+        train_data = features_list[:int(len(features_list) * 0.95)]
+        val_data = features_list[int(len(features_list) * 0.95):]
 
         # Save to parquet
         train_data_dict = {
@@ -305,52 +229,36 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=2048, vocab_size=1000, min
         pubchem_train_df = pl.DataFrame(train_data_dict)
         pubchem_val_df = pl.DataFrame(val_data_dict)
 
-        pubchem_train_df.write_parquet(pubchem_train_path)
-        pubchem_val_df.write_parquet(pubchem_val_path)
 
-        print(
-            f"Saved {len(train_data)} training examples and {len(val_data)} validation examples"
-        )
+        def load_pubchem_split(split_df):
+            smiles = split_df["smiles"].to_numpy().astype(str)
+            safe_reprs = split_df["safe"].to_numpy().astype(str)
+            fingerprints = np.stack(split_df["fingerprint"]).astype(np.bool_)
+            atom_types = np.stack(split_df["atom_types"]).astype(np.int8)
 
-    def load_pubchem_split(split_df):
-        """Convert DataFrame to TensorFlow dataset."""
-        # Convert fingerprint arrays to proper 2D numpy array
-        fingerprints = np.stack(split_df["fingerprint"]).astype(np.int32)
-        smiles = split_df["smiles"].to_numpy().astype(str)
-        safe_reprs = split_df["safe"].to_numpy().astype(str)
-        atom_types = np.stack(split_df["atom_types"]).astype(np.int32)
+            ds = tf.data.Dataset.from_tensor_slices(
+                {
+                    "smiles": smiles,
+                    "safe": safe_reprs,
+                    "fingerprint": fingerprints,
+                    "atom_types": atom_types,
+                }
+            )
 
-        ds = tf.data.Dataset.from_tensor_slices(
-            {
-                "smiles": smiles,
-                "safe": safe_reprs,
-                "fingerprint": fingerprints,
-                "atom_types": atom_types,
-            }
-        )
+            return ds
 
-        return ds
-
-    # Try to load existing dataset, create if doesn't exist
-    try:
-        # Check if dataset already exists
-        pubchem_builder = tfds.builder("pubchem_safe", data_dir=data_dir, config="pubchem_safe")
-        print("Loading existing TFDS dataset...")
-    except Exception:
-        # Create dataset builder if it doesn't exist
-        print("Creating new TFDS dataset...")
         pubchem_builder = tfds.dataset_builders.store_as_tfds_dataset(
-            name="pubchem_safe",
-            version="1.0.0",
+            name="pubchem_large",
+            version="1.0.1",
             features=tfds.features.FeaturesDict(
                 {
                     "smiles": tfds.features.Text(),
                     "safe": tfds.features.Text(),
                     "fingerprint": tfds.features.Tensor(
-                        shape=(fp_bits,), dtype=tf.int32
+                        shape=(fp_bits,), dtype=tf.bool
                     ),
                     "atom_types": tfds.features.Tensor(
-                        shape=(pad_to_length,), dtype=tf.int32
+                        shape=(pad_to_length,), dtype=tf.int8
                     ),
                 }
             ),
@@ -358,9 +266,9 @@ def preprocess_pubchem(data_dir, fp_radius=2, fp_bits=2048, vocab_size=1000, min
                 "train": load_pubchem_split(pubchem_train_df),
                 "validation": load_pubchem_split(pubchem_val_df),
             },
-            config="pubchem_safe",
+            config="pubchem_large",
             data_dir=data_dir,
-            description=f"PubChem dataset with SAFE encoding, Morgan fingerprints (radius={fp_radius}, bits={fp_bits}) and atom types",
+            description=f"PubChem dataset with SAFE, SMILES, Morgan fingerprints (radius={fp_radius}, bits={fp_bits}) and atom types",
             file_format="array_record",
             disable_shuffling=True,
         )
@@ -377,22 +285,18 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
     # Molecular dataset with SAFE, SMILES and Morgan fingerprints
     fp_radius = config.get("fp_radius", 2)
     fp_bits = config.get("fp_bits", 2048)
-    max_length = config.get("max_length", 128)
+    max_length = config.get("max_length", 160)
     vocab_size = config.get("vocab_size", 1024)
-    min_frequency = config.get("min_frequency", 200)
-    pad_to_length = config.get("pad_to_length", 128)
+    pad_to_length = config.get("pad_to_length", 160)
 
     # Use preprocess_pubchem to get the dataset builder
-    pubchem_builder = preprocess_pubchem(
+    pubchem_builder = preprocess_or_load_pubchem(
         data_dir=os.path.join("./data", "pubchem_safe"), 
         fp_radius=fp_radius, 
         fp_bits=fp_bits,
-        vocab_size=vocab_size,
-        min_frequency=min_frequency,
         pad_to_length=pad_to_length
     )
     data_source = pubchem_builder.as_data_source()
-
     # Load SAFE tokenizer
     tokenizer = transformers.AutoTokenizer.from_pretrained(_SAFE_TOKENIZER)
     
@@ -417,3 +321,12 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
     }
 
     return train_source, train_transformations, eval_source, eval_transformations, info
+
+
+if __name__ == "__main__":
+    pubchem_builder = preprocess_or_load_pubchem(
+        data_dir="./data/pubchem_large",
+        fp_radius=2,
+        fp_bits=2048,
+        pad_to_length=160,
+    )
