@@ -234,7 +234,7 @@ def generate_samples_for_batch(
     atom_types = jnp.repeat(jnp.array(atom_types, dtype=jnp.int32), num_samples, axis=0)
 
     conditioning = {
-        "fingerprints": fingerprints,
+        "fingerprint": fingerprints,
         "atom_types": atom_types,
     }
     # Generate all samples in one call
