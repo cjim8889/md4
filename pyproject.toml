@@ -10,7 +10,8 @@ dependencies = [
     "distrax>=0.1.5",
     "grain>=0.2.11",
     "huggingface-hub>=0.33.2",
-    "jax>=0.6.2",
+    "jax[tpu]>=0.6.2; sys_platform == 'linux'",
+    "jax>=0.6.2; sys_platform == 'macOS'",
     "matplotlib>=3.10.3",
     "ml-collections>=1.1.0",
     "mlcroissant>=1.0.18",
@@ -24,6 +25,8 @@ dependencies = [
     "transformers==4.51.2",
     "apache-beam==2.66.0",
 ]
+
+
 
 [tool.uv]
 override-dependencies = ["multiprocess==0.70.12", "dill==0.4.0"]
