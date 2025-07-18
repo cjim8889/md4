@@ -13,7 +13,7 @@ def get_config() -> config_dict.ConfigDict:
   config.dataset = "pubchem_safe"
   config.classes = -1
   config.max_length = 128
-  config.tokenizer = "data/smiles_tokenizer"
+  config.tokenizer = "data/pubchem_safe/safe_tokenizer"
 
   config.min_frequency = 200
   config.pad_to_length = 128
@@ -26,20 +26,20 @@ def get_config() -> config_dict.ConfigDict:
   # timesteps: int or None
   config.timesteps = 500
   # linear, cosine, poly[exponent], e.g., poly3
-  config.noise_schedule = "cosine"
+  config.noise_schedule = "linear"
   config.outside_embed = True
   # t or none (removes time dependence)
   config.time_features = "t"
   config.cont_time = True
   config.fingerprint_dim = 2048
 
-  config.feature_dim = 64
+  config.feature_dim = 128
   config.n_layers = 12
   config.ch_mult = (1,)  # not used
   config.n_dit_layers = 0  # not used
   config.dit_num_heads = 12  # not used
   config.dit_hidden_size = 768  # not used
-  config.dropout_rate = 0.05
+  config.dropout_rate = 0.02
 
   config.num_heads = 8
   config.mlp_type = "glu"
@@ -59,7 +59,7 @@ def get_config() -> config_dict.ConfigDict:
   config.num_train_steps = 1_000_000
   # Evaluates for a full epoch if num_eval_steps==-1.
   config.num_eval_steps = 1000
-  config.batch_size = 512
+  config.batch_size = 1024
   config.num_microbatches = 1
   config.per_device_batch_size = -1
   # If batches should be added to evaluate the entire dataset.
