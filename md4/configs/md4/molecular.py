@@ -22,7 +22,7 @@ def get_config() -> config_dict.ConfigDict:
   # timesteps: int or None
   config.timesteps = 500
   # linear, cosine, poly[exponent], e.g., poly3
-  config.noise_schedule = "cosine"
+  config.noise_schedule = "linear"
   config.outside_embed = True
   # t or none (removes time dependence)
   config.time_features = "t"
@@ -52,10 +52,10 @@ def get_config() -> config_dict.ConfigDict:
   config.ema_rate = 0.9999
   # If num_train_steps==-1 then the number of training steps is calculated from
   # num_epochs.
-  config.num_train_steps = 11_000_000
+  config.num_train_steps = 10_000_000
   # Evaluates for a full epoch if num_eval_steps==-1.
   config.num_eval_steps = 1000
-  config.batch_size = 64
+  config.batch_size = 128
   config.num_microbatches = 1
   config.per_device_batch_size = -1
   # If batches should be added to evaluate the entire dataset.
