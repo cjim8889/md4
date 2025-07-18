@@ -24,7 +24,7 @@ except ImportError:
     logging.warning("RDKit not available. InChI to SMILES conversion will not work.")
 
 # Import MD4 modules
-from md4 import sampling, train, utils
+from md4 import rdkit_utils, sampling, train, utils
 from md4.configs.md4 import molecular
 
 FLAGS = flags.FLAGS
@@ -140,92 +140,66 @@ def inchi_to_smiles(inchi: str) -> Optional[str]:
         return None
 
 
-def detect_molecular_format_and_prepare_data(eval_df: pl.DataFrame) -> Tuple[List[str], Optional[List[str]]]:
+def detect_molecular_format_and_prepare_data(eval_df: pl.DataFrame, pad_to_length: int = 128) -> Tuple[List[str], List[np.ndarray], List[str], List[np.ndarray]]:
     """
-    Detect whether the dataframe contains SMILES or InChI and prepare data accordingly.
+    Convert InChI data to SMILES and extract atom types and fingerprints. Discard anything that can't be parsed by RDKit.
+    
+    Args:
+        eval_df: DataFrame containing InChI data
+        pad_to_length: Length to pad atom types to
     
     Returns:
-        Tuple of (smiles_list, original_inchi_list)
-        If original data was InChI, original_inchi_list will contain the original InChI strings
-        If original data was SMILES, original_inchi_list will be None
+        Tuple of (smiles_list, atom_types_list, valid_inchi_list, fingerprints_list)
+        Only successfully parsed molecules are returned
     """
-    columns = eval_df.columns
+    if not RDKIT_AVAILABLE:
+        raise ImportError(
+            "RDKit is required to convert InChI to SMILES. "
+            "Please install RDKit: conda install -c conda-forge rdkit"
+        )
     
-    # Check for different possible column names
-    smiles_columns = [col for col in columns if 'smiles' in col.lower()]
+    columns = eval_df.columns
     inchi_columns = [col for col in columns if 'inchi' in col.lower()]
     
-    if smiles_columns:
-        # SMILES data found
-        smiles_col = smiles_columns[0]  # Use first SMILES column found
-        logging.info(f"Found SMILES data in column: {smiles_col}")
-        smiles_list = eval_df[smiles_col].to_list()
-        return smiles_list, None
-        
-    elif inchi_columns:
-        # InChI data found
-        inchi_col = inchi_columns[0]  # Use first InChI column found
-        logging.info(f"Found InChI data in column: {inchi_col}")
-        
-        if not RDKIT_AVAILABLE:
-            raise ImportError(
-                "RDKit is required to convert InChI to SMILES. "
-                "Please install RDKit: conda install -c conda-forge rdkit"
-            )
-        
-        inchi_list = eval_df[inchi_col].to_list()
-        logging.info("Converting InChI to SMILES...")
-        
-        smiles_list = []
-        valid_inchi_list = []
-        conversion_failures = 0
-        
-        for i, inchi in enumerate(tqdm(inchi_list, desc="Converting InChI to SMILES")):
-            smiles = inchi_to_smiles(inchi)
-            if smiles is not None:
-                smiles_list.append(smiles)
-                valid_inchi_list.append(inchi)
-            else:
-                conversion_failures += 1
-                logging.warning(f"Failed to convert InChI at index {i}: {inchi[:50]}...")
-        
-        if conversion_failures > 0:
-            logging.warning(f"Failed to convert {conversion_failures}/{len(inchi_list)} InChI strings to SMILES")
-            logging.info(f"Proceeding with {len(smiles_list)} successfully converted molecules")
-        else:
-            logging.info(f"Successfully converted all {len(smiles_list)} InChI strings to SMILES")
-        
-        return smiles_list, valid_inchi_list
+    if not inchi_columns:
+        raise ValueError("No InChI columns found in the dataframe")
     
-    else:
-        # Try to detect automatically based on content
-        possible_mol_columns = [col for col in columns if any(
-            keyword in col.lower() 
-            for keyword in ['mol', 'compound', 'structure', 'chemical']
-        )]
-        
-        if possible_mol_columns:
-            test_col = possible_mol_columns[0]
-            test_values = eval_df[test_col].head(10).to_list()
-            
-            # Check if values look like InChI (start with "InChI=")
-            inchi_count = sum(1 for val in test_values if isinstance(val, str) and val.startswith("InChI="))
-            
-            if inchi_count > len(test_values) // 2:  # More than half look like InChI
-                logging.info(f"Auto-detected InChI format in column: {test_col}")
-                return detect_molecular_format_and_prepare_data(
-                    eval_df.rename({test_col: "inchi"})
-                )
-            else:
-                logging.info(f"Auto-detected SMILES format in column: {test_col}")
-                return detect_molecular_format_and_prepare_data(
-                    eval_df.rename({test_col: "smiles"})
-                )
-        
-        raise ValueError(
-            f"Could not detect molecular format. Available columns: {columns}. "
-            "Expected columns containing 'smiles' or 'inchi' in their names."
-        )
+    inchi_col = inchi_columns[0]  # Use first InChI column found
+    logging.info(f"Found InChI data in column: {inchi_col}")
+    
+    inchi_list = eval_df[inchi_col].to_list()
+    fingerprints_list = eval_df["predicted_fingerprint"].to_list() if "predicted_fingerprint" in eval_df.columns else []
+    
+    if not fingerprints_list:
+        logging.warning("No predicted_fingerprint column found in eval_df, using zero fingerprints")
+    
+    logging.info("Converting InChI to SMILES and extracting atom types...")
+    
+    smiles_list = []
+    atom_types_list = []
+    valid_inchi_list = []
+    valid_fingerprints_list = []
+    
+    for i, inchi in enumerate(tqdm(inchi_list, desc="Converting InChI to SMILES and extracting features")):
+        smiles = inchi_to_smiles(inchi)
+        if smiles is not None:
+            # Extract atom types from converted SMILES
+            features = rdkit_utils.get_molecule_features(smiles, radius=2, n_bits=2048, pad_to_length=pad_to_length)
+            if features is not None and 'atom_types' in features:
+                smiles_list.append(smiles)
+                atom_types_list.append(features['atom_types'])
+                valid_inchi_list.append(inchi)
+                
+                # Add corresponding fingerprint if available
+                if fingerprints_list and i < len(fingerprints_list):
+                    valid_fingerprints_list.append(fingerprints_list[i])
+                else:
+                    # Default to zeros if no fingerprint available
+                    valid_fingerprints_list.append(np.zeros(2048))
+            # Silently discard molecules that can't be processed
+    
+    logging.info(f"Successfully processed {len(smiles_list)}/{len(inchi_list)} InChI strings")
+    return smiles_list, atom_types_list, valid_inchi_list, valid_fingerprints_list
 
 
 def load_tokenizer(tokenizer_path: str) -> transformers.PreTrainedTokenizerFast:
@@ -242,6 +216,7 @@ def generate_samples_for_batch(
     model: nn.Module,
     train_state: train.TrainState,
     fingerprints: np.ndarray,
+    atom_types: np.ndarray,
     tokenizer: transformers.PreTrainedTokenizerFast,
     config: ml_collections.ConfigDict,
     num_samples: int,
@@ -255,8 +230,13 @@ def generate_samples_for_batch(
     
     # Repeat fingerprints num_samples times
     # Shape: (batch_size * num_samples, fingerprint_dim)
-    conditioning = jnp.repeat(jnp.array(processed_fingerprints, dtype=jnp.int32), num_samples, axis=0)
-    
+    fingerprints = jnp.repeat(jnp.array(processed_fingerprints, dtype=jnp.int32), num_samples, axis=0)
+    atom_types = jnp.repeat(jnp.array(atom_types, dtype=jnp.int32), num_samples, axis=0)
+
+    conditioning = {
+        "fingerprints": fingerprints,
+        "atom_types": atom_types,
+    }
     # Generate all samples in one call
     samples = sampling.simple_generate(
         rng,
@@ -338,22 +318,20 @@ def run_evaluation(
     """Run evaluation on the dataset."""
     rng = utils.get_rng(42)  # Fixed seed for reproducible evaluation
     
-    # Detect molecular format and prepare data
-    smiles_list, original_inchi_list = detect_molecular_format_and_prepare_data(eval_df)
+    # Convert InChI to SMILES and extract atom types and fingerprints
+    smiles_list, atom_types_list, original_inchi_list, fingerprints = detect_molecular_format_and_prepare_data(eval_df)
     
-    # Filter the dataframe to only include successfully converted molecules
-    if original_inchi_list is not None:
-        # We had InChI data that was converted to SMILES
-        # Filter both the dataframe and inchi list to match the successful conversions
-        valid_indices = [i for i, (smiles, inchi) in enumerate(zip(smiles_list, original_inchi_list)) if smiles is not None]
-        eval_df = eval_df[valid_indices]
-        logging.info(f"Filtered dataset to {len(eval_df)} samples with successful InChI->SMILES conversion")
+    # Create filtered dataframe with only successfully processed molecules
+    eval_df = pl.DataFrame({
+        "predicted_fingerprint": fingerprints,
+        "atom_types": atom_types_list,
+    })
     
     results = EvalResults(
         original_smiles=[],
         original_fingerprints=[],
         generated_smiles=[],
-        original_inchi=[] if original_inchi_list is not None else None,
+        original_inchi=[],
     )
     
     # Process in batches, drop incomplete last batch
@@ -374,7 +352,8 @@ def run_evaluation(
         # Extract data
         batch_smiles = smiles_list[start_idx:end_idx]
         batch_fingerprints = np.array(batch_df["predicted_fingerprint"].to_list())
-        batch_inchi = original_inchi_list[start_idx:end_idx] if original_inchi_list is not None else None
+        batch_atom_types = np.array(atom_types_list[start_idx:end_idx])  # Use atom types from our extracted list
+        batch_inchi = original_inchi_list[start_idx:end_idx]
         
         rng, batch_rng = jax.random.split(rng)
         
@@ -383,6 +362,7 @@ def run_evaluation(
             model,
             train_state,
             batch_fingerprints,
+            batch_atom_types,
             tokenizer,
             config,
             num_samples,
@@ -404,8 +384,7 @@ def run_evaluation(
             results.original_smiles.append(batch_smiles[i])
             results.original_fingerprints.append(batch_fingerprints[i])
             results.generated_smiles.append(batch_generated[i])
-            if results.original_inchi is not None and batch_inchi is not None:
-                results.original_inchi.append(batch_inchi[i])
+            results.original_inchi.append(batch_inchi[i])
     
     logging.info(f"Generated {len(results.original_smiles)} sets of samples")
     return results
@@ -520,7 +499,7 @@ def process_fingerprints(fingerprints: np.ndarray, threshold: float = 0.5, fold_
                 # Trim to make divisible
                 fp_trimmed = fp[:target_length * fold_factor]
                 fp_reshaped = fp_trimmed.reshape(fold_factor, target_length)
-                folded_fp = np.any(fp_reshaped, axis=0).astype(np.int32)
+                folded_fp = np.any(fp_reshaped[0], fp_reshaped[1]).astype(np.int32)
             else:
                 # If too small, just return as-is
                 folded_fp = fp
