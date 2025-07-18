@@ -273,7 +273,7 @@ def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048, pad_to_lengt
             disable_shuffling=True,
         )
 
-    return pubchem_builder
+        return pubchem_builder
 
 
 def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
