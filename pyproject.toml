@@ -24,6 +24,7 @@ dependencies = [
     "tensorflow-datasets==4.9.9",
     "transformers==4.51.2",
     "apache-beam==2.66.0",
+    "tfds-nightly>=4.9.9.dev202507180045",
 ]
 
 
