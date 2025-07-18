@@ -22,4 +22,8 @@ dependencies = [
     "tf-keras>=2.19.0",
     "tensorflow-datasets==4.9.9",
     "transformers==4.51.2",
+    "apache-beam==2.66.0",
 ]
+
+[tool.uv]
+override-dependencies = ["multiprocess==0.70.12", "dill==0.4.0"]
