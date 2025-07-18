@@ -3,7 +3,7 @@
 import numpy as np
 import tensorflow_datasets as tfds
 
-import datasets
+import datasets as ds
 
 from .rdkit_utils import process_smiles
 
@@ -35,7 +35,7 @@ class Builder(tfds.core.GeneratorBasedBuilder):
 
   def _split_generators(self, dl_manager: tfds.download.DownloadManager):
     """Returns SplitGenerators."""
-    df = datasets.load_dataset('ablonkagroup/pubchem-smiles-molecular-formula', split='train', data_dir=dl_manager.download_dir)
+    df = ds.load_dataset('ablonkagroup/pubchem-smiles-molecular-formula', split='train', data_dir=dl_manager.download_dir)
     total_size = len(df['smiles'])
     train_size = int(total_size * 0.95)
     val_size = int(total_size * 0.05)
