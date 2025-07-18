@@ -188,7 +188,7 @@ def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048, pad_to_lengt
     except Exception:
         # Create dataset builder if it doesn't exist
         print("Creating new TFDS dataset...")
-        ds = load_dataset("jablonkagroup/pubchem-smiles-molecular-formula", split="train", data_dir=data_dir)
+        ds = load_dataset("jablonkagroup/pubchem-smiles-molecular-formula", split="train", cache_dir=data_dir)
 
         num_cores = mp.cpu_count()
         print(f"Using {num_cores} CPU cores for parallel processing")
