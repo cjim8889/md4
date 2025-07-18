@@ -194,9 +194,6 @@ class MD4(nn.Module):
                 else:
                     raise ValueError("Atom contioning has invalid shape")
 
-                if atom_contioning.ndim == 1:
-                    atom_contioning = jnp.expand_dims(atom_contioning, axis=0)
-
                 cond = jnp.concat([conditioning["fingerprint"], atom_contioning], axis=-1)
                 return self.cond_embeddings(cond)
 
