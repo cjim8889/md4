@@ -186,7 +186,16 @@ class MD4(nn.Module):
                 atom_contioning = self.atom_embeddings(conditioning["atom_types"])
                 atom_contioning = jax.vmap(self.atom_embeddings_agg)(atom_contioning)
                 atom_contioning = nn.swish(atom_contioning)
-                atom_contioning = jnp.sum(atom_contioning, axis=0)                
+
+                if atom_contioning.ndim == 2:
+                    atom_contioning = jnp.sum(atom_contioning, axis=0)
+                elif atom_contioning.ndim == 3:
+                    atom_contioning = jnp.sum(atom_contioning, axis=1)
+                else:
+                    raise ValueError("Atom contioning has invalid shape")
+
+                if atom_contioning.ndim == 1:
+                    atom_contioning = jnp.expand_dims(atom_contioning, axis=0)
 
                 cond = jnp.concat([conditioning["fingerprint"], atom_contioning], axis=-1)
                 return self.cond_embeddings(cond)
