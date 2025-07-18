@@ -6,6 +6,7 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import flax.linen as nn
+import flax.jax_utils as flax_utils
 import jax
 import jax.numpy as jnp
 import ml_collections
@@ -111,7 +112,8 @@ def load_model_and_state(config: ml_collections.ConfigDict, checkpoint_dir: str)
     checkpointed_state = checkpoint_manager.restore(step, items=checkpointed_state)
     train_state = checkpointed_state["train_state"]
     
-    # No need to replicate for evaluation
+    # Replicate train_state for pmap usage across multiple devices
+    train_state = flax_utils.replicate(train_state)
     return model, train_state
 
 
@@ -237,14 +239,24 @@ def generate_samples_for_batch(
         "fingerprint": fingerprints,
         "atom_types": atom_types,
     }
-    # Generate all samples in one call
-    samples = sampling.simple_generate(
-        rng,
-        train_state,
-        batch_size * num_samples,
+    
+    # Create dummy inputs with the correct shape for the generate function
+    dummy_inputs = jnp.ones((batch_size * num_samples, config.max_length), dtype="int32")
+    
+    # Replicate the random number generator for pmap
+    replicated_rng = flax_utils.replicate(rng)
+    
+    # Generate all samples using the pmap version
+    samples = sampling.generate(
         model,
+        train_state,
+        replicated_rng,
+        dummy_inputs,
         conditioning=conditioning,
     )
+    
+    # Unreplicate the samples since generate returns replicated results
+    samples = flax_utils.unreplicate(samples)
     
     # Reshape samples to (batch_size, num_samples, sequence_length)
     samples = samples.reshape(batch_size, num_samples, -1)
