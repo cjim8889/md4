@@ -188,64 +188,21 @@ def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048, pad_to_lengt
     except Exception:
         # Create dataset builder if it doesn't exist
         print("Creating new TFDS dataset...")
-        ds = load_dataset("jablonkagroup/pubchem-smiles-molecular-formula", split="train", cache_dir=data_dir)
-
-        num_cores = mp.cpu_count()
-        print(f"Using {num_cores} CPU cores for parallel processing")
+        ds = load_dataset("jablonkagroup/pubchem-smiles-molecular-formula", split="train", cache_dir=data_dir, streaming=True)
 
         # Create partial function with fixed parameters
         process_func = partial(
             rdkit_utils.process_smiles, fp_radius=fp_radius, fp_bits=fp_bits, pad_to_length=pad_to_length
         )
 
-        smiles_list = tqdm(ds["smiles"])
+        train_ds = ds.select(range(int(len(ds) * 0.95)))
+        val_ds = ds.select(range(int(len(ds) * 0.95), len(ds)))
 
-        # Generate features for training data using multiprocessing
-        print("Generating features for training data...")
-        with mp.Pool(processes=num_cores) as pool:
-            results = list(
-                pool.map(process_func, smiles_list)
-            )
-        # Filter out None results
-        features_list = [result for result in results if result is not None]
-
-        train_data = features_list[:int(len(features_list) * 0.95)]
-        val_data = features_list[int(len(features_list) * 0.95):]
-
-        # Save to parquet
-        train_data_dict = {
-            "smiles": [item["smiles"] for item in train_data],
-            "safe": [item["safe"] for item in train_data],
-            "fingerprint": [item["fingerprint"] for item in train_data],
-            "atom_types": [item["atom_types"] for item in train_data],
-        }
-        val_data_dict = {
-            "smiles": [item["smiles"] for item in val_data],
-            "safe": [item["safe"] for item in val_data],
-            "fingerprint": [item["fingerprint"] for item in val_data],
-            "atom_types": [item["atom_types"] for item in val_data],
-        }
-        
-        pubchem_train_df = pl.DataFrame(train_data_dict)
-        pubchem_val_df = pl.DataFrame(val_data_dict)
-
-
-        def load_pubchem_split(split_df):
-            smiles = split_df["smiles"].to_numpy().astype(str)
-            safe_reprs = split_df["safe"].to_numpy().astype(str)
-            fingerprints = np.stack(split_df["fingerprint"]).astype(np.bool_)
-            atom_types = np.stack(split_df["atom_types"]).astype(np.int8)
-
-            ds = tf.data.Dataset.from_tensor_slices(
-                {
-                    "smiles": smiles,
-                    "safe": safe_reprs,
-                    "fingerprint": fingerprints,
-                    "atom_types": atom_types,
-                }
-            )
-
-            return ds
+        def iterator_fn(ds):
+            for smi in ds["smiles"]:
+                features = process_func(smi)
+                if features is not None:
+                    yield features["smiles"], features
 
         pubchem_builder = tfds.dataset_builders.store_as_tfds_dataset(
             name="pubchem_large",
@@ -263,8 +220,8 @@ def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048, pad_to_lengt
                 }
             ),
             split_datasets={
-                "train": load_pubchem_split(pubchem_train_df),
-                "validation": load_pubchem_split(pubchem_val_df),
+                "train": iterator_fn(train_ds),
+                "validation": iterator_fn(val_ds),
             },
             config="pubchem_large",
             data_dir=data_dir,

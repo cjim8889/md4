@@ -85,7 +85,7 @@ def process_smiles(smi, fp_radius=2, fp_bits=2048, pad_to_length=160):
             atom_types_padded = np.pad(atom_types, (0, pad_to_length - atom_types.shape[0]), 'constant', constant_values=ATOM_TYPES['PAD'])
 
             return {
-                "fingerprint": np.asarray(fingerprint, dtype=np.int8),
+                "fingerprint": np.asarray(fingerprint, dtype=np.bool_),
                 "atom_types": np.asarray(atom_types_padded, dtype=np.int8),
                 "safe": safe_mol,
                 "smiles": smi

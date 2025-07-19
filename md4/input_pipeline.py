@@ -35,9 +35,10 @@ import transformers
 try:
     import cv2
 except ImportError:
-    print("cv2 not found")
+    pass
+
 try:
-    from md4 import input_pipeline_pubchem, input_pipeline_pubchem_safe
+    from md4 import input_pipeline_pubchem_safe
 except ImportError as e:
     print("input_pipeline_pubchem not found", e)
 FlatFeatures = dict[str, Any]
@@ -349,20 +350,10 @@ def create_datasets(
 
         tokenizer = transformers.GPT2Tokenizer.from_pretrained(_GPT2_TOKENIZER)
         info["tokenizer"] = tokenizer
-    elif config.dataset == "pubchem":
-        # Use the dedicated PubChem input pipeline
+    elif config.dataset == "pubchem_large":
         (
             train_source,
-            train_transformations,
-            eval_source,
-            eval_transformations,
-            pubchem_info,
-        ) = input_pipeline_pubchem.create_pubchem_datasets(config, seed)
-        info.update(pubchem_info)
-    elif config.dataset == "pubchem_safe":
-        (
-            train_source,
-            train_transformations,
+            train_transformations,  
             eval_source,
             eval_transformations,
             pubchem_info,
@@ -395,6 +386,7 @@ def create_datasets(
     else:
         raise NotImplementedError("Unsupported datasets.")
 
+    
     train_loader = grain.load(
         source=train_source,
         shuffle=True,
