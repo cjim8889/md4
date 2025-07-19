@@ -5,7 +5,9 @@ import numpy as np
 import safe
 import safe.converter
 from rdkit import Chem, RDLogger
-from rdkit.Chem import Descriptors, rdMolDescriptors
+from rdkit.Chem import Descriptors
+from rdkit.Chem import AllChem, DataStructs
+
 
 # Set random seed and suppress RDKit warnings
 random.seed(42)
@@ -46,8 +48,6 @@ def filter_molecule(mol):
         return False
     
     for atom in mol.GetAtoms():
-        if atom.GetFormalCharge() != 0:  # No charged atoms
-            return False
         if atom.GetSymbol() not in FILTER_ATOMS:  # Only allowed atom types
             return False
     
@@ -78,9 +78,11 @@ def process_smiles(smi, fp_radius=2, fp_bits=2048, pad_to_length=160):
         mol = Chem.MolFromSmiles(smi)
         smi = Chem.MolToSmiles(mol, isomericSmiles=False)  # remove stereochemistry information
         mol = Chem.MolFromSmiles(smi)
-        safe_mol = safe.converter.encode(mol, ignore_stereo=True)
+        safe_mol = safe.converter.encode(mol, ignore_stereo=True, slicer="mmpa")
         if filter_molecule(mol):
-            fingerprint = rdMolDescriptors.GetMorganFingerprintAsBitVect(mol, fp_radius, nBits=fp_bits)
+            fp = AllChem.GetMorganFingerprintAsBitVect(mol, fp_radius, nBits=fp_bits)
+            fingerprint = np.zeros((0, ), dtype=np.int8)
+            DataStructs.ConvertToNumpyArray(fp, fingerprint)
             atom_types = get_atom_type_indices(mol)
             atom_types_padded = np.pad(atom_types, (0, pad_to_length - atom_types.shape[0]), 'constant', constant_values=ATOM_TYPES['PAD'])
 
@@ -90,6 +92,9 @@ def process_smiles(smi, fp_radius=2, fp_bits=2048, pad_to_length=160):
                 "safe": safe_mol,
                 "smiles": smi
             }
-    except:
+    except Exception as e:
         pass
     return None
+
+if __name__ == "__main__":
+    result = process_smiles("CCCCCCNOP(C)(=O)OC")
