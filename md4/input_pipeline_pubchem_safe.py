@@ -199,9 +199,13 @@ def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048, pad_to_lengt
 
         def iterator_fn(ds):
             for smi in ds["smiles"]:
-                features = process_func(smi)
-                if features is not None:
-                    yield features["smiles"], features
+                try:
+                    features = process_func(smi)
+                    if features is not None:
+                        yield features["smiles"], features
+                except Exception as e:
+                    print(f"Error processing SMILES: {e}")
+                    continue
 
         pubchem_builder = tfds.dataset_builders.store_as_tfds_dataset(
             name="pubchem_large",
