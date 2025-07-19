@@ -199,13 +199,26 @@ def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048, pad_to_lengt
 
         def iterator_fn(ds):
             for smi in ds["smiles"]:
-                try:
-                    features = process_func(smi)
-                    if features is not None:
-                        yield features["smiles"], features
-                except Exception as e:
-                    print(f"Error processing SMILES: {e}")
-                    continue
+                features = process_func(smi)
+                if features is not None:
+                    yield features["smiles"], features
+
+        def ds_from_iterator(iterator):
+            return tf.data.Dataset.from_generator(
+                iterator,
+                output_types={
+                    "smiles": tf.string,
+                    "safe": tf.string,
+                    "fingerprint": tf.bool,
+                    "atom_types": tf.int8,
+                },
+                output_shapes={
+                    "smiles": tf.TensorShape([]),
+                    "safe": tf.TensorShape([]),
+                    "fingerprint": tf.TensorShape([fp_bits]),
+                    "atom_types": tf.TensorShape([pad_to_length]),
+                },
+            )
 
         pubchem_builder = tfds.dataset_builders.store_as_tfds_dataset(
             name="pubchem_large",
@@ -223,8 +236,8 @@ def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048, pad_to_lengt
                 }
             ),
             split_datasets={
-                "train": iterator_fn(train_ds),
-                "validation": iterator_fn(val_ds),
+                "train": ds_from_iterator(iterator_fn(train_ds)),
+                "validation": ds_from_iterator(iterator_fn(val_ds)),
             },
             config="pubchem_large",
             data_dir=data_dir,
