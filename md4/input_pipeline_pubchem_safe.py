@@ -215,7 +215,18 @@ def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048, pad_to_lengt
                     "atom_types": tf.TensorSpec(shape=(pad_to_length,), dtype=tf.int8),
                 }
             )
+        test_ds = ds_from_iterator(iterator_closure(train_ds))
+        print(test_ds.element_spec)
 
+        #get the first element
+        first_element = test_ds.take(1).as_numpy_iterator().next()
+        print(first_element)
+
+        #get the second element
+        second_element = test_ds.skip(1).take(1).as_numpy_iterator().next()
+        print(second_element)
+        return
+    
         pubchem_builder = tfds.dataset_builders.store_as_tfds_dataset(
             name="pubchem_large",
             version="1.0.1",
