@@ -186,17 +186,16 @@ def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048, pad_to_lengt
         pubchem_builder = tfds.builder("pubchem_large", data_dir=data_dir, config="pubchem_large")
         print("Loading existing TFDS dataset...")
     except Exception:
-        # Create dataset builder if it doesn't exist
-        print("Creating new TFDS dataset...")
-        ds = load_dataset("jablonkagroup/pubchem-smiles-molecular-formula", split="train", cache_dir=data_dir, streaming=True)
-
         # Create partial function with fixed parameters
         process_func = partial(
             rdkit_utils.process_smiles, fp_radius=fp_radius, fp_bits=fp_bits, pad_to_length=pad_to_length
         )
 
-        train_ds = ds.select(range(int(len(ds) * 0.95)))
-        val_ds = ds.select(range(int(len(ds) * 0.95), len(ds)))
+        print("Loading full dataset without streaming...")
+        ds_full = load_dataset("jablonkagroup/pubchem-smiles-molecular-formula", split="train", cache_dir=data_dir, streaming=False)
+        train_size = int(len(ds_full) * 0.95)
+        train_ds = ds_full.select(range(train_size))
+        val_ds = ds_full.select(range(train_size, len(ds_full)))
 
         def iterator_fn(ds):
             for smi in ds["smiles"]:
