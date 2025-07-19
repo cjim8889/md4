@@ -201,7 +201,7 @@ def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048, pad_to_lengt
             for smi in ds["smiles"]:
                 features = process_func(smi)
                 if features is not None:
-                    yield features["smiles"], features
+                    yield features
 
         def ds_from_iterator(iterator):
             return tf.data.Dataset.from_generator(
