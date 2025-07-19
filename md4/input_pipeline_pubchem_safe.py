@@ -197,27 +197,23 @@ def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048, pad_to_lengt
         train_ds = ds_full.select(range(train_size))
         val_ds = ds_full.select(range(train_size, len(ds_full)))
 
-        def iterator_fn(ds):
-            for smi in ds["smiles"]:
-                features = process_func(smi)
-                if features is not None:
-                    yield features
+        def iterator_closure(ds):
+            def iterator():
+                for smi in ds["smiles"]:
+                    features = process_func(smi)
+                    if features is not None:
+                        yield features
+            return iterator
 
-        def ds_from_iterator(iterator):
+        def ds_from_iterator(generator):
             return tf.data.Dataset.from_generator(
-                iterator,
-                output_types={
-                    "smiles": tf.string,
-                    "safe": tf.string,
-                    "fingerprint": tf.bool,
-                    "atom_types": tf.int8,
-                },
-                output_shapes={
-                    "smiles": tf.TensorShape([]),
-                    "safe": tf.TensorShape([]),
-                    "fingerprint": tf.TensorShape([fp_bits]),
-                    "atom_types": tf.TensorShape([pad_to_length]),
-                },
+                generator,
+                output_signature={
+                    "smiles": tf.TensorSpec(shape=(), dtype=tf.string),
+                    "safe": tf.TensorSpec(shape=(), dtype=tf.string),
+                    "fingerprint": tf.TensorSpec(shape=(fp_bits,), dtype=tf.bool),
+                    "atom_types": tf.TensorSpec(shape=(pad_to_length,), dtype=tf.int8),
+                }
             )
 
         pubchem_builder = tfds.dataset_builders.store_as_tfds_dataset(
@@ -236,8 +232,8 @@ def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048, pad_to_lengt
                 }
             ),
             split_datasets={
-                "train": ds_from_iterator(iterator_fn(train_ds)),
-                "validation": ds_from_iterator(iterator_fn(val_ds)),
+                "train": ds_from_iterator(iterator_closure(train_ds)),
+                "validation": ds_from_iterator(iterator_closure(val_ds)),
             },
             config="pubchem_large",
             data_dir=data_dir,
