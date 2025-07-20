@@ -40,6 +40,47 @@ ATOM_TYPES = {
     'PAD': 20
 }
 
+# Inverse mapping from indices to atom symbols
+INVERSE_ATOM_TYPES = {v: k for k, v in ATOM_TYPES.items()}
+
+def atom_types_to_symbols(atom_types):
+    """Convert atom type indices to symbols.
+    
+    Args:
+        atom_types: numpy array of atom type indices
+        
+    Returns:
+        List of atom symbols
+    """
+    symbols = []
+    for idx in atom_types:
+        if idx in INVERSE_ATOM_TYPES:
+            symbol = INVERSE_ATOM_TYPES[idx]
+            if symbol != 'PAD':  # Skip padding tokens
+                symbols.append(symbol)
+        else:
+            symbols.append(f'UNK({idx})')  # Unknown atom type
+    return symbols
+
+def format_atom_types_summary(atom_types):
+    """Create a summary string of atom types for display.
+    
+    Args:
+        atom_types: numpy array of atom type indices
+        
+    Returns:
+        String summary of atom counts
+    """
+    symbols = atom_types_to_symbols(atom_types)
+    
+    # Count occurrences of each atom type
+    from collections import Counter
+    atom_counts = Counter(symbols)
+    
+    # Format as "C:6, N:2, O:1" etc.
+    count_strs = [f"{atom}:{count}" for atom, count in sorted(atom_counts.items())]
+    return ", ".join(count_strs)
+
 def filter_molecule(mol):
     """Basic molecule filtering without atom type restrictions."""
     if Descriptors.MolWt(mol) >= 2000:  # Molecular weight filter
