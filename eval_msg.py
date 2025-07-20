@@ -2,10 +2,9 @@
 """Evaluation script for MSG dataset: load checkpoints and generate SMILES."""
 
 import argparse
-import dataclasses
 import multiprocessing as mp
 import os
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 import flax.linen as nn
 import flax.jax_utils as flax_utils
@@ -37,7 +36,7 @@ def process_single_molecule(args_tuple):
         args_tuple: (inchi, fingerprint, pad_to_length)
     
     Returns:
-        Tuple of (smiles, atom_types, inchi, fingerprint) or None if failed
+        Tuple of (smiles, atom_types, inchi, predicted_fingerprint, original_fingerprint) or None if failed
     """
     inchi, fingerprint, pad_to_length = args_tuple
     
@@ -55,30 +54,13 @@ def process_single_molecule(args_tuple):
         features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=2048, pad_to_length=pad_to_length)
         if features is None or 'atom_types' not in features:
             return None
+        
+        # Get original fingerprint from features
+        original_fingerprint = features.get('fingerprint', np.zeros(2048))
             
-        return (smiles, features['atom_types'], inchi, fingerprint)
+        return (smiles, features['atom_types'], inchi, fingerprint, original_fingerprint)
     except Exception:
         return None
-
-
-@dataclasses.dataclass
-class EvalResults:
-    """Container for evaluation results."""
-    original_smiles: List[str]
-    original_fingerprints: List[np.ndarray]
-    generated_smiles: List[List[str]]
-    original_inchi: Optional[List[str]] = None
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for saving."""
-        result = {
-            "original_smiles": self.original_smiles,
-            "original_fingerprints": [fp.tolist() for fp in self.original_fingerprints],
-            "generated_smiles": self.generated_smiles,
-        }
-        if self.original_inchi:
-            result["original_inchi"] = self.original_inchi
-        return result
 
 
 class MolecularEvaluator:
@@ -126,7 +108,7 @@ class MolecularEvaluator:
         schedule_fn = lambda step: self.config.learning_rate
         
         # Create model and train state
-        model, optimizer, train_state, metrics_class = train.create_train_state(
+        model, _, train_state, _ = train.create_train_state(
             self.config,
             rng,
             input_shape=(self.config.batch_size * 10,) + data_shape,
@@ -162,10 +144,8 @@ class MolecularEvaluator:
         print(f"Loaded {len(df)} evaluation samples")
         return df
 
-
-
     def _prepare_molecular_data_iterator(self, eval_df: pl.DataFrame, pad_to_length: int = 128, 
-                                       num_processes: Optional[int] = None) -> Iterator[Tuple[str, np.ndarray, str, np.ndarray]]:
+                                       num_processes: Optional[int] = None) -> Iterator[Tuple[str, np.ndarray, str, np.ndarray, np.ndarray]]:
         """Convert InChI data to SMILES and extract features using multiprocessing.
         
         Args:
@@ -174,7 +154,7 @@ class MolecularEvaluator:
             num_processes: Number of processes to use (None for auto)
             
         Yields:
-            Tuples of (smiles, atom_types, inchi, fingerprint) for successfully processed molecules
+            Tuples of (smiles, atom_types, inchi, predicted_fingerprint, original_fingerprint) for successfully processed molecules
         """
         if not RDKIT_AVAILABLE:
             raise ImportError("RDKit is required to convert InChI to SMILES.")
@@ -213,51 +193,57 @@ class MolecularEvaluator:
             for result in tqdm(pool.imap_unordered(process_single_molecule, args_list, chunksize=max(1, len(args_list) // (num_processes * 4))), 
                              total=total_count, desc="Processing molecules"):
                 if result is not None:
-                    smiles, atom_types, inchi, fingerprint = result
+                    smiles, atom_types, inchi, fingerprint, original_fingerprint = result
                     processed_count += 1
-                    yield smiles, atom_types, inchi, fingerprint
+                    yield smiles, atom_types, inchi, fingerprint, original_fingerprint
         
         print(f"Successfully processed {processed_count}/{total_count} molecules")
 
-    def _prepare_molecular_data(self, eval_df: pl.DataFrame, pad_to_length: int = 128) -> Tuple[List[str], List[np.ndarray], List[str], List[np.ndarray]]:
-        """Convert InChI data to SMILES and extract features (legacy method for debug mode)."""
-        smiles_list = []
-        atom_types_list = []
-        inchi_list = []
-        fingerprints_list = []
+    def _process_fingerprints(self, predicted_fingerprints: np.ndarray, original_fingerprints: np.ndarray, threshold: float = 0.5) -> Tuple[np.ndarray, np.ndarray]:
+        """Process fingerprints by thresholding and folding, and calculate bit differences.
         
-        for smiles, atom_types, inchi, fingerprint in self._prepare_molecular_data_iterator(eval_df, pad_to_length, num_processes=self.args.num_processes):
-            smiles_list.append(smiles)
-            atom_types_list.append(atom_types)
-            inchi_list.append(inchi)
-            fingerprints_list.append(fingerprint)
-        
-        return smiles_list, atom_types_list, inchi_list, fingerprints_list
-
-    def _process_fingerprints(self, fingerprints: np.ndarray, threshold: float = 0.5, fold_factor: int = 2) -> np.ndarray:
-        """Process fingerprints by thresholding and folding."""
+        Args:
+            predicted_fingerprints: Predicted fingerprints from model
+            original_fingerprints: Original fingerprints computed from SMILES
+            threshold: Threshold for binarization
+            
+        Returns:
+            Tuple of (processed_fingerprints, bit_differences)
+        """
         if not RDKIT_AVAILABLE:
             print("WARNING: RDKit not available, skipping fingerprint processing")
-            return fingerprints
+            return predicted_fingerprints, np.zeros(predicted_fingerprints.shape[0] if predicted_fingerprints.ndim > 1 else 1)
         
-        try:
-            # Convert to binary with threshold
-            binary_fingerprints = (fingerprints >= threshold).astype(np.int32)
-            
-            # Fold the fingerprints
-            first_half = binary_fingerprints[:, :2048]
-            second_half = binary_fingerprints[:, 2048:]
-            folded_fingerprints = np.logical_or(first_half, second_half).astype(np.int32)
-            return folded_fingerprints
-            
-        except Exception as e:
-            print(f"WARNING: Failed to process fingerprints: {e}")
-            return fingerprints
+        # Convert predicted fingerprints to binary with threshold
+        binary_predicted = (predicted_fingerprints >= threshold).astype(np.int32)
+        
+        # Ensure both fingerprints have same shape
+        if binary_predicted.ndim == 1:
+            binary_predicted = binary_predicted[None, :]
+        if original_fingerprints.ndim == 1:
+            original_fingerprints = original_fingerprints[None, :]
+        
+        # Fold the predicted fingerprints (original should already be folded/processed)
+        if binary_predicted.shape[1] > 2048:
+            first_half = binary_predicted[:, :2048]
+            second_half = binary_predicted[:, 2048:]
+            folded_predicted = np.logical_or(first_half, second_half).astype(np.int32)
+        else:
+            folded_predicted = binary_predicted
+        
+        # Calculate bit differences
+        bit_differences = np.sum(folded_predicted != original_fingerprints, axis=1)
+        
+        return folded_predicted, bit_differences
 
-    def _generate_single_datapoint(self, fingerprint: np.ndarray, atom_types: np.ndarray) -> List[str]:
+    def _generate_single_datapoint(self, predicted_fingerprint: np.ndarray, original_fingerprint: np.ndarray, atom_types: np.ndarray) -> List[str]:
         """Generate samples for a single datapoint using simple_generate."""
-        # Process fingerprint
-        processed_fp = self._process_fingerprints(fingerprint[None, :], threshold=0.5, fold_factor=2)[0]
+        # Process fingerprint and get bit differences
+        processed_fp, bit_differences = self._process_fingerprints(predicted_fingerprint[None, :], original_fingerprint[None, :], threshold=0.5)
+        processed_fp = processed_fp[0]
+        bit_diff = bit_differences[0]
+        
+        print(f"Fingerprint bit differences: {bit_diff}/2048 ({bit_diff/2048*100:.1f}%)")
         
         # Prepare conditioning
         conditioning = {
@@ -284,12 +270,16 @@ class MolecularEvaluator:
         
         return generated_smiles
 
-    def _generate_batch_samples(self, fingerprints: np.ndarray, atom_types: np.ndarray) -> List[List[str]]:
+    def _generate_batch_samples(self, predicted_fingerprints: np.ndarray, original_fingerprints: np.ndarray, atom_types: np.ndarray) -> List[List[str]]:
         """Generate samples for a batch using pmap."""
-        batch_size = fingerprints.shape[0]
+        batch_size = predicted_fingerprints.shape[0]
         
-        # Process fingerprints
-        processed_fingerprints = self._process_fingerprints(fingerprints, threshold=0.5, fold_factor=2)
+        # Process fingerprints and get bit differences
+        processed_fingerprints, bit_differences = self._process_fingerprints(predicted_fingerprints, original_fingerprints, threshold=0.5)
+        
+        # Print average bit differences for the batch
+        avg_bit_diff = np.mean(bit_differences)
+        print(f"Average fingerprint bit differences for batch: {avg_bit_diff:.1f}/2048 ({avg_bit_diff/2048*100:.1f}%)")
         
         # Expand for multiple samples per input
         expanded_fingerprints = jnp.repeat(jnp.array(processed_fingerprints, dtype=jnp.int32), self.args.num_samples, axis=0)
@@ -366,7 +356,7 @@ class MolecularEvaluator:
         
         return batch_results
 
-    def _process_single_molecule_debug(self, eval_df: pl.DataFrame, pad_to_length: int = 128) -> Optional[Tuple[str, np.ndarray, str, np.ndarray]]:
+    def _process_single_molecule_debug(self, eval_df: pl.DataFrame, pad_to_length: int = 128) -> Optional[Tuple[str, np.ndarray, str, np.ndarray, np.ndarray]]:
         """Process a single molecule for debug mode - finds first valid molecule."""
         if not RDKIT_AVAILABLE:
             raise ImportError("RDKit is required to convert InChI to SMILES.")
@@ -403,9 +393,10 @@ class MolecularEvaluator:
                 if features is None or 'atom_types' not in features:
                     continue
                     
-                fingerprint = fingerprints_list[i] if i < len(fingerprints_list) else np.zeros(2048)
+                predicted_fingerprint = fingerprints_list[i] if i < len(fingerprints_list) else np.zeros(2048)
+                original_fingerprint = features.get('fingerprint', np.zeros(2048))
                 print(f"Found valid molecule at index {i}")
-                return smiles, features['atom_types'], inchi, fingerprint
+                return smiles, features['atom_types'], inchi, predicted_fingerprint, original_fingerprint
                 
             except Exception as e:
                 print(f"Failed to process molecule {i}: {e}")
@@ -429,18 +420,20 @@ class MolecularEvaluator:
             print("ERROR: No valid molecules found in dataset")
             return
         
-        original_smiles, atom_types, original_inchi, fingerprint = result
-        fingerprint = np.array(fingerprint)
+        original_smiles, atom_types, original_inchi, predicted_fingerprint, original_fingerprint = result
+        predicted_fingerprint = np.array(predicted_fingerprint)
+        original_fingerprint = np.array(original_fingerprint)
         atom_types = np.array(atom_types)
         
         print(f"Original InChI: {original_inchi}")
         print(f"Original SMILES: {original_smiles}")
-        print(f"Fingerprint shape: {fingerprint.shape}")
+        print(f"Predicted fingerprint shape: {predicted_fingerprint.shape}")
+        print(f"Original fingerprint shape: {original_fingerprint.shape}")
         print(f"Atom types shape: {atom_types.shape}")
         print(f"Generating {self.args.num_samples} samples...")
         
         # Generate samples
-        generated_smiles = self._generate_single_datapoint(fingerprint, atom_types)
+        generated_smiles = self._generate_single_datapoint(predicted_fingerprint, original_fingerprint, atom_types)
         
         print("\n=== RESULTS ===")
         for i, smiles in enumerate(generated_smiles):
@@ -536,8 +529,8 @@ class MolecularEvaluator:
         molecule_iterator = self._prepare_molecular_data_iterator(eval_df, num_processes=self.args.num_processes)
         
         try:
-            for smiles, atom_types, inchi, fingerprint in molecule_iterator:
-                current_batch.append((smiles, atom_types, inchi, fingerprint))
+            for smiles, atom_types, inchi, predicted_fingerprint, original_fingerprint in molecule_iterator:
+                current_batch.append((smiles, atom_types, inchi, predicted_fingerprint, original_fingerprint))
                 
                 # Process batch when full
                 if len(current_batch) == batch_size:
@@ -562,23 +555,24 @@ class MolecularEvaluator:
         self._combine_intermediate_results()
         print("Batch evaluation completed successfully!")
 
-    def _process_and_save_batch(self, batch_data: List[Tuple[str, np.ndarray, str, np.ndarray]], batch_idx: int):
+    def _process_and_save_batch(self, batch_data: List[Tuple[str, np.ndarray, str, np.ndarray, np.ndarray]], batch_idx: int):
         """Process a single batch of molecules and save results."""
         if not batch_data:
             return
             
         # Unpack batch data
-        batch_smiles, batch_atom_types, batch_inchi, batch_fingerprints = zip(*batch_data)
-        batch_fingerprints = np.array(batch_fingerprints)
+        batch_smiles, batch_atom_types, batch_inchi, batch_predicted_fingerprints, batch_original_fingerprints = zip(*batch_data)
+        batch_predicted_fingerprints = np.array(batch_predicted_fingerprints)
+        batch_original_fingerprints = np.array(batch_original_fingerprints)
         batch_atom_types = np.array(list(batch_atom_types))
         
         print(f"Processing batch {batch_idx} with {len(batch_data)} molecules...")
         
         # Generate samples for batch
-        batch_generated = self._generate_batch_samples(batch_fingerprints, batch_atom_types)
+        batch_generated = self._generate_batch_samples(batch_predicted_fingerprints, batch_original_fingerprints, batch_atom_types)
         
         # Save batch results
-        self._save_batch_results(batch_idx, list(batch_smiles), batch_fingerprints, batch_generated, list(batch_inchi))
+        self._save_batch_results(batch_idx, list(batch_smiles), batch_predicted_fingerprints, batch_generated, list(batch_inchi))
 
 
 def parse_arguments() -> argparse.Namespace:
