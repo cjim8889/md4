@@ -237,17 +237,28 @@ class MolecularEvaluator:
         return folded_predicted, bit_differences
 
     def _generate_single_datapoint(self, predicted_fingerprint: np.ndarray, original_fingerprint: np.ndarray, atom_types: np.ndarray) -> List[str]:
-        """Generate samples for a single datapoint using simple_generate."""
+        """Generate samples for a single datapoint using simple_generate."""        
         # Process fingerprint and get bit differences
         processed_fp, bit_differences = self._process_fingerprints(predicted_fingerprint[None, :], original_fingerprint[None, :], threshold=0.5)
-        processed_fp = processed_fp[0]
         bit_diff = bit_differences[0]
         
         print(f"Fingerprint bit differences: {bit_diff}/2048 ({bit_diff/2048*100:.1f}%)")
         
+        # Display atom types information
+        atom_types_summary = rdkit_utils.format_atom_types_summary(atom_types)
+        print(f"Atom types: {atom_types_summary}")
+        
+        # Use the selected fingerprint for generation
+        if self.args.use_original_fingerprints:
+            # For original fingerprints, use them directly (they should already be processed)
+            fp_for_conditioning = original_fingerprint
+        else:
+            # For predicted fingerprints, use the processed version
+            fp_for_conditioning = processed_fp[0]
+        
         # Prepare conditioning
         conditioning = {
-            "fingerprint": jnp.repeat(jnp.array(processed_fp, dtype=jnp.int32)[None, :], self.args.num_samples, axis=0),
+            "fingerprint": jnp.repeat(jnp.array(fp_for_conditioning, dtype=jnp.int32)[None, :], self.args.num_samples, axis=0),
             "atom_types": jnp.repeat(jnp.array(atom_types, dtype=jnp.int32)[None, :], self.args.num_samples, axis=0),
         }
         
@@ -281,8 +292,27 @@ class MolecularEvaluator:
         avg_bit_diff = np.mean(bit_differences)
         print(f"Average fingerprint bit differences for batch: {avg_bit_diff:.1f}/2048 ({avg_bit_diff/2048*100:.1f}%)")
         
+        # Display atom types information for the batch
+        all_atom_symbols = []
+        for i in range(batch_size):
+            symbols = rdkit_utils.atom_types_to_symbols(atom_types[i])
+            all_atom_symbols.extend(symbols)
+        
+        from collections import Counter
+        batch_atom_counts = Counter(all_atom_symbols)
+        atom_summary = ", ".join([f"{atom}:{count}" for atom, count in sorted(batch_atom_counts.items())])
+        print(f"Batch atom types summary: {atom_summary}")
+        
+        # Use the selected fingerprints for generation
+        if self.args.use_original_fingerprints:
+            # For original fingerprints, use them directly (they should already be processed)
+            fingerprints_for_conditioning = original_fingerprints
+        else:
+            # For predicted fingerprints, use the processed version
+            fingerprints_for_conditioning = processed_fingerprints
+        
         # Expand for multiple samples per input
-        expanded_fingerprints = jnp.repeat(jnp.array(processed_fingerprints, dtype=jnp.int32), self.args.num_samples, axis=0)
+        expanded_fingerprints = jnp.repeat(jnp.array(fingerprints_for_conditioning, dtype=jnp.int32), self.args.num_samples, axis=0)
         expanded_atom_types = jnp.repeat(jnp.array(atom_types, dtype=jnp.int32), self.args.num_samples, axis=0)
 
         total_samples = batch_size * self.args.num_samples
@@ -430,6 +460,11 @@ class MolecularEvaluator:
         print(f"Predicted fingerprint shape: {predicted_fingerprint.shape}")
         print(f"Original fingerprint shape: {original_fingerprint.shape}")
         print(f"Atom types shape: {atom_types.shape}")
+        
+        # Display atom types in human-readable format
+        atom_types_summary = rdkit_utils.format_atom_types_summary(atom_types)
+        print(f"Molecule composition: {atom_types_summary}")
+        
         print(f"Generating {self.args.num_samples} samples...")
         
         # Generate samples
@@ -609,6 +644,8 @@ def parse_arguments() -> argparse.Namespace:
     # Processing arguments
     parser.add_argument("--num_processes", type=int, default=None, 
                        help="Number of processes for molecular data processing (default: auto)")
+    parser.add_argument("--use_original_fingerprints", action="store_true",
+                       help="Use original RDKit fingerprints instead of predicted fingerprints for generation")
     
     return parser.parse_args()
 
@@ -632,6 +669,10 @@ def main():
     mode_info = f"{args.mode} mode"
     if args.no_checkpoint:
         mode_info += " (no checkpoint)"
+    if args.use_original_fingerprints:
+        mode_info += " (using original fingerprints)"
+    else:
+        mode_info += " (using predicted fingerprints)"
     print(f"Starting MSG evaluation in {mode_info}...")
     
     # Create evaluator and run
