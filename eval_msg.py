@@ -186,10 +186,10 @@ def detect_molecular_format_and_prepare_data(eval_df: pl.DataFrame, pad_to_lengt
         smiles = inchi_to_smiles(inchi)
         if smiles is not None:
             # Extract atom types from converted SMILES
-            features = rdkit_utils.get_molecule_features(smiles, radius=2, n_bits=2048, pad_to_length=pad_to_length)
+            features = rdkit_utils.process_smiles(smiles, radius=2, n_bits=2048, pad_to_length=pad_to_length)
             if features is not None and 'atom_types' in features:
                 smiles_list.append(smiles)
-                atom_types_list.append(features['atom_types'])
+                atom_types_list.append(features['atom_types'].astype(np.int32))
                 valid_inchi_list.append(inchi)
                 
                 # Add corresponding fingerprint if available
