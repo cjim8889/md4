@@ -136,6 +136,17 @@ class MolecularEvaluator:
         except Exception as e:
             raise ValueError(f"Failed to load tokenizer from {self.config.tokenizer or self.args.tokenizer_path}: {e}")
             
+    def _load_checkpoint_manager(self) -> orbax_checkpoint.CheckpointManager:
+        """Load checkpoint manager."""
+        if not self.args.checkpoint_dir:
+            raise ValueError("checkpoint_dir must be specified when loading checkpoints")
+        checkpointers = dict(train_state=orbax_checkpoint.PyTreeCheckpointer())
+        return orbax_checkpoint.CheckpointManager(
+            self.args.checkpoint_dir,
+            checkpointers=checkpointers,
+            options=orbax_checkpoint.CheckpointManagerOptions(create=False),
+        )
+        
     def _load_model_and_state(self) -> Tuple[nn.Module, train.TrainState]:
         """Load model and checkpoint state."""
         rng = utils.get_rng(self.config.seed)
@@ -158,9 +169,7 @@ class MolecularEvaluator:
             return model, train_state
         
         # Load checkpoint
-        from etils import epath
-        work_dir = epath.Path(self.args.checkpoint_dir)
-        checkpoint_manager = train._get_checkpoint_manager(work_dir)
+        checkpoint_manager = self._load_checkpoint_manager()
         step = self.args.checkpoint_step if self.args.checkpoint_step >= 0 else checkpoint_manager.latest_step()
         
         if step is None:
