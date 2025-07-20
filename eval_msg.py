@@ -73,6 +73,13 @@ class MolecularEvaluator:
         self.model, self.train_state = self._load_model_and_state()
         self.rng = utils.get_rng(42)  # Fixed seed for reproducible evaluation
         
+        # Make sure sampling uses EMA weights
+        if self.train_state.ema_params is not None:
+            self.train_state = self.train_state.replace(
+                params=self.train_state.ema_params
+            )
+            print("Using EMA weights for sampling")
+        
     def _load_config(self) -> ml_collections.ConfigDict:
         """Load molecular configuration."""
         config = molecular.get_config()
@@ -83,7 +90,7 @@ class MolecularEvaluator:
         """Load SMILES tokenizer."""
         try:
             tokenizer = transformers.AutoTokenizer.from_pretrained(self.config.tokenizer or self.args.tokenizer_path)
-            print(f"Loaded tokenizer with vocab size: {tokenizer.vocab_size}")
+            print(f"Loaded tokenizer with vocab size: {tokenizer.vocab_size} from {self.config.tokenizer or self.args.tokenizer_path}")
             return tokenizer
         except Exception as e:
             raise ValueError(f"Failed to load tokenizer from {self.config.tokenizer or self.args.tokenizer_path}: {e}")
