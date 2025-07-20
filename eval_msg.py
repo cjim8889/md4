@@ -3,8 +3,9 @@
 
 import argparse
 import dataclasses
+import multiprocessing as mp
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import flax.linen as nn
 import flax.jax_utils as flax_utils
@@ -27,6 +28,37 @@ except ImportError:
 # Import MD4 modules
 from md4 import rdkit_utils, sampling, train, utils
 from md4.configs.md4 import molecular
+
+
+def process_single_molecule(args_tuple):
+    """Worker function for multiprocessing molecule conversion.
+    
+    Args:
+        args_tuple: (inchi, fingerprint, pad_to_length)
+    
+    Returns:
+        Tuple of (smiles, atom_types, inchi, fingerprint) or None if failed
+    """
+    inchi, fingerprint, pad_to_length = args_tuple
+    
+    if not RDKIT_AVAILABLE:
+        return None
+    
+    try:
+        # Convert InChI to SMILES
+        mol = Chem.MolFromInchi(inchi)
+        if mol is None:
+            return None
+        smiles = Chem.MolToSmiles(mol)
+        
+        # Extract features
+        features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=2048, pad_to_length=pad_to_length)
+        if features is None or 'atom_types' not in features:
+            return None
+            
+        return (smiles, features['atom_types'], inchi, fingerprint)
+    except Exception:
+        return None
 
 
 @dataclasses.dataclass
@@ -130,22 +162,20 @@ class MolecularEvaluator:
         print(f"Loaded {len(df)} evaluation samples")
         return df
 
-    def _inchi_to_smiles(self, inchi: str) -> Optional[str]:
-        """Convert InChI to SMILES using RDKit."""
-        if not RDKIT_AVAILABLE:
-            raise ImportError("RDKit is required for InChI to SMILES conversion")
-        
-        try:
-            mol = Chem.MolFromInchi(inchi)
-            if mol is None:
-                return None
-            return Chem.MolToSmiles(mol)
-        except Exception as e:
-            print(f"WARNING: Failed to convert InChI to SMILES: {inchi[:50]}... Error: {e}")
-            return None
 
-    def _prepare_molecular_data(self, eval_df: pl.DataFrame, pad_to_length: int = 128) -> Tuple[List[str], List[np.ndarray], List[str], List[np.ndarray]]:
-        """Convert InChI data to SMILES and extract features."""
+
+    def _prepare_molecular_data_iterator(self, eval_df: pl.DataFrame, pad_to_length: int = 128, 
+                                       num_processes: Optional[int] = None) -> Iterator[Tuple[str, np.ndarray, str, np.ndarray]]:
+        """Convert InChI data to SMILES and extract features using multiprocessing.
+        
+        Args:
+            eval_df: DataFrame containing InChI data
+            pad_to_length: Length to pad atom types to
+            num_processes: Number of processes to use (None for auto)
+            
+        Yields:
+            Tuples of (smiles, atom_types, inchi, fingerprint) for successfully processed molecules
+        """
         if not RDKIT_AVAILABLE:
             raise ImportError("RDKit is required to convert InChI to SMILES.")
         
@@ -163,30 +193,46 @@ class MolecularEvaluator:
         
         if not fingerprints_list:
             print("WARNING: No predicted_fingerprint column found, using zero fingerprints")
+            fingerprints_list = [np.zeros(2048) for _ in range(len(inchi_list))]
         
-        print("Converting InChI to SMILES and extracting features...")
+        print(f"Converting {len(inchi_list)} InChI to SMILES using multiprocessing...")
         
+        # Prepare arguments for multiprocessing
+        args_list = [(inchi, fingerprints_list[i], pad_to_length) for i, inchi in enumerate(inchi_list)]
+        
+        # Use multiprocessing to convert molecules
+        if num_processes is None:
+            num_processes = min(mp.cpu_count(), len(args_list))
+        
+        print(f"Using {num_processes} processes for molecular conversion")
+        processed_count = 0
+        total_count = len(args_list)
+        
+        with mp.Pool(processes=num_processes) as pool:
+            # Use imap_unordered for better memory efficiency and immediate results
+            for result in tqdm(pool.imap_unordered(process_single_molecule, args_list, chunksize=max(1, len(args_list) // (num_processes * 4))), 
+                             total=total_count, desc="Processing molecules"):
+                if result is not None:
+                    smiles, atom_types, inchi, fingerprint = result
+                    processed_count += 1
+                    yield smiles, atom_types, inchi, fingerprint
+        
+        print(f"Successfully processed {processed_count}/{total_count} molecules")
+
+    def _prepare_molecular_data(self, eval_df: pl.DataFrame, pad_to_length: int = 128) -> Tuple[List[str], List[np.ndarray], List[str], List[np.ndarray]]:
+        """Convert InChI data to SMILES and extract features (legacy method for debug mode)."""
         smiles_list = []
         atom_types_list = []
-        valid_inchi_list = []
-        valid_fingerprints_list = []
+        inchi_list = []
+        fingerprints_list = []
         
-        for i, inchi in enumerate(tqdm(inchi_list, desc="Processing molecules")):
-            smiles = self._inchi_to_smiles(inchi)
-            if smiles is not None:
-                features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=2048, pad_to_length=pad_to_length)
-                if features is not None and 'atom_types' in features:
-                    smiles_list.append(smiles)
-                    atom_types_list.append(features['atom_types'])
-                    valid_inchi_list.append(inchi)
-                    
-                    if fingerprints_list and i < len(fingerprints_list):
-                        valid_fingerprints_list.append(fingerprints_list[i])
-                    else:
-                        valid_fingerprints_list.append(np.zeros(2048))
+        for smiles, atom_types, inchi, fingerprint in self._prepare_molecular_data_iterator(eval_df, pad_to_length, num_processes=self.args.num_processes):
+            smiles_list.append(smiles)
+            atom_types_list.append(atom_types)
+            inchi_list.append(inchi)
+            fingerprints_list.append(fingerprint)
         
-        print(f"Successfully processed {len(smiles_list)}/{len(inchi_list)} molecules")
-        return smiles_list, atom_types_list, valid_inchi_list, valid_fingerprints_list
+        return smiles_list, atom_types_list, inchi_list, fingerprints_list
 
     def _process_fingerprints(self, fingerprints: np.ndarray, threshold: float = 0.5, fold_factor: int = 2) -> np.ndarray:
         """Process fingerprints by thresholding and folding."""
@@ -320,6 +366,53 @@ class MolecularEvaluator:
         
         return batch_results
 
+    def _process_single_molecule_debug(self, eval_df: pl.DataFrame, pad_to_length: int = 128) -> Optional[Tuple[str, np.ndarray, str, np.ndarray]]:
+        """Process a single molecule for debug mode - finds first valid molecule."""
+        if not RDKIT_AVAILABLE:
+            raise ImportError("RDKit is required to convert InChI to SMILES.")
+        
+        columns = eval_df.columns
+        inchi_columns = [col for col in columns if 'inchi' in col.lower()]
+        
+        if not inchi_columns:
+            raise ValueError("No InChI columns found in the dataframe")
+        
+        inchi_col = inchi_columns[0]
+        print(f"Found InChI data in column: {inchi_col}")
+        
+        inchi_list = eval_df[inchi_col].to_list()
+        fingerprints_list = eval_df["predicted_fingerprint"].to_list() if "predicted_fingerprint" in eval_df.columns else []
+        
+        if not fingerprints_list:
+            print("WARNING: No predicted_fingerprint column found, using zero fingerprints")
+            fingerprints_list = [np.zeros(2048) for _ in range(len(inchi_list))]
+        
+        print(f"Searching for first valid molecule from {len(inchi_list)} InChI entries...")
+        
+        # Process molecules one by one until we find a valid one
+        for i, inchi in enumerate(inchi_list):
+            try:
+                # Convert InChI to SMILES
+                mol = Chem.MolFromInchi(inchi)
+                if mol is None:
+                    continue
+                smiles = Chem.MolToSmiles(mol)
+                
+                # Extract features
+                features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=2048, pad_to_length=pad_to_length)
+                if features is None or 'atom_types' not in features:
+                    continue
+                    
+                fingerprint = fingerprints_list[i] if i < len(fingerprints_list) else np.zeros(2048)
+                print(f"Found valid molecule at index {i}")
+                return smiles, features['atom_types'], inchi, fingerprint
+                
+            except Exception as e:
+                print(f"Failed to process molecule {i}: {e}")
+                continue
+        
+        return None
+
     def run_debug_mode(self):
         """Run evaluation in debug mode (single datapoint)."""
         print("=== DEBUG MODE: Processing single datapoint ===")
@@ -328,17 +421,17 @@ class MolecularEvaluator:
             print("NOTE: Using random model weights - generated samples may be low quality")
         
         eval_df = self._load_eval_data()
-        smiles_list, atom_types_list, inchi_list, fingerprints = self._prepare_molecular_data(eval_df)
         
-        if not smiles_list:
+        # Process only until we find the first valid molecule
+        result = self._process_single_molecule_debug(eval_df)
+        
+        if result is None:
             print("ERROR: No valid molecules found in dataset")
             return
         
-        # Use first valid molecule
-        original_smiles = smiles_list[0]
-        fingerprint = np.array(fingerprints[0])
-        atom_types = np.array(atom_types_list[0])
-        original_inchi = inchi_list[0]
+        original_smiles, atom_types, original_inchi, fingerprint = result
+        fingerprint = np.array(fingerprint)
+        atom_types = np.array(atom_types)
         
         print(f"Original InChI: {original_inchi}")
         print(f"Original SMILES: {original_smiles}")
@@ -423,48 +516,69 @@ class MolecularEvaluator:
         print(f"Total samples: {len(combined_df)}")
 
     def run_batch_mode(self):
-        """Run evaluation in batch mode."""
-        print("=== BATCH MODE: Processing full dataset ===")
+        """Run evaluation in batch mode using streaming processing."""
+        print("=== BATCH MODE: Processing full dataset with streaming ===")
         
         if self.args.no_checkpoint:
             print("NOTE: Using random model weights - generated samples may be low quality")
         
         eval_df = self._load_eval_data()
-        smiles_list, atom_types_list, inchi_list, fingerprints = self._prepare_molecular_data(eval_df)
-        
-        if not smiles_list:
-            print("ERROR: No valid molecules found in dataset")
-            return
-        
-        # Process in complete batches
         batch_size = self.config.batch_size
-        num_complete_batches = len(smiles_list) // batch_size
-        num_samples_processed = num_complete_batches * batch_size
         
-        print(f"Processing {num_samples_processed}/{len(smiles_list)} samples in {num_complete_batches} complete batches")
+        print(f"Batch size: {batch_size}")
         print(f"Intermediate results will be saved to: {self.args.intermediate_dir}")
         
-        if num_samples_processed < len(smiles_list):
-            print(f"Dropping {len(smiles_list) - num_samples_processed} samples from incomplete last batch")
+        # Collect molecules into batches and process them as they become available
+        current_batch = []
+        batch_idx = 0
+        total_processed = 0
         
-        for batch_idx in tqdm(range(num_complete_batches), desc="Processing batches"):
-            start_idx = batch_idx * batch_size
-            end_idx = start_idx + batch_size
+        molecule_iterator = self._prepare_molecular_data_iterator(eval_df, num_processes=self.args.num_processes)
+        
+        try:
+            for smiles, atom_types, inchi, fingerprint in molecule_iterator:
+                current_batch.append((smiles, atom_types, inchi, fingerprint))
+                
+                # Process batch when full
+                if len(current_batch) == batch_size:
+                    self._process_and_save_batch(current_batch, batch_idx)
+                    total_processed += len(current_batch)
+                    batch_idx += 1
+                    current_batch = []
             
-            batch_smiles = smiles_list[start_idx:end_idx]
-            batch_fingerprints = np.array(fingerprints[start_idx:end_idx])
-            batch_atom_types = np.array(atom_types_list[start_idx:end_idx])
-            batch_inchi = inchi_list[start_idx:end_idx]
+            # Process remaining incomplete batch if any
+            if current_batch:
+                print(f"Processing final incomplete batch of {len(current_batch)} molecules")
+                self._process_and_save_batch(current_batch, batch_idx)
+                total_processed += len(current_batch)
+                batch_idx += 1
             
-            # Generate samples for batch
-            batch_generated = self._generate_batch_samples(batch_fingerprints, batch_atom_types)
+        except KeyboardInterrupt:
+            print(f"Processing interrupted. Processed {total_processed} molecules in {batch_idx} batches.")
             
-            # Save batch results
-            self._save_batch_results(batch_idx, batch_smiles, batch_fingerprints, batch_generated, batch_inchi)
+        print(f"Processed {total_processed} molecules in {batch_idx} batches total")
         
         # Combine all results
         self._combine_intermediate_results()
         print("Batch evaluation completed successfully!")
+
+    def _process_and_save_batch(self, batch_data: List[Tuple[str, np.ndarray, str, np.ndarray]], batch_idx: int):
+        """Process a single batch of molecules and save results."""
+        if not batch_data:
+            return
+            
+        # Unpack batch data
+        batch_smiles, batch_atom_types, batch_inchi, batch_fingerprints = zip(*batch_data)
+        batch_fingerprints = np.array(batch_fingerprints)
+        batch_atom_types = np.array(list(batch_atom_types))
+        
+        print(f"Processing batch {batch_idx} with {len(batch_data)} molecules...")
+        
+        # Generate samples for batch
+        batch_generated = self._generate_batch_samples(batch_fingerprints, batch_atom_types)
+        
+        # Save batch results
+        self._save_batch_results(batch_idx, list(batch_smiles), batch_fingerprints, batch_generated, list(batch_inchi))
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -497,6 +611,10 @@ def parse_arguments() -> argparse.Namespace:
                        help="Checkpoint step to load (-1 for latest)")
     parser.add_argument("--no_checkpoint", action="store_true", 
                        help="Skip loading model checkpoint (use random weights)")
+    
+    # Processing arguments
+    parser.add_argument("--num_processes", type=int, default=None, 
+                       help="Number of processes for molecular data processing (default: auto)")
     
     return parser.parse_args()
 
