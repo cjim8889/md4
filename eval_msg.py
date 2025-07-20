@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Evaluation script for MSG dataset: load checkpoints and generate SMILES."""
 
+import argparse
 import dataclasses
 import os
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,7 +14,6 @@ import ml_collections
 import numpy as np
 import polars as pl
 import transformers
-from absl import app, flags, logging
 from orbax import checkpoint as orbax_checkpoint
 from tqdm import tqdm
 
@@ -22,21 +22,11 @@ try:
     RDKIT_AVAILABLE = True
 except ImportError:
     RDKIT_AVAILABLE = False
-    logging.warning("RDKit not available. InChI to SMILES conversion will not work.")
+    print("WARNING: RDKit not available. InChI to SMILES conversion will not work.")
 
 # Import MD4 modules
 from md4 import rdkit_utils, sampling, train, utils
 from md4.configs.md4 import molecular
-
-FLAGS = flags.FLAGS
-flags.DEFINE_string("checkpoint_dir", "", "Directory containing checkpoints")
-flags.DEFINE_string("eval_data", "./data/msg/msg_processed.parquet", "Path to MSG eval dataset")
-flags.DEFINE_string("output_file", "./results/msg_eval_results.csv", "Output file for results")
-flags.DEFINE_string("intermediate_dir", "./results/intermediate", "Directory for intermediate batch results")
-flags.DEFINE_integer("num_samples", 10, "Number of SMILES to generate per data point")
-flags.DEFINE_integer("checkpoint_step", -1, "Checkpoint step to load (-1 for latest)")
-flags.DEFINE_string("tokenizer_path", "data/smiles_tokenizer", "Path to SMILES tokenizer")
-flags.DEFINE_integer("batch_size", 32, "Batch size for generation")
 
 
 @dataclasses.dataclass
@@ -45,7 +35,7 @@ class EvalResults:
     original_smiles: List[str]
     original_fingerprints: List[np.ndarray]
     generated_smiles: List[List[str]]
-    original_inchi: Optional[List[str]] = None  # Store original InChI if available
+    original_inchi: Optional[List[str]] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for saving."""
@@ -59,534 +49,487 @@ class EvalResults:
         return result
 
 
-def load_config() -> ml_collections.ConfigDict:
-    """Load molecular configuration."""
-    config = molecular.get_config()
-    # Override some settings for evaluation
-    config.batch_size = FLAGS.batch_size
-    return config
-
-
-def load_checkpoint_manager(checkpoint_dir: str) -> orbax_checkpoint.CheckpointManager:
-    """Load checkpoint manager."""
-    checkpointers = dict(
-        train_state=orbax_checkpoint.PyTreeCheckpointer(),
-    )
-    return orbax_checkpoint.CheckpointManager(
-        checkpoint_dir,
-        checkpointers=checkpointers,
-        options=orbax_checkpoint.CheckpointManagerOptions(create=False),
-    )
-
-
-def load_model_and_state(config: ml_collections.ConfigDict, checkpoint_dir: str) -> tuple[nn.Module, train.TrainState]:
-    """Load model and checkpoint state."""
-    # Initialize model
-    rng = utils.get_rng(config.seed)
-    data_shape = (config.max_length,)
+class MolecularEvaluator:
+    """Main evaluator class for molecular generation."""
     
-    # Create dummy schedule function (not used for inference)
-    schedule_fn = lambda step: config.learning_rate
-    
-    # Create model and train state
-    model, optimizer, train_state, metrics_class = train.create_train_state(
-        config,
-        rng,
-        input_shape=(config.batch_size * 10,) + data_shape,
-        schedule_fn=schedule_fn,
-    )
-    
-    # Load checkpoint
-    checkpoint_manager = load_checkpoint_manager(checkpoint_dir)
-    if FLAGS.checkpoint_step >= 0:
-        step = FLAGS.checkpoint_step
-    else:
-        step = checkpoint_manager.latest_step()
-    
-    if step is None:
-        raise ValueError(f"No checkpoints found in {checkpoint_dir}")
-    
-    logging.info(f"Loading checkpoint from step {step}")
-    
-    checkpointed_state = {"train_state": train_state}
-    checkpointed_state = checkpoint_manager.restore(step, items=checkpointed_state)
-    train_state = checkpointed_state["train_state"]
-    
-    # Replicate train_state for pmap usage across multiple devices
-    train_state = flax_utils.replicate(train_state)
-    return model, train_state
-
-
-def load_eval_data(eval_data_path: str) -> pl.DataFrame:
-    """Load MSG evaluation dataset."""
-    if not os.path.exists(eval_data_path):
-        raise FileNotFoundError(f"Evaluation data not found: {eval_data_path}")
-    
-    df = pl.read_parquet(eval_data_path)
-    logging.info(f"Loaded {len(df)} evaluation samples")
-    return df
-
-
-def inchi_to_smiles(inchi: str) -> Optional[str]:
-    """Convert InChI to SMILES using RDKit."""
-    if not RDKIT_AVAILABLE:
-        raise ImportError("RDKit is required for InChI to SMILES conversion")
-    
-    try:
-        mol = Chem.MolFromInchi(inchi)
-        if mol is None:
-            return None
-        return Chem.MolToSmiles(mol)
-    except Exception as e:
-        logging.warning(f"Failed to convert InChI to SMILES: {inchi[:50]}... Error: {e}")
-        return None
-
-
-def detect_molecular_format_and_prepare_data(eval_df: pl.DataFrame, pad_to_length: int = 128) -> Tuple[List[str], List[np.ndarray], List[str], List[np.ndarray]]:
-    """
-    Convert InChI data to SMILES and extract atom types and fingerprints. Discard anything that can't be parsed by RDKit.
-    
-    Args:
-        eval_df: DataFrame containing InChI data
-        pad_to_length: Length to pad atom types to
-    
-    Returns:
-        Tuple of (smiles_list, atom_types_list, valid_inchi_list, fingerprints_list)
-        Only successfully parsed molecules are returned
-    """
-    if not RDKIT_AVAILABLE:
-        raise ImportError(
-            "RDKit is required to convert InChI to SMILES. "
-            "Please install RDKit: conda install -c conda-forge rdkit"
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.config = self._load_config()
+        self.tokenizer = self._load_tokenizer()
+        self.model, self.train_state = self._load_model_and_state()
+        self.rng = utils.get_rng(42)  # Fixed seed for reproducible evaluation
+        
+    def _load_config(self) -> ml_collections.ConfigDict:
+        """Load molecular configuration."""
+        config = molecular.get_config()
+        config.batch_size = self.args.batch_size
+        return config
+        
+    def _load_tokenizer(self) -> transformers.PreTrainedTokenizerFast:
+        """Load SMILES tokenizer."""
+        try:
+            tokenizer = transformers.AutoTokenizer.from_pretrained(self.args.tokenizer_path)
+            print(f"Loaded tokenizer with vocab size: {tokenizer.vocab_size}")
+            return tokenizer
+        except Exception as e:
+            raise ValueError(f"Failed to load tokenizer from {self.args.tokenizer_path}: {e}")
+            
+    def _load_checkpoint_manager(self) -> orbax_checkpoint.CheckpointManager:
+        """Load checkpoint manager."""
+        if not self.args.checkpoint_dir:
+            raise ValueError("checkpoint_dir must be specified when loading checkpoints")
+        checkpointers = dict(train_state=orbax_checkpoint.PyTreeCheckpointer())
+        return orbax_checkpoint.CheckpointManager(
+            self.args.checkpoint_dir,
+            checkpointers=checkpointers,
+            options=orbax_checkpoint.CheckpointManagerOptions(create=False),
         )
-    
-    columns = eval_df.columns
-    inchi_columns = [col for col in columns if 'inchi' in col.lower()]
-    
-    if not inchi_columns:
-        raise ValueError("No InChI columns found in the dataframe")
-    
-    inchi_col = inchi_columns[0]  # Use first InChI column found
-    logging.info(f"Found InChI data in column: {inchi_col}")
-    
-    inchi_list = eval_df[inchi_col].to_list()
-    fingerprints_list = eval_df["predicted_fingerprint"].to_list() if "predicted_fingerprint" in eval_df.columns else []
-    
-    if not fingerprints_list:
-        logging.warning("No predicted_fingerprint column found in eval_df, using zero fingerprints")
-    
-    logging.info("Converting InChI to SMILES and extracting atom types...")
-    
-    smiles_list = []
-    atom_types_list = []
-    valid_inchi_list = []
-    valid_fingerprints_list = []
-    
-    for i, inchi in enumerate(tqdm(inchi_list, desc="Converting InChI to SMILES and extracting features")):
-        smiles = inchi_to_smiles(inchi)
-        if smiles is not None:
-            # Extract atom types from converted SMILES
-            features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=2048, pad_to_length=pad_to_length)
-            if features is not None and 'atom_types' in features:
-                smiles_list.append(smiles)
-                atom_types_list.append(features['atom_types'])
-                valid_inchi_list.append(inchi)
-                
-                # Add corresponding fingerprint if available
-                if fingerprints_list and i < len(fingerprints_list):
-                    valid_fingerprints_list.append(fingerprints_list[i])
-                else:
-                    # Default to zeros if no fingerprint available
-                    valid_fingerprints_list.append(np.zeros(2048))
-            # Silently discard molecules that can't be processed
-    
-    logging.info(f"Successfully processed {len(smiles_list)}/{len(inchi_list)} InChI strings")
-    return smiles_list, atom_types_list, valid_inchi_list, valid_fingerprints_list
-
-
-def load_tokenizer(tokenizer_path: str) -> transformers.PreTrainedTokenizerFast:
-    """Load SMILES tokenizer."""
-    try:
-        tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_path)
-        logging.info(f"Loaded tokenizer with vocab size: {tokenizer.vocab_size}")
-        return tokenizer
-    except Exception as e:
-        raise ValueError(f"Failed to load tokenizer from {tokenizer_path}: {e}")
-
-
-def generate_samples_for_batch(
-    model: nn.Module,
-    train_state: train.TrainState,
-    fingerprints: np.ndarray,
-    atom_types: np.ndarray,
-    tokenizer: transformers.PreTrainedTokenizerFast,
-    config: ml_collections.ConfigDict,
-    num_samples: int,
-    rng: jnp.ndarray,
-) -> List[List[str]]:
-    """Generate multiple SMILES samples for a batch of fingerprints."""
-    batch_size = fingerprints.shape[0]
-    
-    # Process fingerprints: convert to binary (0/1) with threshold 0.5 and fold from 4096 to 2048 bits
-    processed_fingerprints = process_fingerprints(fingerprints, threshold=0.5, fold_factor=2)
-    
-    # Repeat fingerprints num_samples times
-    # Shape: (batch_size * num_samples, fingerprint_dim)
-    expanded_fingerprints = jnp.repeat(jnp.array(processed_fingerprints, dtype=jnp.int32), num_samples, axis=0)
-    expanded_atom_types = jnp.repeat(jnp.array(atom_types, dtype=jnp.int32), num_samples, axis=0)
-
-    # Create dummy inputs with the correct shape for the generate function
-    total_samples = batch_size * num_samples
-    dummy_inputs = jnp.ones((total_samples, config.max_length), dtype="int32")
-    
-    # Prepare conditioning
-    conditioning = {
-        "fingerprint": expanded_fingerprints,
-        "atom_types": expanded_atom_types,
-    }
-    
-    # Reshape for pmap: need to split across devices
-    num_devices = jax.device_count()
-    per_device_batch_size = total_samples // num_devices
-    
-    # Ensure total_samples is divisible by num_devices
-    if total_samples % num_devices != 0:
-        # Pad to make it divisible
-        padding_needed = num_devices - (total_samples % num_devices)
-        dummy_inputs = jnp.concatenate([
-            dummy_inputs,
-            jnp.ones((padding_needed, config.max_length), dtype="int32")
-        ], axis=0)
-        expanded_fingerprints = jnp.concatenate([
-            expanded_fingerprints,
-            jnp.zeros((padding_needed, expanded_fingerprints.shape[1]), dtype="int32")
-        ], axis=0)
-        expanded_atom_types = jnp.concatenate([
-            expanded_atom_types,
-            jnp.zeros((padding_needed, expanded_atom_types.shape[1]), dtype="int32")
-        ], axis=0)
-        total_samples_padded = total_samples + padding_needed
-        per_device_batch_size = total_samples_padded // num_devices
-    else:
-        total_samples_padded = total_samples
-        padding_needed = 0
-    
-    # Reshape for pmap: (num_devices, per_device_batch_size, ...)
-    dummy_inputs = dummy_inputs.reshape(num_devices, per_device_batch_size, config.max_length)
-    conditioning = {
-        "fingerprint": expanded_fingerprints.reshape(num_devices, per_device_batch_size, -1),
-        "atom_types": expanded_atom_types.reshape(num_devices, per_device_batch_size, -1),
-    }
-    
-    # Replicate the random number generator for pmap
-    replicated_rng = flax_utils.replicate(rng)
-    
-    # Generate all samples using the pmap version
-    samples = sampling.generate(
-        model,
-        train_state,
-        replicated_rng,
-        dummy_inputs,
-        conditioning=conditioning,
-    )
-    
-    # Unreplicate and flatten back
-    samples = flax_utils.unreplicate(samples)
-    samples = samples.reshape(-1, config.max_length)
-    
-    # Remove padding if any
-    if padding_needed > 0:
-        samples = samples[:-padding_needed]
-    
-    # Reshape samples to (batch_size, num_samples, sequence_length)
-    samples = samples.reshape(batch_size, num_samples, -1)
-    
-    # Convert to list of lists of SMILES strings
-    batch_results = []
-    for batch_idx in range(batch_size):
-        sample_list = []
-        for sample_idx in range(num_samples):
-            tokens = samples[batch_idx, sample_idx]
-            # Detokenize
-            smiles = tokenizer.decode(tokens, skip_special_tokens=True)
-            sample_list.append(smiles)
-        batch_results.append(sample_list)
-    
-    return batch_results
-
-
-def save_batch_results(
-    batch_idx: int,
-    batch_smiles: List[str],
-    batch_fingerprints: np.ndarray,
-    batch_generated: List[List[str]],
-    intermediate_dir: str,
-    batch_inchi: Optional[List[str]] = None,
-):
-    """Save results for a single batch to CSV."""
-    import json
-    
-    os.makedirs(intermediate_dir, exist_ok=True)
-    
-    # Convert batch to rows
-    batch_size = len(batch_smiles)
-
-    original_smiles_list = []
-    generated_smiles_list = []
-    original_inchi_list = []
-    
-    for i in range(batch_size):
-        for j, gen_smi in enumerate(batch_generated[i]):
-            original_smiles_list.append(batch_smiles[i])
-            generated_smiles_list.append(gen_smi)
-            if batch_inchi is not None:
-                original_inchi_list.append(batch_inchi[i])
-
-    batch_data = {
-        "original_smiles": original_smiles_list,
-        "generated_smiles": generated_smiles_list,
-    }
-    
-    if batch_inchi is not None:
-        batch_data["original_inchi"] = original_inchi_list
-
-    # Save to CSV
-    batch_df = pl.DataFrame(batch_data)
-    batch_file = os.path.join(intermediate_dir, f"batch_{batch_idx:04d}.csv")
-    batch_df.write_csv(batch_file)
-    
-    logging.info(f"Saved batch {batch_idx} results to {batch_file}")
-
-
-def run_evaluation(
-    model: nn.Module,
-    train_state: train.TrainState,
-    eval_df: pl.DataFrame,
-    tokenizer: transformers.PreTrainedTokenizerFast,
-    config: ml_collections.ConfigDict,
-    num_samples: int,
-    intermediate_dir: str,
-) -> EvalResults:
-    """Run evaluation on the dataset."""
-    rng = utils.get_rng(42)  # Fixed seed for reproducible evaluation
-    
-    # Convert InChI to SMILES and extract atom types and fingerprints
-    smiles_list, atom_types_list, original_inchi_list, fingerprints = detect_molecular_format_and_prepare_data(eval_df)
-    
-    # Create filtered dataframe with only successfully processed molecules
-    eval_df = pl.DataFrame({
-        "predicted_fingerprint": fingerprints,
-        "atom_types": atom_types_list,
-    })
-    
-    results = EvalResults(
-        original_smiles=[],
-        original_fingerprints=[],
-        generated_smiles=[],
-        original_inchi=[],
-    )
-    
-    # Process in batches, drop incomplete last batch
-    batch_size = config.batch_size
-    num_complete_batches = len(eval_df) // batch_size
-    num_samples_processed = num_complete_batches * batch_size
-    
-    logging.info(f"Processing {num_samples_processed}/{len(eval_df)} samples in {num_complete_batches} complete batches")
-    logging.info(f"Intermediate batch results will be saved to: {intermediate_dir}")
-    if num_samples_processed < len(eval_df):
-        logging.info(f"Dropping {len(eval_df) - num_samples_processed} samples from incomplete last batch")
-    
-    for batch_idx in tqdm(range(num_complete_batches), desc="Generating samples"):
-        start_idx = batch_idx * batch_size
-        end_idx = start_idx + batch_size
-        batch_df = eval_df[start_idx:end_idx]
         
-        # Extract data
-        batch_smiles = smiles_list[start_idx:end_idx]
-        batch_fingerprints = np.array(batch_df["predicted_fingerprint"].to_list())
-        batch_atom_types = np.array(atom_types_list[start_idx:end_idx])  # Use atom types from our extracted list
-        batch_inchi = original_inchi_list[start_idx:end_idx]
+    def _load_model_and_state(self) -> Tuple[nn.Module, train.TrainState]:
+        """Load model and checkpoint state."""
+        rng = utils.get_rng(self.config.seed)
+        data_shape = (self.config.max_length,)
         
-        rng, batch_rng = jax.random.split(rng)
+        # Create dummy schedule function (not used for inference)
+        schedule_fn = lambda step: self.config.learning_rate
+        
+        # Create model and train state
+        model, optimizer, train_state, metrics_class = train.create_train_state(
+            self.config,
+            rng,
+            input_shape=(self.config.batch_size * 10,) + data_shape,
+            schedule_fn=schedule_fn,
+        )
+        
+        # Skip checkpoint loading if --no_checkpoint flag is used
+        if self.args.no_checkpoint:
+            print("WARNING: Using random model weights (--no_checkpoint flag)")
+            return model, train_state
+        
+        # Load checkpoint
+        checkpoint_manager = self._load_checkpoint_manager()
+        step = self.args.checkpoint_step if self.args.checkpoint_step >= 0 else checkpoint_manager.latest_step()
+        
+        if step is None:
+            raise ValueError(f"No checkpoints found in {self.args.checkpoint_dir}")
+        
+        print(f"Loading checkpoint from step {step}")
+        
+        checkpointed_state = {"train_state": train_state}
+        checkpointed_state = checkpoint_manager.restore(step, items=checkpointed_state)
+        train_state = checkpointed_state["train_state"]
+        
+        return model, train_state
+
+    def _load_eval_data(self) -> pl.DataFrame:
+        """Load MSG evaluation dataset."""
+        if not os.path.exists(self.args.eval_data):
+            raise FileNotFoundError(f"Evaluation data not found: {self.args.eval_data}")
+        
+        df = pl.read_parquet(self.args.eval_data)
+        print(f"Loaded {len(df)} evaluation samples")
+        return df
+
+    def _inchi_to_smiles(self, inchi: str) -> Optional[str]:
+        """Convert InChI to SMILES using RDKit."""
+        if not RDKIT_AVAILABLE:
+            raise ImportError("RDKit is required for InChI to SMILES conversion")
+        
+        try:
+            mol = Chem.MolFromInchi(inchi)
+            if mol is None:
+                return None
+            return Chem.MolToSmiles(mol)
+        except Exception as e:
+            print(f"WARNING: Failed to convert InChI to SMILES: {inchi[:50]}... Error: {e}")
+            return None
+
+    def _prepare_molecular_data(self, eval_df: pl.DataFrame, pad_to_length: int = 128) -> Tuple[List[str], List[np.ndarray], List[str], List[np.ndarray]]:
+        """Convert InChI data to SMILES and extract features."""
+        if not RDKIT_AVAILABLE:
+            raise ImportError("RDKit is required to convert InChI to SMILES.")
+        
+        columns = eval_df.columns
+        inchi_columns = [col for col in columns if 'inchi' in col.lower()]
+        
+        if not inchi_columns:
+            raise ValueError("No InChI columns found in the dataframe")
+        
+        inchi_col = inchi_columns[0]
+        print(f"Found InChI data in column: {inchi_col}")
+        
+        inchi_list = eval_df[inchi_col].to_list()
+        fingerprints_list = eval_df["predicted_fingerprint"].to_list() if "predicted_fingerprint" in eval_df.columns else []
+        
+        if not fingerprints_list:
+            print("WARNING: No predicted_fingerprint column found, using zero fingerprints")
+        
+        print("Converting InChI to SMILES and extracting features...")
+        
+        smiles_list = []
+        atom_types_list = []
+        valid_inchi_list = []
+        valid_fingerprints_list = []
+        
+        for i, inchi in enumerate(tqdm(inchi_list, desc="Processing molecules")):
+            smiles = self._inchi_to_smiles(inchi)
+            if smiles is not None:
+                features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=2048, pad_to_length=pad_to_length)
+                if features is not None and 'atom_types' in features:
+                    smiles_list.append(smiles)
+                    atom_types_list.append(features['atom_types'])
+                    valid_inchi_list.append(inchi)
+                    
+                    if fingerprints_list and i < len(fingerprints_list):
+                        valid_fingerprints_list.append(fingerprints_list[i])
+                    else:
+                        valid_fingerprints_list.append(np.zeros(2048))
+        
+        print(f"Successfully processed {len(smiles_list)}/{len(inchi_list)} molecules")
+        return smiles_list, atom_types_list, valid_inchi_list, valid_fingerprints_list
+
+    def _process_fingerprints(self, fingerprints: np.ndarray, threshold: float = 0.5, fold_factor: int = 2) -> np.ndarray:
+        """Process fingerprints by thresholding and folding."""
+        if not RDKIT_AVAILABLE:
+            print("WARNING: RDKit not available, skipping fingerprint processing")
+            return fingerprints
+        
+        try:
+            # Convert to binary with threshold
+            binary_fingerprints = (fingerprints >= threshold).astype(np.int32)
+            
+            # Fold the fingerprints
+            first_half = binary_fingerprints[:, :2048]
+            second_half = binary_fingerprints[:, 2048:]
+            folded_fingerprints = np.logical_or(first_half, second_half).astype(np.int32)
+            return folded_fingerprints
+            
+        except Exception as e:
+            print(f"WARNING: Failed to process fingerprints: {e}")
+            return fingerprints
+
+    def _generate_single_datapoint(self, fingerprint: np.ndarray, atom_types: np.ndarray) -> List[str]:
+        """Generate samples for a single datapoint using simple_generate."""
+        # Process fingerprint
+        processed_fp = self._process_fingerprints(fingerprint[None, :], threshold=0.5, fold_factor=2)[0]
+        
+        # Prepare conditioning
+        conditioning = {
+            "fingerprint": jnp.array(processed_fp, dtype=jnp.int32)[None, :],  # Add batch dimension
+            "atom_types": jnp.array(atom_types, dtype=jnp.int32)[None, :],   # Add batch dimension
+        }
         
         # Generate samples
-        batch_generated = generate_samples_for_batch(
-            model,
-            train_state,
-            batch_fingerprints,
-            batch_atom_types,
-            tokenizer,
-            config,
-            num_samples,
-            batch_rng,
+        self.rng, sample_rng = jax.random.split(self.rng)
+        samples = sampling.simple_generate(
+            sample_rng,
+            self.train_state,
+            self.args.num_samples,
+            self.model,
+            conditioning=conditioning
         )
         
-        # Save batch results to intermediate CSV
-        save_batch_results(
-            batch_idx,
-            batch_smiles,
-            batch_fingerprints,
-            batch_generated,
-            intermediate_dir,
-            batch_inchi,
+        # Convert to SMILES strings
+        generated_smiles = []
+        for i in range(self.args.num_samples):
+            tokens = samples[i]
+            smiles = self.tokenizer.decode(tokens, skip_special_tokens=False, clean_up_tokenization_spaces=True)
+            generated_smiles.append(smiles)
+        
+        return generated_smiles
+
+    def _generate_batch_samples(self, fingerprints: np.ndarray, atom_types: np.ndarray) -> List[List[str]]:
+        """Generate samples for a batch using pmap."""
+        batch_size = fingerprints.shape[0]
+        
+        # Process fingerprints
+        processed_fingerprints = self._process_fingerprints(fingerprints, threshold=0.5, fold_factor=2)
+        
+        # Expand for multiple samples per input
+        expanded_fingerprints = jnp.repeat(jnp.array(processed_fingerprints, dtype=jnp.int32), self.args.num_samples, axis=0)
+        expanded_atom_types = jnp.repeat(jnp.array(atom_types, dtype=jnp.int32), self.args.num_samples, axis=0)
+
+        total_samples = batch_size * self.args.num_samples
+        dummy_inputs = jnp.ones((total_samples, self.config.max_length), dtype="int32")
+        
+        conditioning = {
+            "fingerprint": expanded_fingerprints,
+            "atom_types": expanded_atom_types,
+        }
+        
+        # Handle multi-device distribution
+        num_devices = jax.device_count()
+        per_device_batch_size = total_samples // num_devices
+        
+        if total_samples % num_devices != 0:
+            padding_needed = num_devices - (total_samples % num_devices)
+            dummy_inputs = jnp.concatenate([
+                dummy_inputs,
+                jnp.ones((padding_needed, self.config.max_length), dtype="int32")
+            ], axis=0)
+            expanded_fingerprints = jnp.concatenate([
+                expanded_fingerprints,
+                jnp.zeros((padding_needed, expanded_fingerprints.shape[1]), dtype="int32")
+            ], axis=0)
+            expanded_atom_types = jnp.concatenate([
+                expanded_atom_types,
+                jnp.zeros((padding_needed, expanded_atom_types.shape[1]), dtype="int32")
+            ], axis=0)
+            total_samples_padded = total_samples + padding_needed
+            per_device_batch_size = total_samples_padded // num_devices
+        else:
+            padding_needed = 0
+        
+        # Reshape for pmap
+        dummy_inputs = dummy_inputs.reshape(num_devices, per_device_batch_size, self.config.max_length)
+        conditioning = {
+            "fingerprint": expanded_fingerprints.reshape(num_devices, per_device_batch_size, -1),
+            "atom_types": expanded_atom_types.reshape(num_devices, per_device_batch_size, -1),
+        }
+        
+        # Generate samples
+        replicated_train_state = flax_utils.replicate(self.train_state)
+        replicated_rng = flax_utils.replicate(self.rng)
+        
+        samples = sampling.generate(
+            self.model,
+            replicated_train_state,
+            replicated_rng,
+            dummy_inputs,
+            conditioning=conditioning,
         )
         
-        # Collect results
-        for i in range(batch_size):
-            results.original_smiles.append(batch_smiles[i])
-            results.original_fingerprints.append(batch_fingerprints[i])
-            results.generated_smiles.append(batch_generated[i])
-            results.original_inchi.append(batch_inchi[i])
-    
-    logging.info(f"Generated {len(results.original_smiles)} sets of samples")
-    return results
+        # Process results
+        samples = flax_utils.unreplicate(samples)
+        samples = samples.reshape(-1, self.config.max_length)
+        
+        if padding_needed > 0:
+            samples = samples[:-padding_needed]
+        
+        samples = samples.reshape(batch_size, self.args.num_samples, -1)
+        
+        # Convert to SMILES
+        batch_results = []
+        for batch_idx in range(batch_size):
+            sample_list = []
+            for sample_idx in range(self.args.num_samples):
+                tokens = samples[batch_idx, sample_idx]
+                smiles = self.tokenizer.decode(tokens, skip_special_tokens=True)
+                sample_list.append(smiles)
+            batch_results.append(sample_list)
+        
+        return batch_results
 
-
-def combine_intermediate_results(intermediate_dir: str, output_file: str):
-    """Combine all intermediate batch CSV files into final output."""
-    if not os.path.exists(intermediate_dir):
-        logging.warning(f"Intermediate directory {intermediate_dir} not found, skipping combination")
-        return
-    
-    # Find all batch CSV files
-    batch_files = sorted([
-        f for f in os.listdir(intermediate_dir) 
-        if f.startswith("batch_") and f.endswith(".csv")
-    ])
-    
-    if not batch_files:
-        logging.warning(f"No batch files found in {intermediate_dir}")
-        return
-    
-    logging.info(f"Combining {len(batch_files)} batch files into {output_file}")
-    
-    # Read and combine all batch files
-    all_dfs = []
-    for batch_file in batch_files:
-        batch_path = os.path.join(intermediate_dir, batch_file)
-        batch_df = pl.read_csv(batch_path)
-        all_dfs.append(batch_df)
-    
-    # Combine all DataFrames
-    combined_df = pl.concat(all_dfs)
-    
-    # Save as parquet (more efficient for large files)
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    combined_df.write_csv(output_file)
-    
-    logging.info(f"Combined results saved to {output_file}")
-    logging.info(f"Total samples: {len(combined_df)}")
-
-
-def save_results(results: EvalResults, output_file: str):
-    """Save evaluation results."""
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    
-    # Convert to DataFrame
-    data = []
-    for i, (orig_smiles, orig_fp, gen_smiles) in enumerate(
-        zip(results.original_smiles, results.original_fingerprints, results.generated_smiles)
-    ):
-        for j, gen_smi in enumerate(gen_smiles):
-            row = {
-                "sample_id": i,
-                "original_smiles": orig_smiles,
-                "generated_smiles": gen_smi,
-                "generation_idx": j,
-                "original_fingerprint": orig_fp.tolist(),
+    def run_debug_mode(self):
+        """Run evaluation in debug mode (single datapoint)."""
+        print("=== DEBUG MODE: Processing single datapoint ===")
+        
+        if self.args.no_checkpoint:
+            print("NOTE: Using random model weights - generated samples may be low quality")
+        
+        eval_df = self._load_eval_data()
+        smiles_list, atom_types_list, inchi_list, fingerprints = self._prepare_molecular_data(eval_df)
+        
+        if not smiles_list:
+            print("ERROR: No valid molecules found in dataset")
+            return
+        
+        # Use first valid molecule
+        original_smiles = smiles_list[0]
+        fingerprint = np.array(fingerprints[0])
+        atom_types = np.array(atom_types_list[0])
+        original_inchi = inchi_list[0]
+        
+        print(f"Original InChI: {original_inchi}")
+        print(f"Original SMILES: {original_smiles}")
+        print(f"Fingerprint shape: {fingerprint.shape}")
+        print(f"Atom types shape: {atom_types.shape}")
+        print(f"Generating {self.args.num_samples} samples...")
+        
+        # Generate samples
+        generated_smiles = self._generate_single_datapoint(fingerprint, atom_types)
+        
+        print("\n=== RESULTS ===")
+        for i, smiles in enumerate(generated_smiles):
+            print(f"Sample {i+1}: {smiles}")
+        
+        # Save results if output file specified
+        if self.args.output_file:
+            results_data = {
+                "original_inchi": [original_inchi] * len(generated_smiles),
+                "original_smiles": [original_smiles] * len(generated_smiles),
+                "generated_smiles": generated_smiles,
+                "sample_idx": list(range(len(generated_smiles)))
             }
             
-            # Add original InChI if available
-            if results.original_inchi is not None:
-                row["original_inchi"] = results.original_inchi[i]
+            df = pl.DataFrame(results_data)
+            os.makedirs(os.path.dirname(self.args.output_file), exist_ok=True)
+            df.write_csv(self.args.output_file)
+            print(f"\nResults saved to: {self.args.output_file}")
+
+    def _save_batch_results(self, batch_idx: int, batch_smiles: List[str], batch_fingerprints: np.ndarray, 
+                           batch_generated: List[List[str]], batch_inchi: Optional[List[str]] = None):
+        """Save results for a single batch."""
+        os.makedirs(self.args.intermediate_dir, exist_ok=True)
+        
+        batch_data = {
+            "original_smiles": [],
+            "generated_smiles": [],
+        }
+        
+        if batch_inchi is not None:
+            batch_data["original_inchi"] = []
+        
+        for i in range(len(batch_smiles)):
+            for j, gen_smi in enumerate(batch_generated[i]):
+                batch_data["original_smiles"].append(batch_smiles[i])
+                batch_data["generated_smiles"].append(gen_smi)
+                if batch_inchi is not None:
+                    batch_data["original_inchi"].append(batch_inchi[i])
+
+        batch_df = pl.DataFrame(batch_data)
+        batch_file = os.path.join(self.args.intermediate_dir, f"batch_{batch_idx:04d}.csv")
+        batch_df.write_csv(batch_file)
+        print(f"Saved batch {batch_idx} results to {batch_file}")
+
+    def _combine_intermediate_results(self):
+        """Combine all intermediate batch CSV files into final output."""
+        if not os.path.exists(self.args.intermediate_dir):
+            print(f"WARNING: Intermediate directory {self.args.intermediate_dir} not found")
+            return
+        
+        batch_files = sorted([
+            f for f in os.listdir(self.args.intermediate_dir) 
+            if f.startswith("batch_") and f.endswith(".csv")
+        ])
+        
+        if not batch_files:
+            print(f"WARNING: No batch files found in {self.args.intermediate_dir}")
+            return
+        
+        print(f"Combining {len(batch_files)} batch files into {self.args.output_file}")
+        
+        all_dfs = []
+        for batch_file in batch_files:
+            batch_path = os.path.join(self.args.intermediate_dir, batch_file)
+            batch_df = pl.read_csv(batch_path)
+            all_dfs.append(batch_df)
+        
+        combined_df = pl.concat(all_dfs)
+        os.makedirs(os.path.dirname(self.args.output_file), exist_ok=True)
+        combined_df.write_csv(self.args.output_file)
+        
+        print(f"Combined results saved to {self.args.output_file}")
+        print(f"Total samples: {len(combined_df)}")
+
+    def run_batch_mode(self):
+        """Run evaluation in batch mode."""
+        print("=== BATCH MODE: Processing full dataset ===")
+        
+        if self.args.no_checkpoint:
+            print("NOTE: Using random model weights - generated samples may be low quality")
+        
+        eval_df = self._load_eval_data()
+        smiles_list, atom_types_list, inchi_list, fingerprints = self._prepare_molecular_data(eval_df)
+        
+        if not smiles_list:
+            print("ERROR: No valid molecules found in dataset")
+            return
+        
+        # Process in complete batches
+        batch_size = self.config.batch_size
+        num_complete_batches = len(smiles_list) // batch_size
+        num_samples_processed = num_complete_batches * batch_size
+        
+        print(f"Processing {num_samples_processed}/{len(smiles_list)} samples in {num_complete_batches} complete batches")
+        print(f"Intermediate results will be saved to: {self.args.intermediate_dir}")
+        
+        if num_samples_processed < len(smiles_list):
+            print(f"Dropping {len(smiles_list) - num_samples_processed} samples from incomplete last batch")
+        
+        for batch_idx in tqdm(range(num_complete_batches), desc="Processing batches"):
+            start_idx = batch_idx * batch_size
+            end_idx = start_idx + batch_size
             
-            data.append(row)
-    
-    df = pl.DataFrame(data)
-    df.write_parquet(output_file)
-    logging.info(f"Results saved to {output_file}")
-    
-    # Print summary
-    logging.info(f"Evaluation summary:")
-    logging.info(f"- Total original molecules: {len(results.original_smiles)}")
-    logging.info(f"- Samples per molecule: {FLAGS.num_samples}")
-    logging.info(f"- Total generated samples: {len(data)}")
-    if results.original_inchi is not None:
-        logging.info(f"- Original format: InChI (converted to SMILES)")
-    else:
-        logging.info(f"- Original format: SMILES")
-
-
-def process_fingerprints(fingerprints: np.ndarray, threshold: float = 0.5, fold_factor: int = 2) -> np.ndarray:
-    """Process fingerprints by thresholding and folding.
-    
-    Args:
-        fingerprints: Input fingerprints array
-        threshold: Threshold for converting to binary (0/1)
-        fold_factor: Factor by which to fold the fingerprints
-    
-    Returns:
-        Processed fingerprints array
-    """
-    if not RDKIT_AVAILABLE:
-        logging.warning("RDKit not available, skipping fingerprint processing")
-        return fingerprints
-    
-    try:
-        # Convert to binary with threshold
-        binary_fingerprints = (fingerprints >= threshold).astype(np.int32)
+            batch_smiles = smiles_list[start_idx:end_idx]
+            batch_fingerprints = np.array(fingerprints[start_idx:end_idx])
+            batch_atom_types = np.array(atom_types_list[start_idx:end_idx])
+            batch_inchi = inchi_list[start_idx:end_idx]
+            
+            # Generate samples for batch
+            batch_generated = self._generate_batch_samples(batch_fingerprints, batch_atom_types)
+            
+            # Save batch results
+            self._save_batch_results(batch_idx, batch_smiles, batch_fingerprints, batch_generated, batch_inchi)
         
-        # Fold the fingerprints using numpy operations
-        # Simple folding by taking OR of adjacent bits
-        first_half = binary_fingerprints[:, :2048]
-        second_half = binary_fingerprints[:, 2048:]
-        folded_fingerprints = np.logical_or(first_half, second_half).astype(np.int32)
-        return folded_fingerprints
-        
-    except Exception as e:
-        logging.warning(f"Failed to process fingerprints: {e}")
-        return fingerprints
+        # Combine all results
+        self._combine_intermediate_results()
+        print("Batch evaluation completed successfully!")
 
 
-def main(argv):
-    del argv  # Unused
+def parse_arguments() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="MSG dataset evaluation script")
     
-    # # Validate inputs
-    if not FLAGS.checkpoint_dir:
-        raise ValueError("Must specify --checkpoint_dir")
+    # Required arguments
+    parser.add_argument("--checkpoint_dir", help="Directory containing checkpoints (required unless --no_checkpoint is used)")
+    parser.add_argument("--mode", choices=["debug", "batch"], required=True, 
+                       help="Evaluation mode: 'debug' for single datapoint, 'batch' for full dataset")
     
-    if not os.path.exists(FLAGS.checkpoint_dir):
-        raise ValueError(f"Checkpoint directory not found: {FLAGS.checkpoint_dir}")
+    # Data arguments
+    parser.add_argument("--eval_data", default="./data/msg/msg_processed.parquet", 
+                       help="Path to MSG eval dataset")
+    parser.add_argument("--tokenizer_path", default="data/smiles_tokenizer", 
+                       help="Path to SMILES tokenizer")
     
-    logging.info("Starting MSG evaluation...")
+    # Output arguments
+    parser.add_argument("--output_file", default="./results/msg_eval_results.csv", 
+                       help="Output file for results")
+    parser.add_argument("--intermediate_dir", default="./results/intermediate", 
+                       help="Directory for intermediate batch results")
     
-    # Load configuration
-    config = load_config()
-    logging.info(f"Loaded config with vocab_size={config.vocab_size}")
+    # Generation arguments
+    parser.add_argument("--num_samples", type=int, default=10, 
+                       help="Number of SMILES to generate per data point")
+    parser.add_argument("--batch_size", type=int, default=32, 
+                       help="Batch size for generation (batch mode only)")
+    parser.add_argument("--checkpoint_step", type=int, default=-1, 
+                       help="Checkpoint step to load (-1 for latest)")
+    parser.add_argument("--no_checkpoint", action="store_true", 
+                       help="Skip loading model checkpoint (use random weights)")
     
-    # Load model and checkpoint
-    model, train_state = load_model_and_state(config, FLAGS.checkpoint_dir)
-    logging.info("Model and checkpoint loaded successfully")
+    return parser.parse_args()
+
+
+def main():
+    """Main function."""
+    args = parse_arguments()
     
-    # Load tokenizer
-    tokenizer = load_tokenizer(FLAGS.tokenizer_path)
+    # Validate inputs
+    if not args.no_checkpoint:
+        if not args.checkpoint_dir:
+            raise ValueError("Must specify --checkpoint_dir or use --no_checkpoint")
+        if not os.path.exists(args.checkpoint_dir):
+            raise ValueError(f"Checkpoint directory not found: {args.checkpoint_dir}")
+    elif args.checkpoint_dir and not os.path.exists(args.checkpoint_dir):
+        print(f"WARNING: Checkpoint directory {args.checkpoint_dir} not found, but --no_checkpoint flag is used")
     
-    # Load evaluation data
-    eval_df = load_eval_data(FLAGS.eval_data)
+    if not os.path.exists(args.eval_data):
+        raise ValueError(f"Evaluation data not found: {args.eval_data}")
     
-    # Run evaluation
-    results = run_evaluation(
-        model, train_state, eval_df, tokenizer, config, FLAGS.num_samples, FLAGS.intermediate_dir
-    )
+    mode_info = f"{args.mode} mode"
+    if args.no_checkpoint:
+        mode_info += " (no checkpoint)"
+    print(f"Starting MSG evaluation in {mode_info}...")
     
-    # Combine intermediate results into final output
-    combine_intermediate_results(FLAGS.intermediate_dir, FLAGS.output_file)
+    # Create evaluator and run
+    evaluator = MolecularEvaluator(args)
     
-    # Also save using the traditional method as backup
-    # save_results(results, FLAGS.output_file.replace('.parquet', '_backup.parquet'))
-    
-    logging.info("Evaluation completed successfully!")
+    if args.mode == "debug":
+        evaluator.run_debug_mode()
+    else:  # batch mode
+        evaluator.run_batch_mode()
 
 
 if __name__ == "__main__":
-    app.run(main)
+    main()
