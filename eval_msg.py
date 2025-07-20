@@ -73,12 +73,53 @@ class MolecularEvaluator:
         self.model, self.train_state = self._load_model_and_state()
         self.rng = utils.get_rng(42)  # Fixed seed for reproducible evaluation
         
+        # Debug: Check if parameters are loaded correctly
+        print("Checking parameter values after checkpoint loading...")
+        print(f"Train state step: {self.train_state.step}")
+        
+        # Print parameter structure to understand the layout
+        print("Parameter structure:")
+        print(jax.tree_util.tree_map(lambda x: x.shape, self.train_state.params))
+        
+        # Check a few parameter values to see if they're reasonable (not all zeros)
+        try:
+            # Find any parameter to check - let's be more flexible about the structure
+            def check_params(params, name):
+                print(f"\nChecking {name} parameters:")
+                # Get a flat list of all parameter arrays
+                leaves = jax.tree_util.tree_leaves(params)
+                if leaves:
+                    first_param = leaves[0]
+                    print(f"  First param shape: {first_param.shape}")
+                    print(f"  First param mean: {jnp.mean(first_param):.6f}")
+                    print(f"  First param std: {jnp.std(first_param):.6f}")
+                    print(f"  First param min/max: {jnp.min(first_param):.6f}/{jnp.max(first_param):.6f}")
+                    
+                    # Check if all values are zero or very close to zero
+                    is_zero = jnp.allclose(first_param, 0.0, atol=1e-8)
+                    print(f"  Is essentially zero: {is_zero}")
+                else:
+                    print(f"  No parameters found in {name}")
+            
+            check_params(self.train_state.params, "regular")
+            
+            if self.train_state.ema_params is not None:
+                check_params(self.train_state.ema_params, "EMA")
+            else:
+                print("No EMA params found!")
+                
+        except Exception as e:
+            print(f"Error checking parameters: {e}")
+            print("Parameter keys:", list(self.train_state.params.keys()) if hasattr(self.train_state.params, 'keys') else "No keys method")
+        
         # Make sure sampling uses EMA weights
         if self.train_state.ema_params is not None:
             self.train_state = self.train_state.replace(
                 params=self.train_state.ema_params
             )
             print("Using EMA weights for sampling")
+        else:
+            print("WARNING: No EMA params available, using regular params")
         
     def _load_config(self) -> ml_collections.ConfigDict:
         """Load molecular configuration."""
