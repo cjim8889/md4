@@ -283,6 +283,7 @@ class MolecularEvaluator:
         generated_smiles = []
         for i in range(self.args.num_samples):
             tokens = samples[i]
+            print(f"Generated tokens: {tokens}")
             smiles = self.tokenizer.decode(tokens, skip_special_tokens=False, clean_up_tokenization_spaces=True)
             generated_smiles.append(smiles)
         
