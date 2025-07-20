@@ -68,11 +68,11 @@ class MolecularEvaluator:
     def _load_tokenizer(self) -> transformers.PreTrainedTokenizerFast:
         """Load SMILES tokenizer."""
         try:
-            tokenizer = transformers.AutoTokenizer.from_pretrained(self.args.tokenizer_path)
+            tokenizer = transformers.AutoTokenizer.from_pretrained(self.config.tokenizer_path or self.args.tokenizer_path)
             print(f"Loaded tokenizer with vocab size: {tokenizer.vocab_size}")
             return tokenizer
         except Exception as e:
-            raise ValueError(f"Failed to load tokenizer from {self.args.tokenizer_path}: {e}")
+            raise ValueError(f"Failed to load tokenizer from {self.config.tokenizer_path or self.args.tokenizer_path}: {e}")
             
     def _load_checkpoint_manager(self) -> orbax_checkpoint.CheckpointManager:
         """Load checkpoint manager."""
