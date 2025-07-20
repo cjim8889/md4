@@ -261,8 +261,8 @@ class MolecularEvaluator:
         
         # Prepare conditioning
         conditioning = {
-            "fingerprint": jnp.array(processed_fp, dtype=jnp.int32)[None, :],  # Add batch dimension
-            "atom_types": jnp.array(atom_types, dtype=jnp.int32)[None, :],   # Add batch dimension
+            "fingerprint": jnp.repeat(jnp.array(processed_fp, dtype=jnp.int32)[None, :], self.args.num_samples, axis=0),
+            "atom_types": jnp.repeat(jnp.array(atom_types, dtype=jnp.int32)[None, :], self.args.num_samples, axis=0),
         }
         
         # Generate samples
