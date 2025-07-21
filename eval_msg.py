@@ -662,9 +662,9 @@ class MolecularEvaluator:
         total_processed = 0
         
         molecule_iterator = self._prepare_molecular_data_iterator(eval_df, num_processes=self.args.num_processes)
-        
+        input_data = list(molecule_iterator)
         try:
-            for smiles, atom_types, inchi, predicted_fingerprint, original_fingerprint in molecule_iterator:
+            for smiles, atom_types, inchi, predicted_fingerprint, original_fingerprint in input_data:
                 current_batch.append((smiles, atom_types, inchi, predicted_fingerprint, original_fingerprint))
                 
                 # Process batch when full
