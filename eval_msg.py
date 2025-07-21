@@ -33,12 +33,12 @@ def process_single_molecule(args_tuple):
     """Worker function for multiprocessing molecule conversion.
     
     Args:
-        args_tuple: (inchi, fingerprint, pad_to_length)
+        args_tuple: (inchi, fingerprint, pad_to_length, fp_bits)
     
     Returns:
         Tuple of (smiles, atom_types, inchi, predicted_fingerprint, original_fingerprint) or None if failed
     """
-    inchi, fingerprint, pad_to_length = args_tuple
+    inchi, fingerprint, pad_to_length, fp_bits = args_tuple
     
     if not RDKIT_AVAILABLE:
         return None
@@ -51,12 +51,12 @@ def process_single_molecule(args_tuple):
         smiles = Chem.MolToSmiles(mol)
         
         # Extract features
-        features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=2048, pad_to_length=None)
+        features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=fp_bits, pad_to_length=None)
         if features is None or 'atom_types' not in features:
             return None
         
         # Get original fingerprint from features
-        original_fingerprint = features.get('fingerprint', np.zeros(2048))
+        original_fingerprint = features.get('fingerprint', np.zeros(fp_bits))
             
         return (smiles, features['atom_types'], inchi, fingerprint, original_fingerprint)
     except Exception:
@@ -68,6 +68,7 @@ class MolecularEvaluator:
     
     def __init__(self, args: argparse.Namespace):
         self.args = args
+        self.fp_bits = args.fp_bits  # Store the configurable fp_bits parameter
         
         # For combine mode, we only need basic setup
         if args.mode == "combine":
@@ -226,12 +227,12 @@ class MolecularEvaluator:
         
         if not fingerprints_list:
             print("WARNING: No predicted_fingerprint column found, using zero fingerprints")
-            fingerprints_list = [np.zeros(2048) for _ in range(len(inchi_list))]
+            fingerprints_list = [np.zeros(self.fp_bits) for _ in range(len(inchi_list))]
         
         print(f"Converting {len(inchi_list)} InChI to SMILES using multiprocessing...")
         
         # Prepare arguments for multiprocessing
-        args_list = [(inchi, fingerprints_list[i], pad_to_length) for i, inchi in enumerate(inchi_list)]
+        args_list = [(inchi, fingerprints_list[i], pad_to_length, self.fp_bits) for i, inchi in enumerate(inchi_list)]
         
         # Use multiprocessing to convert molecules
         if num_processes is None:
@@ -283,9 +284,9 @@ class MolecularEvaluator:
             original_fingerprints = original_fingerprints[None, :]
         
         # Fold the predicted fingerprints (original should already be folded/processed)
-        if binary_predicted.shape[1] > 2048:
-            first_half = binary_predicted[:, :2048]
-            second_half = binary_predicted[:, 2048:]
+        if binary_predicted.shape[1] > self.fp_bits:
+            first_half = binary_predicted[:, :self.fp_bits]
+            second_half = binary_predicted[:, self.fp_bits:]
             
             # Apply the specified folding mode
             if mode == "or":
@@ -308,7 +309,7 @@ class MolecularEvaluator:
         processed_fp, bit_differences = self._process_fingerprints(predicted_fingerprint[None, :], original_fingerprint[None, :], threshold=0.5, mode=self.args.fingerprint_mode)
         bit_diff = bit_differences[0]
         
-        print(f"Fingerprint bit differences: {bit_diff}/2048 ({bit_diff/2048*100:.1f}%)")
+        print(f"Fingerprint bit differences: {bit_diff}/{self.fp_bits} ({bit_diff/self.fp_bits*100:.1f}%)")
         
         # Display atom types information
         atom_types_summary = rdkit_utils.format_atom_types_summary(atom_types)
@@ -354,7 +355,7 @@ class MolecularEvaluator:
         
         # Print average bit differences for the batch
         avg_bit_diff = np.mean(bit_differences)
-        print(f"Average fingerprint bit differences for batch: {avg_bit_diff:.1f}/2048 ({avg_bit_diff/2048*100:.1f}%)")
+        print(f"Average fingerprint bit differences for batch: {avg_bit_diff:.1f}/{self.fp_bits} ({avg_bit_diff/self.fp_bits*100:.1f}%)")
         
         # Use the selected fingerprints for generation
         if self.args.use_original_fingerprints:
@@ -487,7 +488,7 @@ class MolecularEvaluator:
         
         if not fingerprints_list:
             print("WARNING: No predicted_fingerprint column found, using zero fingerprints")
-            fingerprints_list = [np.zeros(2048) for _ in range(len(inchi_list))]
+            fingerprints_list = [np.zeros(self.fp_bits) for _ in range(len(inchi_list))]
         
         print(f"Searching for first valid molecule from {len(inchi_list)} InChI entries...")
         
@@ -501,12 +502,12 @@ class MolecularEvaluator:
                 smiles = Chem.MolToSmiles(mol)
                 
                 # Extract features
-                features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=2048, pad_to_length=None)
+                features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=self.fp_bits, pad_to_length=None)
                 if features is None or 'atom_types' not in features:
                     continue
                     
-                predicted_fingerprint = fingerprints_list[i] if i < len(fingerprints_list) else np.zeros(2048)
-                original_fingerprint = features.get('fingerprint', np.zeros(2048))
+                predicted_fingerprint = fingerprints_list[i] if i < len(fingerprints_list) else np.zeros(self.fp_bits)
+                original_fingerprint = features.get('fingerprint', np.zeros(self.fp_bits))
                 print(f"Found valid molecule at index {i}")
                 return smiles, features['atom_types'], inchi, predicted_fingerprint, original_fingerprint
                 
@@ -746,7 +747,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--use_original_fingerprints", action="store_true",
                        help="Use original RDKit fingerprints instead of predicted fingerprints for generation")
     parser.add_argument("--fingerprint_mode", choices=["or", "xor", "and"], default="xor",
-                       help="Mode for folding fingerprints when they are longer than 2048 bits: 'or' (default), 'xor', or 'and'")
+                       help="Mode for folding fingerprints when they are longer than fp_bits: 'or' (default), 'xor', or 'and'")
+    parser.add_argument("--fp_bits", type=int, default=2048,
+                       help="Number of bits in the fingerprint (default: 2048)")
     
     return parser.parse_args()
 
