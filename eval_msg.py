@@ -341,17 +341,6 @@ class MolecularEvaluator:
         avg_bit_diff = np.mean(bit_differences)
         print(f"Average fingerprint bit differences for batch: {avg_bit_diff:.1f}/2048 ({avg_bit_diff/2048*100:.1f}%)")
         
-        # Display atom types information for the batch
-        all_atom_symbols = []
-        for i in range(batch_size):
-            symbols = rdkit_utils.atom_types_to_symbols(atom_types[i])
-            all_atom_symbols.extend(symbols)
-        
-        from collections import Counter
-        batch_atom_counts = Counter(all_atom_symbols)
-        atom_summary = ", ".join([f"{atom}:{count}" for atom, count in sorted(batch_atom_counts.items())])
-        print(f"Batch atom types summary: {atom_summary}")
-        
         # Use the selected fingerprints for generation
         if self.args.use_original_fingerprints:
             # For original fingerprints, use them directly (they should already be processed)
@@ -625,10 +614,7 @@ class MolecularEvaluator:
             
             # Process remaining incomplete batch if any
             if current_batch:
-                print(f"Processing final incomplete batch of {len(current_batch)} molecules")
-                self._process_and_save_batch(current_batch, batch_idx)
-                total_processed += len(current_batch)
-                batch_idx += 1
+                print(f"Dropping final incomplete batch of {len(current_batch)} molecules")
             
         except KeyboardInterrupt:
             print(f"Processing interrupted. Processed {total_processed} molecules in {batch_idx} batches.")
