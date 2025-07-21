@@ -51,7 +51,7 @@ def process_single_molecule(args_tuple):
         smiles = Chem.MolToSmiles(mol)
         
         # Extract features
-        features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=2048, pad_to_length=pad_to_length)
+        features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=2048, pad_to_length=None)
         if features is None or 'atom_types' not in features:
             return None
         
@@ -662,9 +662,8 @@ class MolecularEvaluator:
         total_processed = 0
         
         molecule_iterator = self._prepare_molecular_data_iterator(eval_df, num_processes=self.args.num_processes)
-        input_data = list(molecule_iterator)
         try:
-            for smiles, atom_types, inchi, predicted_fingerprint, original_fingerprint in input_data:
+            for smiles, atom_types, inchi, predicted_fingerprint, original_fingerprint in molecule_iterator:
                 current_batch.append((smiles, atom_types, inchi, predicted_fingerprint, original_fingerprint))
                 
                 # Process batch when full

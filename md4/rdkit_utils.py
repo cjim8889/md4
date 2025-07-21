@@ -110,7 +110,10 @@ def process_smiles(smi, fp_radius=2, fp_bits=2048, pad_to_length=160):
         if filter_molecule(mol):
             fingerprint = rdMolDescriptors.GetMorganFingerprintAsBitVect(mol, fp_radius, nBits=fp_bits)
             atom_types = get_atom_type_indices(mol)
-            atom_types_padded = np.pad(atom_types, (0, pad_to_length - atom_types.shape[0]), 'constant', constant_values=ATOM_TYPES['PAD'])
+            if pad_to_length is not None:
+                atom_types_padded = np.pad(atom_types, (0, pad_to_length - atom_types.shape[0]), 'constant', constant_values=ATOM_TYPES['PAD'])
+            else:
+                atom_types_padded = atom_types
 
             return {
                 "fingerprint": np.asarray(fingerprint, dtype=np.int8),
