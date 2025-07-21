@@ -13,7 +13,7 @@ lg = RDLogger.logger()
 lg.setLevel(RDLogger.CRITICAL)
 
 # Filter atoms allowed in molecules
-FILTER_ATOMS = {'C', 'N', 'S', 'O', 'F', 'Cl', 'H', 'P', 'Br', 'I', 'B', 'Si', 'Se', 'Fe', 'Mg', 'Zn', 'Ca', 'Na', 'K', 'Al'}
+FILTER_ATOMS = {'C', 'N', 'S', 'O', 'F', 'Cl', 'H', 'P'}
 
 # Atom type mapping for molecular data
 ATOM_TYPES = {
@@ -24,20 +24,7 @@ ATOM_TYPES = {
     'F': 4,
     'Cl': 5,
     'H': 6,
-    'P': 7,
-    # 'Br': 8,
-    # 'I': 9,
-    # 'B': 10,
-    # 'Si': 11,
-    # 'Se': 12,
-    # 'Fe': 13,
-    # 'Mg': 14,
-    # 'Zn': 15,
-    # 'Ca': 16,
-    # 'Na': 17,
-    # 'K': 18,
-    # 'Al': 19,
-    'PAD': 8,
+    'P': 7
 }
 
 # Inverse mapping from indices to atom symbols

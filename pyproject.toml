@@ -10,14 +10,23 @@ dependencies = [
     "distrax>=0.1.5",
     "grain>=0.2.11",
     "huggingface-hub>=0.33.2",
-    "jax>=0.6.2",
+    "jax[tpu]>=0.6.2; sys_platform == 'linux'",
+    "jax>=0.6.2; sys_platform == 'macOS'",
     "matplotlib>=3.10.3",
     "ml-collections>=1.1.0",
+    "mlcroissant>=1.0.18",
     "polars>=1.31.0",
     "rdkit>=2025.3.3",
+    "safe-mol>=0.1.13",
     "seaborn>=0.13.2",
     "tensorflow>=2.19.0",
-    "tensorflow-datasets>=4.9.9",
     "tf-keras>=2.19.0",
-    "transformers>=4.53.1",
+    "transformers==4.51.2",
+    "apache-beam==2.66.0",
+    "tfds-nightly>=4.9.9.dev202507180045",
 ]
+
+
+
+[tool.uv]
+override-dependencies = ["multiprocess==0.70.12", "dill==0.4.0"]
