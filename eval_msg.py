@@ -248,6 +248,7 @@ class MolecularEvaluator:
                 if result is not None:
                     smiles, atom_types, inchi, fingerprint, original_fingerprint = result
                     processed_count += 1
+                    print(f"Processed SMILES: {smiles}")
                     yield smiles, atom_types, inchi, fingerprint, original_fingerprint
         
         print(f"Successfully processed {processed_count}/{total_count} molecules")
@@ -401,7 +402,7 @@ class MolecularEvaluator:
             
             # Expand for multiple samples per input
             expanded_fingerprints = jnp.repeat(jnp.array(fingerprints_for_conditioning, dtype=jnp.int32), self.args.num_samples, axis=0)
-            expanded_atom_types = jnp.repeat(jnp.array(atom_types, dtype=jnp.int32), self.args.num_samples, axis=0)
+            # expanded_atom_types = jnp.repeat(jnp.array(atom_types, dtype=jnp.int32), self.args.num_samples, axis=0)
 
             total_samples = batch_size * self.args.num_samples
             dummy_inputs = jnp.ones((total_samples, self.config.max_length), dtype="int32")
@@ -421,10 +422,10 @@ class MolecularEvaluator:
                     expanded_fingerprints,
                     jnp.zeros((padding_needed, expanded_fingerprints.shape[1]), dtype="int32")
                 ], axis=0)
-                expanded_atom_types = jnp.concatenate([
-                    expanded_atom_types,
-                    jnp.zeros((padding_needed, expanded_atom_types.shape[1]), dtype="int32")
-                ], axis=0)
+                # expanded_atom_types = jnp.concatenate([
+                #     expanded_atom_types,
+                #     jnp.zeros((padding_needed, expanded_atom_types.shape[1]), dtype="int32")
+                # ], axis=0)
                 total_samples_padded = total_samples + padding_needed
                 per_device_batch_size = total_samples_padded // num_devices
             else:
@@ -500,7 +501,7 @@ class MolecularEvaluator:
                 smiles = Chem.MolToSmiles(mol)
                 
                 # Extract features
-                features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=2048, pad_to_length=pad_to_length)
+                features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=2048, pad_to_length=None)
                 if features is None or 'atom_types' not in features:
                     continue
                     
@@ -633,7 +634,7 @@ class MolecularEvaluator:
         batch_smiles, batch_atom_types, batch_inchi, batch_predicted_fingerprints, batch_original_fingerprints = zip(*batch_data)
         batch_predicted_fingerprints = np.array(batch_predicted_fingerprints)
         batch_original_fingerprints = np.array(batch_original_fingerprints)
-        batch_atom_types = np.array(list(batch_atom_types))
+        batch_atom_types = None
         
         print(f"Processing batch {batch_idx} with {len(batch_data)} molecules...")
         
