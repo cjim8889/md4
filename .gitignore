@@ -32,3 +32,5 @@ final_test/
 
 results/
 *.parquet
+
+cache/
