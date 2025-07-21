@@ -745,7 +745,7 @@ def parse_arguments() -> argparse.Namespace:
                        help="Number of processes for molecular data processing (default: auto)")
     parser.add_argument("--use_original_fingerprints", action="store_true",
                        help="Use original RDKit fingerprints instead of predicted fingerprints for generation")
-    parser.add_argument("--fingerprint_mode", choices=["or", "xor", "and"], default="or",
+    parser.add_argument("--fingerprint_mode", choices=["or", "xor", "and"], default="xor",
                        help="Mode for folding fingerprints when they are longer than 2048 bits: 'or' (default), 'xor', or 'and'")
     
     return parser.parse_args()
