@@ -68,6 +68,11 @@ class MolecularEvaluator:
     
     def __init__(self, args: argparse.Namespace):
         self.args = args
+        
+        # For combine mode, we only need basic setup
+        if args.mode == "combine":
+            return
+            
         self.config = self._load_config()
         self.tokenizer = self._load_tokenizer()
         self.model, self.train_state = self._load_model_and_state()
@@ -581,6 +586,25 @@ class MolecularEvaluator:
         print(f"Combined results saved to {self.args.output_file}")
         print(f"Total samples: {len(combined_df)}")
 
+    def _process_and_save_batch(self, batch_data: List[Tuple[str, np.ndarray, str, np.ndarray, np.ndarray]], batch_idx: int):
+        """Process a single batch of molecules and save results."""
+        if not batch_data:
+            return
+            
+        # Unpack batch data
+        batch_smiles, batch_atom_types, batch_inchi, batch_predicted_fingerprints, batch_original_fingerprints = zip(*batch_data)
+        batch_predicted_fingerprints = np.array(batch_predicted_fingerprints)
+        batch_original_fingerprints = np.array(batch_original_fingerprints)
+        batch_atom_types = np.array(list(batch_atom_types))
+        
+        print(f"Processing batch {batch_idx} with {len(batch_data)} molecules...")
+        
+        # Generate samples for batch
+        batch_generated = self._generate_batch_samples(batch_predicted_fingerprints, batch_original_fingerprints, batch_atom_types)
+        
+        # Save batch results
+        self._save_batch_results(batch_idx, list(batch_smiles), batch_predicted_fingerprints, batch_generated, list(batch_inchi))
+
     def run_batch_mode(self):
         """Run evaluation in batch mode using streaming processing."""
         print("=== BATCH MODE: Processing full dataset with streaming ===")
@@ -625,24 +649,26 @@ class MolecularEvaluator:
         self._combine_intermediate_results()
         print("Batch evaluation completed successfully!")
 
-    def _process_and_save_batch(self, batch_data: List[Tuple[str, np.ndarray, str, np.ndarray, np.ndarray]], batch_idx: int):
-        """Process a single batch of molecules and save results."""
-        if not batch_data:
-            return
-            
-        # Unpack batch data
-        batch_smiles, batch_atom_types, batch_inchi, batch_predicted_fingerprints, batch_original_fingerprints = zip(*batch_data)
-        batch_predicted_fingerprints = np.array(batch_predicted_fingerprints)
-        batch_original_fingerprints = np.array(batch_original_fingerprints)
-        batch_atom_types = np.array(list(batch_atom_types))
+    def run_combine_mode(self):
+        """Run evaluation in combine mode - only combine existing intermediate results."""
+        print("=== COMBINE MODE: Combining intermediate results ===")
         
-        print(f"Processing batch {batch_idx} with {len(batch_data)} molecules...")
+        if not os.path.exists(self.args.intermediate_dir):
+            raise ValueError(f"Intermediate directory not found: {self.args.intermediate_dir}")
         
-        # Generate samples for batch
-        batch_generated = self._generate_batch_samples(batch_predicted_fingerprints, batch_original_fingerprints, batch_atom_types)
+        batch_files = [
+            f for f in os.listdir(self.args.intermediate_dir) 
+            if f.startswith("batch_") and f.endswith(".csv")
+        ]
         
-        # Save batch results
-        self._save_batch_results(batch_idx, list(batch_smiles), batch_predicted_fingerprints, batch_generated, list(batch_inchi))
+        if not batch_files:
+            raise ValueError(f"No batch files found in {self.args.intermediate_dir}")
+        
+        print(f"Found {len(batch_files)} batch files in {self.args.intermediate_dir}")
+        
+        # Combine all results
+        self._combine_intermediate_results()
+        print("Combine evaluation completed successfully!")
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -651,8 +677,8 @@ def parse_arguments() -> argparse.Namespace:
     
     # Required arguments
     parser.add_argument("--checkpoint_dir", help="Directory containing checkpoints (required unless --no_checkpoint is used)")
-    parser.add_argument("--mode", choices=["debug", "batch"], required=True, 
-                       help="Evaluation mode: 'debug' for single datapoint, 'batch' for full dataset")
+    parser.add_argument("--mode", choices=["debug", "batch", "combine"], required=True, 
+                       help="Evaluation mode: 'debug' for single datapoint, 'batch' for full dataset, 'combine' to combine intermediate results")
     
     # Data arguments
     parser.add_argument("--eval_data", default="./data/msg/msg_processed.parquet", 
@@ -689,25 +715,40 @@ def main():
     """Main function."""
     args = parse_arguments()
     
-    # Validate inputs
-    if not args.no_checkpoint:
-        if not args.checkpoint_dir:
-            raise ValueError("Must specify --checkpoint_dir or use --no_checkpoint")
-        if not os.path.exists(args.checkpoint_dir):
-            raise ValueError(f"Checkpoint directory not found: {args.checkpoint_dir}")
-    elif args.checkpoint_dir and not os.path.exists(args.checkpoint_dir):
-        print(f"WARNING: Checkpoint directory {args.checkpoint_dir} not found, but --no_checkpoint flag is used")
-    
-    if not os.path.exists(args.eval_data):
-        raise ValueError(f"Evaluation data not found: {args.eval_data}")
+    # Validate inputs based on mode
+    if args.mode != "combine":
+        # For debug and batch modes, validate standard inputs
+        if not args.no_checkpoint:
+            if not args.checkpoint_dir:
+                raise ValueError("Must specify --checkpoint_dir or use --no_checkpoint")
+            if not os.path.exists(args.checkpoint_dir):
+                raise ValueError(f"Checkpoint directory not found: {args.checkpoint_dir}")
+        elif args.checkpoint_dir and not os.path.exists(args.checkpoint_dir):
+            print(f"WARNING: Checkpoint directory {args.checkpoint_dir} not found, but --no_checkpoint flag is used")
+        
+        if not os.path.exists(args.eval_data):
+            raise ValueError(f"Evaluation data not found: {args.eval_data}")
+    else:
+        # For combine mode, only validate intermediate directory and output file
+        if not os.path.exists(args.intermediate_dir):
+            raise ValueError(f"Intermediate directory not found: {args.intermediate_dir}")
+        
+        batch_files = [
+            f for f in os.listdir(args.intermediate_dir) 
+            if f.startswith("batch_") and f.endswith(".csv")
+        ]
+        
+        if not batch_files:
+            raise ValueError(f"No batch files found in {args.intermediate_dir}")
     
     mode_info = f"{args.mode} mode"
-    if args.no_checkpoint:
-        mode_info += " (no checkpoint)"
-    if args.use_original_fingerprints:
-        mode_info += " (using original fingerprints)"
-    else:
-        mode_info += " (using predicted fingerprints)"
+    if args.mode != "combine":
+        if args.no_checkpoint:
+            mode_info += " (no checkpoint)"
+        if args.use_original_fingerprints:
+            mode_info += " (using original fingerprints)"
+        else:
+            mode_info += " (using predicted fingerprints)"
     print(f"Starting MSG evaluation in {mode_info}...")
     
     # Create evaluator and run
@@ -715,8 +756,10 @@ def main():
     
     if args.mode == "debug":
         evaluator.run_debug_mode()
-    else:  # batch mode
+    elif args.mode == "batch":
         evaluator.run_batch_mode()
+    elif args.mode == "combine":
+        evaluator.run_combine_mode()
 
 
 if __name__ == "__main__":
