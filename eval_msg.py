@@ -345,7 +345,7 @@ class MolecularEvaluator:
         return generated_smiles
 
     def _generate_batch_samples(self, predicted_fingerprints: np.ndarray, original_fingerprints: np.ndarray, atom_types: np.ndarray) -> List[List[str]]:
-        """Generate samples for a batch using pmap."""
+        """Generate samples for a batch using simple_generate for single device or pmap for multi-device."""
         batch_size = predicted_fingerprints.shape[0]
         
         # Process fingerprints and get bit differences
@@ -363,74 +363,109 @@ class MolecularEvaluator:
             # For predicted fingerprints, use the processed version
             fingerprints_for_conditioning = processed_fingerprints
         
-        # Expand for multiple samples per input
-        expanded_fingerprints = jnp.repeat(jnp.array(fingerprints_for_conditioning, dtype=jnp.int32), self.args.num_samples, axis=0)
-        expanded_atom_types = jnp.repeat(jnp.array(atom_types, dtype=jnp.int32), self.args.num_samples, axis=0)
-
-        total_samples = batch_size * self.args.num_samples
-        dummy_inputs = jnp.ones((total_samples, self.config.max_length), dtype="int32")
-        
-        conditioning = expanded_fingerprints
-        
-        # Handle multi-device distribution
         num_devices = jax.device_count()
-        per_device_batch_size = total_samples // num_devices
         
-        if total_samples % num_devices != 0:
-            padding_needed = num_devices - (total_samples % num_devices)
-            dummy_inputs = jnp.concatenate([
-                dummy_inputs,
-                jnp.ones((padding_needed, self.config.max_length), dtype="int32")
-            ], axis=0)
-            expanded_fingerprints = jnp.concatenate([
-                expanded_fingerprints,
-                jnp.zeros((padding_needed, expanded_fingerprints.shape[1]), dtype="int32")
-            ], axis=0)
-            expanded_atom_types = jnp.concatenate([
-                expanded_atom_types,
-                jnp.zeros((padding_needed, expanded_atom_types.shape[1]), dtype="int32")
-            ], axis=0)
-            total_samples_padded = total_samples + padding_needed
-            per_device_batch_size = total_samples_padded // num_devices
+        if num_devices == 1:
+            # Single device: use simple_generate
+            print("Using simple_generate for single device")
+            
+            batch_results = []
+            for batch_idx in range(batch_size):
+                # Prepare conditioning for this sample
+                fp_for_conditioning = fingerprints_for_conditioning[batch_idx]
+                conditioning = jnp.repeat(jnp.array(fp_for_conditioning, dtype=jnp.int32)[None, :], self.args.num_samples, axis=0)
+                
+                # Generate samples for this input
+                self.rng, sample_rng = jax.random.split(self.rng)
+                samples = sampling.simple_generate(
+                    sample_rng,
+                    self.train_state,
+                    self.args.num_samples,
+                    self.model,
+                    conditioning=conditioning
+                )
+                
+                # Convert to SMILES
+                sample_list = []
+                for sample_idx in range(self.args.num_samples):
+                    tokens = samples[sample_idx]
+                    smiles = self.tokenizer.decode(tokens, skip_special_tokens=True)
+                    sample_list.append(smiles)
+                batch_results.append(sample_list)
+            
+            return batch_results
+        
         else:
-            padding_needed = 0
-        
-        # Reshape for pmap
-        dummy_inputs = dummy_inputs.reshape(num_devices, per_device_batch_size, self.config.max_length)
-        conditioning = expanded_fingerprints.reshape(num_devices, per_device_batch_size, -1)
-        
-        # Generate samples
-        replicated_train_state = flax_utils.replicate(self.train_state)
-        replicated_rng = flax_utils.replicate(self.rng)
-        
-        samples = sampling.generate(
-            self.model,
-            replicated_train_state,
-            replicated_rng,
-            dummy_inputs,
-            conditioning=conditioning,
-        )
-        
-        # Process results
-        samples = flax_utils.unreplicate(samples)
-        samples = samples.reshape(-1, self.config.max_length)
-        
-        if padding_needed > 0:
-            samples = samples[:-padding_needed]
-        
-        samples = samples.reshape(batch_size, self.args.num_samples, -1)
-        
-        # Convert to SMILES
-        batch_results = []
-        for batch_idx in range(batch_size):
-            sample_list = []
-            for sample_idx in range(self.args.num_samples):
-                tokens = samples[batch_idx, sample_idx]
-                smiles = self.tokenizer.decode(tokens, skip_special_tokens=True)
-                sample_list.append(smiles)
-            batch_results.append(sample_list)
-        
-        return batch_results
+            # Multi-device: use existing pmap approach
+            print(f"Using pmap for {num_devices} devices")
+            
+            # Expand for multiple samples per input
+            expanded_fingerprints = jnp.repeat(jnp.array(fingerprints_for_conditioning, dtype=jnp.int32), self.args.num_samples, axis=0)
+            expanded_atom_types = jnp.repeat(jnp.array(atom_types, dtype=jnp.int32), self.args.num_samples, axis=0)
+
+            total_samples = batch_size * self.args.num_samples
+            dummy_inputs = jnp.ones((total_samples, self.config.max_length), dtype="int32")
+            
+            conditioning = expanded_fingerprints
+            
+            # Handle multi-device distribution
+            per_device_batch_size = total_samples // num_devices
+            
+            if total_samples % num_devices != 0:
+                padding_needed = num_devices - (total_samples % num_devices)
+                dummy_inputs = jnp.concatenate([
+                    dummy_inputs,
+                    jnp.ones((padding_needed, self.config.max_length), dtype="int32")
+                ], axis=0)
+                expanded_fingerprints = jnp.concatenate([
+                    expanded_fingerprints,
+                    jnp.zeros((padding_needed, expanded_fingerprints.shape[1]), dtype="int32")
+                ], axis=0)
+                expanded_atom_types = jnp.concatenate([
+                    expanded_atom_types,
+                    jnp.zeros((padding_needed, expanded_atom_types.shape[1]), dtype="int32")
+                ], axis=0)
+                total_samples_padded = total_samples + padding_needed
+                per_device_batch_size = total_samples_padded // num_devices
+            else:
+                padding_needed = 0
+            
+            # Reshape for pmap
+            dummy_inputs = dummy_inputs.reshape(num_devices, per_device_batch_size, self.config.max_length)
+            conditioning = expanded_fingerprints.reshape(num_devices, per_device_batch_size, -1)
+            
+            # Generate samples
+            replicated_train_state = flax_utils.replicate(self.train_state)
+            replicated_rng = flax_utils.replicate(self.rng)
+            
+            samples = sampling.generate(
+                self.model,
+                replicated_train_state,
+                replicated_rng,
+                dummy_inputs,
+                conditioning=conditioning,
+            )
+            
+            # Process results
+            samples = flax_utils.unreplicate(samples)
+            samples = samples.reshape(-1, self.config.max_length)
+            
+            if padding_needed > 0:
+                samples = samples[:-padding_needed]
+            
+            samples = samples.reshape(batch_size, self.args.num_samples, -1)
+            
+            # Convert to SMILES
+            batch_results = []
+            for batch_idx in range(batch_size):
+                sample_list = []
+                for sample_idx in range(self.args.num_samples):
+                    tokens = samples[batch_idx, sample_idx]
+                    smiles = self.tokenizer.decode(tokens, skip_special_tokens=True)
+                    sample_list.append(smiles)
+                batch_results.append(sample_list)
+            
+            return batch_results
 
     def _process_single_molecule_debug(self, eval_df: pl.DataFrame, pad_to_length: int = 128) -> Optional[Tuple[str, np.ndarray, str, np.ndarray, np.ndarray]]:
         """Process a single molecule for debug mode - finds first valid molecule."""
