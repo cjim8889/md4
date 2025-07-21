@@ -252,13 +252,14 @@ class MolecularEvaluator:
         
         print(f"Successfully processed {processed_count}/{total_count} molecules")
 
-    def _process_fingerprints(self, predicted_fingerprints: np.ndarray, original_fingerprints: np.ndarray, threshold: float = 0.5) -> Tuple[np.ndarray, np.ndarray]:
+    def _process_fingerprints(self, predicted_fingerprints: np.ndarray, original_fingerprints: np.ndarray, threshold: float = 0.5, mode: str = "or") -> Tuple[np.ndarray, np.ndarray]:
         """Process fingerprints by thresholding and folding, and calculate bit differences.
         
         Args:
             predicted_fingerprints: Predicted fingerprints from model
             original_fingerprints: Original fingerprints computed from SMILES
             threshold: Threshold for binarization
+            mode: Folding mode - 'or', 'xor', or 'and'
             
         Returns:
             Tuple of (processed_fingerprints, bit_differences)
@@ -266,6 +267,10 @@ class MolecularEvaluator:
         if not RDKIT_AVAILABLE:
             print("WARNING: RDKit not available, skipping fingerprint processing")
             return predicted_fingerprints, np.zeros(predicted_fingerprints.shape[0] if predicted_fingerprints.ndim > 1 else 1)
+        
+        # Validate mode
+        if mode not in ["or", "xor", "and"]:
+            raise ValueError(f"Invalid folding mode '{mode}'. Must be one of: 'or', 'xor', 'and'")
         
         # Convert predicted fingerprints to binary with threshold
         binary_predicted = (predicted_fingerprints >= threshold).astype(np.int32)
@@ -280,7 +285,14 @@ class MolecularEvaluator:
         if binary_predicted.shape[1] > 2048:
             first_half = binary_predicted[:, :2048]
             second_half = binary_predicted[:, 2048:]
-            folded_predicted = np.logical_or(first_half, second_half).astype(np.int32)
+            
+            # Apply the specified folding mode
+            if mode == "or":
+                folded_predicted = np.logical_or(first_half, second_half).astype(np.int32)
+            elif mode == "xor":
+                folded_predicted = np.logical_xor(first_half, second_half).astype(np.int32)
+            elif mode == "and":
+                folded_predicted = np.logical_and(first_half, second_half).astype(np.int32)
         else:
             folded_predicted = binary_predicted
         
@@ -292,7 +304,7 @@ class MolecularEvaluator:
     def _generate_single_datapoint(self, predicted_fingerprint: np.ndarray, original_fingerprint: np.ndarray, atom_types: np.ndarray) -> List[str]:
         """Generate samples for a single datapoint using simple_generate."""        
         # Process fingerprint and get bit differences
-        processed_fp, bit_differences = self._process_fingerprints(predicted_fingerprint[None, :], original_fingerprint[None, :], threshold=0.5)
+        processed_fp, bit_differences = self._process_fingerprints(predicted_fingerprint[None, :], original_fingerprint[None, :], threshold=0.5, mode=self.args.fingerprint_mode)
         bit_diff = bit_differences[0]
         
         print(f"Fingerprint bit differences: {bit_diff}/2048 ({bit_diff/2048*100:.1f}%)")
@@ -340,7 +352,7 @@ class MolecularEvaluator:
         batch_size = predicted_fingerprints.shape[0]
         
         # Process fingerprints and get bit differences
-        processed_fingerprints, bit_differences = self._process_fingerprints(predicted_fingerprints, original_fingerprints, threshold=0.5)
+        processed_fingerprints, bit_differences = self._process_fingerprints(predicted_fingerprints, original_fingerprints, threshold=0.5, mode=self.args.fingerprint_mode)
         
         # Print average bit differences for the batch
         avg_bit_diff = np.mean(bit_differences)
@@ -707,6 +719,8 @@ def parse_arguments() -> argparse.Namespace:
                        help="Number of processes for molecular data processing (default: auto)")
     parser.add_argument("--use_original_fingerprints", action="store_true",
                        help="Use original RDKit fingerprints instead of predicted fingerprints for generation")
+    parser.add_argument("--fingerprint_mode", choices=["or", "xor", "and"], default="or",
+                       help="Mode for folding fingerprints when they are longer than 2048 bits: 'or' (default), 'xor', or 'and'")
     
     return parser.parse_args()
 
@@ -749,6 +763,7 @@ def main():
             mode_info += " (using original fingerprints)"
         else:
             mode_info += " (using predicted fingerprints)"
+        mode_info += f" (fingerprint folding: {args.fingerprint_mode})"
     print(f"Starting MSG evaluation in {mode_info}...")
     
     # Create evaluator and run
