@@ -3,7 +3,7 @@ name = "md4"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 dependencies = [
     "clu>=0.0.12",
     "datasets>=4.0.0",
@@ -19,14 +19,27 @@ dependencies = [
     "rdkit>=2025.3.3",
     "safe-mol>=0.1.13",
     "seaborn>=0.13.2",
-    "tensorflow>=2.19.0",
-    "tf-keras>=2.19.0",
     "transformers==4.51.2",
     "apache-beam==2.66.0",
+    "torch==2.7.1",
     "tfds-nightly>=4.9.9.dev202507180045",
+    "tf-nightly==2.20.0.dev20250715",
 ]
 
 
 
 [tool.uv]
 override-dependencies = ["multiprocess==0.70.12", "dill==0.4.0"]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cpu" },
+]
+torchvision = [
+  { index = "pytorch-cpu" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

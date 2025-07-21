@@ -6,7 +6,7 @@ dataset and generates molecular features on-the-fly without requiring pre-proces
 
 import dataclasses
 import threading
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 import grain.python as grain
 import jax
@@ -369,7 +369,7 @@ def create_datasets(
         sampler=index_sampler,
         worker_count=config.grain_num_workers,
         worker_buffer_size=1,
-        read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1024),
+        read_options=grain.ReadOptions(num_threads=0, prefetch_buffer_size=1024),
     )
     
     # Create evaluation data loader
