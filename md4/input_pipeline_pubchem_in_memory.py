@@ -5,16 +5,16 @@ dataset and generates molecular features on-the-fly without requiring pre-proces
 """
 
 import dataclasses
-import threading
+# import threading
 from typing import Any, Dict, Tuple
 
 import grain.python as grain
-import jax
-import numpy as np
+# import jax
+# import numpy as np
 import polars as pl
-import transformers
-from absl import logging
-from datasets import load_dataset
+# import transformers
+# from absl import logging
+# from datasets import load_dataset
 from ml_collections import config_dict
 
 from md4 import rdkit_utils
@@ -61,19 +61,14 @@ class FilterNoneMolecules(grain.FilterTransform):
         """Filter out molecules that are None."""
         return features is not None
 
-def load_pubchem_streaming_source(
+def get_pubchem_dataset(
     split: str = "train",
-) -> PubChemHFDataSource:
+) -> grain.IterDataset:
     """Load PubChem dataset as a streaming data source."""
-    dataset = load_dataset(
-        _PUBCHEM_DATASET,
-        split=split,
-    )
+    dataset = grain.MapDataset.source("data/pubchem/data/train-00000-of-00001-e9b227f8c7259c8b.parquet")
 
-    return PubChemHFDataSource(
-        dataset=dataset,
-        split=split,
-    )
+
+    return dataset
 
 
 def compile_molecular_transformations(
@@ -119,6 +114,12 @@ def create_datasets(
 if __name__ == "__main__":
     from tqdm import tqdm
     from rich import print
+
+    dataset = get_pubchem_dataset()
+
+    # print(dataset)
+
+    # exit()
     
     train_loader, info = create_datasets(
         config=config_dict.ConfigDict(),

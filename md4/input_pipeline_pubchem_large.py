@@ -2,14 +2,16 @@
 
 import dataclasses
 import multiprocessing as mp
+from multiprocessing import shared_memory
 import os
-from functools import partial
+import glob
+from pathlib import Path
 
 import grain.python as grain
 import numpy as np
+import polars as pl
 import tensorflow_datasets as tfds
 import transformers
-from datasets import load_dataset
 from ml_collections import config_dict
 
 from tqdm import tqdm
@@ -19,9 +21,51 @@ from md4 import rdkit_utils
 _SAFE_TOKENIZER = "data/pubchem_safe/safe_tokenizer"
 
 
-def process_smiles_worker(smi, fp_radius=2, fp_bits=2048, pad_to_length=128):
+def find_data_files(data_file_pattern):
+  data_files = glob.glob(str(Path(data_file_pattern).expanduser().resolve()))
+  assert len(data_files) > 0, f"No file found with pattern {data_file_pattern}."
+  return data_files
+
+# ---------------- pool bootstrap ----------------
+def _init_worker_pubchem(smiles_name, smiles_shape, smiles_dtype,
+                         fp_name, fp_shape, status_name):
+    global SMILES, FINGERPRINTS, STATUS, SMILES_SHM, FP_SHM, STATUS_SHM        # be explicit
+    # Keep references to shared memory objects to prevent garbage collection
+    SMILES_SHM   = shared_memory.SharedMemory(smiles_name)
+    FP_SHM       = shared_memory.SharedMemory(fp_name)
+    STATUS_SHM   = shared_memory.SharedMemory(status_name)
+    
+    SMILES       = np.ndarray(smiles_shape,     dtype=smiles_dtype,
+                              buffer=SMILES_SHM.buf)
+    FINGERPRINTS = np.ndarray(fp_shape,         dtype=np.bool_,
+                              buffer=FP_SHM.buf)
+    STATUS       = np.ndarray((smiles_shape[0],), dtype=np.uint8,
+                              buffer=STATUS_SHM.buf)
+
+# ---------------- worker proper -----------------
+def optimized_batch_worker_pubchem(task):                        # accepts tuple (start, stop)
+    """Process a batch of SMILES with minimal overhead using global shared arrays."""
+    start, stop = task  # unpack the tuple
+    processed = 0
+    for i in range(start, stop):
+        if rdkit_utils.process_smiles_with_shared_memory(
+                SMILES[i], FINGERPRINTS, i):
+            STATUS[i] = 1
+            processed += 1
+        else:
+            STATUS[i] = 0
+    return processed
+
+
+def process_smiles_worker(args, shape):
     """Process a single SMILES string - optimized for chunksize batching."""
-    return rdkit_utils.process_smiles(smi, fp_radius=fp_radius, fp_bits=fp_bits, pad_to_length=pad_to_length)
+    smi, i = args  # Unpack the tuple
+    shm_fingerprint = shared_memory.SharedMemory(name="fingerprint_shm")
+    shm_fingerprint_array = np.ndarray(shape, dtype=np.bool_, buffer=shm_fingerprint.buf)
+    if rdkit_utils.process_smiles_with_shared_memory(smi, shm_fingerprint_array, i):
+        return i
+    else:
+        return None
 
 @dataclasses.dataclass
 class TokenizeSafe(grain.MapTransform):
@@ -62,7 +106,7 @@ class ProcessMolecular(grain.MapTransform):
         return features
 
 
-def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048, pad_to_length=128, 
+def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048, 
                                chunk_size=1000, num_processes=None):
     """Load and preprocess PubChem dataset with SAFE encoding and tokenizer training.
     
@@ -87,49 +131,91 @@ def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048, pad_to_lengt
         # (removed process_func since we're using batch processing now)
 
         print("Loading full dataset without streaming...")
-        ds_full = load_dataset("jablonkagroup/pubchem-smiles-molecular-formula", split="train", cache_dir=data_dir, streaming=False)
+        ds_full = pl.read_parquet(find_data_files("data/pubchem_large/data/train-*.parquet"))
         print(f"Loaded {len(ds_full)} samples")
-        train_size = int(len(ds_full) * 0.95)
-        train_ds = ds_full.select(range(train_size))
-        val_ds = ds_full.select(range(train_size, len(ds_full)))
+        train_size = int(len(ds_full) * 0.98)
+        train_ds = ds_full[:train_size]
+        val_ds = ds_full[train_size:]
 
-        def iterator_closure(ds):
+        def iterator_closure(ds: pl.DataFrame):
             def iterator():
-                # Use multiprocessing with chunksize for optimal performance
+                # Use optimized multiprocessing with minimal memory exchange
                 _num_processes = num_processes if num_processes is not None else mp.cpu_count()
                 
                 smiles_data = ds["smiles"]
                 total_samples = len(smiles_data)
+                batch_size = chunk_size  # Use chunk_size as batch_size
                 
-                # Calculate optimal chunksize: typically total_samples / (4 * num_processes)
-                # This ensures good load balancing without too much overhead
-                chunksize = chunk_size
-                update_interval = 1000
-                print(f"Processing {total_samples} SMILES with {_num_processes} processes (chunksize={chunksize})...")
+                print(f"Processing {total_samples} SMILES with {_num_processes} processes (batch_size={batch_size})...")
                 
-                with mp.Pool(processes=_num_processes) as pool:
-                    # Create partial function with fixed parameters
-                    worker_func = partial(
-                        process_smiles_worker,
-                        fp_radius=fp_radius,
-                        fp_bits=fp_bits,
-                        pad_to_length=pad_to_length
-                    )
+                # Convert to numpy string array - much more efficient than encoding/decoding
+                smiles_array = smiles_data.to_numpy()
+                
+                # Create shared memory for fixed-size string array
+                smiles_shm = shared_memory.SharedMemory(create=True, size=smiles_array.nbytes)
+                smiles_shared_array = np.ndarray(smiles_array.shape, dtype=smiles_array.dtype, buffer=smiles_shm.buf)
+                
+                # Copy data to shared memory
+                smiles_shared_array[:] = smiles_array
+                
+                # Create shared memory for fingerprints and status
+                fingerprint_size = total_samples * fp_bits
+                fingerprint_shm = shared_memory.SharedMemory(create=True, size=fingerprint_size)
+                fingerprint_array = np.ndarray((total_samples, fp_bits), dtype=np.bool_, buffer=fingerprint_shm.buf)
+                
+                status_shm = shared_memory.SharedMemory(create=True, size=total_samples)  # uint8
+                status_array = np.ndarray((total_samples,), dtype=np.uint8, buffer=status_shm.buf)
+                status_array.fill(255)  # Initialize with "not processed" value
+                
+                try:
+                    # Create batch ranges as simple (start, stop) tuples
+                    tasks = [(i, min(i + batch_size, total_samples))
+                             for i in range(0, total_samples, batch_size)]
                     
-                    # Use imap_unordered with chunksize for optimal throughput
-                    processed_count = 0
-                    with tqdm(total=total_samples, desc="Processing SMILES") as pbar:
-                        for result in pool.imap_unordered(worker_func, smiles_data, chunksize=chunksize):
-                            if result is not None:  # Filter out failed processing
-                                yield result["smiles"], result
-                            processed_count += 1
-                            if processed_count % update_interval == 0:  # Update progress every chunk
-                                pbar.update(update_interval)
+                    with mp.get_context("fork").Pool(
+                            processes=_num_processes,
+                            initializer=_init_worker_pubchem,
+                            initargs=(smiles_shm.name, smiles_shared_array.shape,
+                                      smiles_shared_array.dtype,
+                                      fingerprint_shm.name, fingerprint_array.shape,
+                                      status_shm.name)) as pool:
+                        
+                        # Process batches
+                        total_processed = 0
+                        since_last_update = 0
+                        
+                        with tqdm(total=total_samples, desc="Processing batches") as pbar:
+                            for result in pool.imap_unordered(optimized_batch_worker_pubchem, tasks, chunksize=16):
+                                total_processed += result
+                                since_last_update += result
+                                if since_last_update >= 2000:
+                                    pbar.update(since_last_update)
+                                    since_last_update = 0
                         
                         # Update progress for remaining items
-                        remaining = processed_count % update_interval
-                        if remaining > 0:
-                            pbar.update(remaining)
+                        if since_last_update > 0:
+                            pbar.update(since_last_update)
+                        
+                        # Yield successful results
+                        for i in range(total_samples):
+                            if status_array[i] == 1:
+                                yield smiles_data[i], {
+                                    "fingerprint": fingerprint_array[i, :],
+                                    "smiles": smiles_data[i]
+                                }
+                
+                finally:
+                    # Clean up shared memory
+                    try:
+                        smiles_shm.close()
+                        smiles_shm.unlink()
+                        fingerprint_shm.close()
+                        fingerprint_shm.unlink()
+                        status_shm.close()
+                        status_shm.unlink()
+                    except Exception as e:
+                        print(f"Cleanup error: {e}")
+            
             return iterator
 
         pubchem_builder = tfds.dataset_builders.store_as_tfds_dataset(
@@ -140,9 +226,6 @@ def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048, pad_to_lengt
                     "smiles": tfds.features.Text(),
                     "fingerprint": tfds.features.Tensor(
                         shape=(fp_bits,), dtype=np.bool_
-                    ),
-                    "atom_types": tfds.features.Tensor(
-                        shape=(pad_to_length,), dtype=np.int8
                     ),
                 }
             ),
@@ -210,11 +293,10 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
 
 
 if __name__ == "__main__":
-    pubchem_builder = preprocess_or_load_pubchem(
+    preprocess_or_load_pubchem(
         data_dir="./data/pubchem_large",
         fp_radius=2,
         fp_bits=2048,
-        pad_to_length=160,  # Adjust pad_to_length as needed
-        chunk_size=1024,  # Adjust batch size as needed
-        num_processes=16  # Use default (min(cpu_count(), 8))
+        chunk_size=128,
+        num_processes=16
     )
