@@ -5,13 +5,21 @@ dataset and generates molecular features on-the-fly without requiring pre-proces
 """
 
 import dataclasses
+import glob
+from pathlib import Path
 # import threading
 from typing import Any, Dict, Tuple
 
 import grain.python as grain
-# import jax
+grain.config.update("py_debug_mode", True)
+grain.config.update("py_dataset_visualization_output_dir", "")
+
+import jax
 # import numpy as np
 import polars as pl
+# import transformers
+# from absl import logging
+# from datasets import load_dataset
 # import transformers
 # from absl import logging
 # from datasets import load_dataset
@@ -61,14 +69,53 @@ class FilterNoneMolecules(grain.FilterTransform):
         """Filter out molecules that are None."""
         return features is not None
 
+def find_data_files(data_file_pattern):
+  data_files = glob.glob(str(Path(data_file_pattern).expanduser().resolve()))
+  assert len(data_files) > 0, f"No file found with pattern {data_file_pattern}."
+  return data_files
+
 def get_pubchem_dataset(
-    split: str = "train",
+    shuffle: bool = False,
+    shuffle_seed: int = 42,
+    num_epochs: int = 1,
+    dataloading_host_index: int = 0,
+    dataloading_host_count: int = 1,
+    grain_worker_count: int = 15,
 ) -> grain.IterDataset:
     """Load PubChem dataset as a streaming data source."""
-    dataset = grain.MapDataset.source("data/pubchem/data/train-00000-of-00001-e9b227f8c7259c8b.parquet")
+    data_files = find_data_files("data/pubchem_large/data/train-*.parquet")
+    dataset = grain.MapDataset.source(data_files)
+    if shuffle:
+        dataset = dataset.shuffle(shuffle_seed)
+    
+    dataset = dataset.repeat(num_epochs)
+    dataset = dataset[dataloading_host_index::dataloading_host_count]
 
+    assert grain_worker_count <= len(dataset), (
+        f"grain worker count is currently {grain_worker_count}, exceeding the max allowable value {len(dataset)} "
+        f"(file shard count of a data loading host) for your dataset. "
+        f"Please lower grain_worker_count or increase file shard count."
+    )
+
+    dataset = dataset.map(grain.experimental.ParquetIterDataset)
+    dataset = grain.experimental.InterleaveIterDataset(dataset, cycle_length=len(dataset))
+    dataset = grain.experimental.WindowShuffleIterDataset(dataset, window_size=100, seed=shuffle_seed)
 
     return dataset
+
+def create_dataloading_pipeline(
+    dataset: grain.IterDataset,
+    batch_size: int = 128,
+    worker_count: int = 15,
+):
+    dataset = dataset.map(ProcessMolecular())
+    dataset = dataset.filter(FilterNoneMolecules())
+    dataset = dataset.batch(batch_size=batch_size, drop_remainder=True)
+    dataset = dataset.mp_prefetch(grain.MultiprocessingOptions(num_workers=worker_count, per_worker_buffer_size=16, enable_profiling=False))
+    return dataset
+
+
+
 
 
 def compile_molecular_transformations(
@@ -114,19 +161,12 @@ def create_datasets(
 if __name__ == "__main__":
     from tqdm import tqdm
     from rich import print
+    import time
 
     dataset = get_pubchem_dataset()
 
-    # print(dataset)
-
-    # exit()
-    
-    train_loader, info = create_datasets(
-        config=config_dict.ConfigDict(),
-        seed=42,
-    )
+    train_loader = create_dataloading_pipeline(dataset, worker_count=15, batch_size=512)
     print(f"Train loader: {train_loader}")
-    print(f"Info: {info}")
     
     # Test throughput with tqdm
     print("\nTesting data loading throughput...")
@@ -137,8 +177,6 @@ if __name__ == "__main__":
                 pbar.set_postfix({"batch_size": batch["fingerprint"].shape[0]})
                 
                 # Stop after a reasonable number of samples for testing
-                if i >= 100000:
-                    break
                     
     except KeyboardInterrupt:
         print("\nStopped by user")

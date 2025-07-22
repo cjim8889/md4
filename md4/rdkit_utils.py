@@ -1,10 +1,13 @@
 """RDKit utilities for molecular data processing."""
 import functools
+import functools
 import random
 
 import numpy as np
 from rdkit import Chem, RDLogger
 from rdkit.Chem import Descriptors
+from rdkit.Chem import rdFingerprintGenerator
+from rdkit.Chem import Descriptors, rdMolDescriptors
 from rdkit.Chem import rdFingerprintGenerator
 
 # Set random seed and suppress RDKit warnings
@@ -118,6 +121,10 @@ def get_atom_type_indices(mol, types=None):
 def get_generator(fp_radius=2, fp_bits=2048):
     mfpgen = rdFingerprintGenerator.GetMorganGenerator(radius=fp_radius,fpSize=fp_bits)
     return mfpgen
+@functools.lru_cache(maxsize=10)
+def get_generator(fp_radius=2, fp_bits=2048):
+    mfpgen = rdFingerprintGenerator.GetMorganGenerator(radius=fp_radius,fpSize=fp_bits)
+    return mfpgen
 
 def process_smiles(smi, fp_radius=2, fp_bits=2048, pad_to_length=160):
     """Process SMILES string to InChI with filtering."""
@@ -126,6 +133,7 @@ def process_smiles(smi, fp_radius=2, fp_bits=2048, pad_to_length=160):
         smi = Chem.MolToSmiles(mol, isomericSmiles=False)  # remove stereochemistry information
         mol = Chem.MolFromSmiles(smi)
         if filter_molecule(mol):
+            fingerprint = get_generator(fp_radius, fp_bits).GetFingerprintAsNumPy(mol)
             fingerprint = get_generator(fp_radius, fp_bits).GetFingerprintAsNumPy(mol)
             atom_types = get_atom_type_indices(mol)
             if pad_to_length is not None:
@@ -141,6 +149,20 @@ def process_smiles(smi, fp_radius=2, fp_bits=2048, pad_to_length=160):
     except:
         pass
     return None
+
+def process_smiles_with_shared_memory(smi, shm_fingerprint, i, fp_radius=2, fp_bits=2048):
+    try:
+        mol = Chem.MolFromSmiles(smi)
+        if filter_molecule(mol):
+            fingerprint = get_generator(fp_radius, fp_bits).GetFingerprintAsNumPy(mol)
+            shm_fingerprint[i, :] = fingerprint[:]
+
+            return True
+    except:
+        pass
+
+    return False
+
 
 def process_smiles_with_shared_memory(smi, shm_fingerprint, i, fp_radius=2, fp_bits=2048):
     try:
