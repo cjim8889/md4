@@ -140,7 +140,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train a SMILES tokenizer")
     parser.add_argument("--dataset-name", default="jablonkagroup/pubchem-smiles-molecular-formula", 
                        help="HuggingFace dataset name")
-    parser.add_argument("--vocab-size", type=int, default=1024, help="Vocabulary size")
+    parser.add_argument("--vocab-size", type=int, default=None, help="Vocabulary size")
     parser.add_argument("--min-frequency", type=int, default=2000, help="Minimum frequency for tokens")
     parser.add_argument("--output-dir", default="data", help="Output directory for tokenizer")
     parser.add_argument("--tokenizer-name", default="pubchem_large_tokenizer", help="Name for the tokenizer")
