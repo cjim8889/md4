@@ -84,6 +84,8 @@ def get_config() -> config_dict.ConfigDict:
 
   # Number of workers for Grain loaders.
   config.grain_num_workers = 15
+  config.grain_num_read_threads = 4
+  config.grain_prefetch_buffer_size = 128
 
   config.trial = 0  # Dummy for repeated runs.
   config.test_in_colab = False

@@ -37,7 +37,7 @@ try:
 except ImportError:
     print("cv2 not found")
 try:
-    from md4 import input_pipeline_pubchem, input_pipeline_pubchem_safe
+    from md4 import input_pipeline_pubchem, input_pipeline_pubchem_large
 except ImportError as e:
     print("input_pipeline_pubchem not found", e)
 FlatFeatures = dict[str, Any]
@@ -359,14 +359,14 @@ def create_datasets(
             pubchem_info,
         ) = input_pipeline_pubchem.create_pubchem_datasets(config, seed)
         info.update(pubchem_info)
-    elif config.dataset == "pubchem_safe":
+    elif config.dataset == "pubchem_large":
         (
             train_source,
             train_transformations,
             eval_source,
             eval_transformations,
             pubchem_info,
-        ) = input_pipeline_pubchem_safe.create_pubchem_datasets(config, seed)
+        ) = input_pipeline_pubchem_large.create_pubchem_datasets(config, seed)
         info.update(pubchem_info)
     elif (
         config.dataset.startswith("mnist")
@@ -403,6 +403,10 @@ def create_datasets(
         transformations=train_transformations,
         batch_size=process_batch_size,
         worker_count=config.grain_num_workers,
+        read_options=grain.ReadOptions(
+            num_threads=config.grain_num_read_threads,
+            prefetch_buffer_size=config.grain_prefetch_buffer_size,
+        ),
     )
 
     if config.eval_pad_last_batch:
@@ -423,6 +427,10 @@ def create_datasets(
             batch_size=process_eval_batch_size,
             worker_count=0,
             drop_remainder=drop_remainder,
+            read_options=grain.ReadOptions(
+                num_threads=config.grain_num_read_threads,
+                prefetch_buffer_size=config.grain_prefetch_buffer_size,
+            ),
         )
         eval_loaders[split] = eval_loader
 
