@@ -8,45 +8,35 @@ Memory Optimizations:
 """
 
 import dataclasses
+import glob
 import multiprocessing as mp
-from multiprocessing import shared_memory
-from multiprocessing import shared_memory
 import os
-import glob
-from pathlib import Path
-import glob
 from pathlib import Path
 
+import grain.python as grain
 import numpy as np
 from ml_collections import config_dict
-from tqdm import tqdm
 
-from md4 import rdkit_utils
+from md4.pubchem_worker import process_and_write_shard
 
 # Heavy imports are now imported conditionally within functions to reduce memory usage
 
-_SAFE_TOKENIZER = "data/pubchem_safe/safe_tokenizer"
-
+_SMILES_TOKENIZER = "data/pubchem_large_tokenizer"
 
 def find_data_files(data_file_pattern):
   data_files = glob.glob(str(Path(data_file_pattern).expanduser().resolve()))
   assert len(data_files) > 0, f"No file found with pattern {data_file_pattern}."
   return data_files
 
-# Import worker functions from separate module to avoid loading heavy dependencies
-# This prevents spawned worker processes from importing grain, tensorflow_datasets, 
-# transformers, polars and other heavy modules that are not needed for SMILES processing
-from md4.pubchem_worker import init_worker_pubchem, process_individual_smiles_pubchem
-
 @dataclasses.dataclass
-class TokenizeSafe:
+class Tokenize(grain.MapTransform):
     tokenizer: "transformers.PreTrainedTokenizerFast"
     max_length: int = 128
 
     def map(self, features):
-        safe_repr = features["safe"]
-        features["safe"] = self.tokenizer.encode(
-            safe_repr.decode() if isinstance(safe_repr, bytes) else safe_repr,
+        smiles_repr = features["smiles"]
+        features["smiles"] = self.tokenizer.encode(
+            smiles_repr.decode() if isinstance(smiles_repr, bytes) else smiles_repr,
             add_special_tokens=True,
             padding="max_length",
             truncation=True,
@@ -55,31 +45,14 @@ class TokenizeSafe:
         ).reshape(-1)
         return features
 
-
-@dataclasses.dataclass
-class ProcessMolecular:
-    """Process molecular data with fingerprints and atom types."""
-
-    def map(self, features):
-        # Fingerprint is already in correct format (numpy array from rdkit_utils)
-        if "fingerprint" in features:
-            features["fingerprint"] = features["fingerprint"].astype(np.int32)
-
-        if "safe" in features:
-            features["safe"] = features["safe"].astype(np.int32)
-            
-        if "atom_types" in features:
-            features["atom_types"] = features["atom_types"].astype(np.int32)
-        
-        if "smiles" in features:
-            del features["smiles"]
-
-        return features
-
-
-def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048, 
-def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048, 
-                               chunk_size=1000, num_processes=None):
+def preprocess_or_load_pubchem(
+        data_dir, 
+        fp_radius=2, 
+        fp_bits=2048, 
+        training_shards=16,
+        validation_shards=4,
+        num_workers=None
+    ):
     """Load and preprocess PubChem dataset with SAFE encoding and tokenizer training.
     
     Args:
@@ -91,15 +64,17 @@ def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048,
         num_processes: Number of processes to use (default: min(cpu_count(), 8))
     """
     # Import heavy modules only when needed
-    import tensorflow_datasets as tfds
     import polars as pl
+    import tensorflow_datasets as tfds
 
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
 
+    tfds_data_dir = Path(data_dir) / "1.0.3"
+
     try:
         # Check if dataset already exists
-        pubchem_builder = tfds.builder("pubchem_large", version="1.0.3", data_dir=data_dir, config="pubchem_large")
+        pubchem_builder = tfds.builder_from_directory(tfds_data_dir)
         print("Loading existing TFDS dataset...")
         return pubchem_builder
     except Exception:
@@ -108,147 +83,64 @@ def preprocess_or_load_pubchem(data_dir, fp_radius=2, fp_bits=2048,
 
         print("Loading full dataset without streaming...")
         ds_full = pl.read_parquet(find_data_files("data/pubchem_large/data/train-*.parquet"))
-        ds_full = pl.read_parquet(find_data_files("data/pubchem_large/data/train-*.parquet"))
         print(f"Loaded {len(ds_full)} samples")
         train_size = int(len(ds_full) * 0.98)
         train_ds = ds_full[:train_size]
         val_ds = ds_full[train_size:]
-        train_size = int(len(ds_full) * 0.98)
-        train_ds = ds_full[:train_size]
-        val_ds = ds_full[train_size:]
-
-        def iterator_closure(ds: pl.DataFrame):
-        def iterator_closure(ds: pl.DataFrame):
-            def iterator():
-                # Use optimized multiprocessing with minimal memory exchange
-                # Use optimized multiprocessing with minimal memory exchange
-                _num_processes = num_processes if num_processes is not None else mp.cpu_count()
-                
-                smiles_data = ds["smiles"]
-                total_samples = len(smiles_data)
-                batch_size = chunk_size  # Use chunk_size as batch_size
-                
-                print(f"Processing {total_samples} SMILES with {_num_processes} processes (batch_size={batch_size})...")
-                
-                print(f"Creating shared memory for fingerprints...")
-                # Create shared memory for fingerprints
-                fingerprint_size = total_samples * fp_bits
-                fingerprint_shm = shared_memory.SharedMemory(create=True, size=fingerprint_size)
-                fingerprint_array = np.ndarray((total_samples, fp_bits), dtype=np.bool_, buffer=fingerprint_shm.buf)
-                
-                try:
-                    # Create individual tasks as (smiles, index) tuples - using generator for memory efficiency
-                    tasks = ((smiles_data[i], i) for i in range(total_samples))
-                    
-                    with mp.get_context("spawn").Pool(
-                            processes=_num_processes,
-                            initializer=init_worker_pubchem,
-                            initargs=(fingerprint_shm.name, fingerprint_array.shape)) as pool:
-                        
-                        # Process individual SMILES
-                        total_processed = 0
-                        since_last_update = 0
-                        
-                        with tqdm(total=total_samples, desc="Processing SMILES") as pbar:
-                            for result in pool.imap_unordered(process_individual_smiles_pubchem, tasks, chunksize=chunk_size):
-                                if result != -1:
-                                    total_processed += 1
-                                    since_last_update += 1
-                                    yield smiles_data[result], {
-                                        "fingerprint": fingerprint_array[result, :],
-                                        "smiles": smiles_data[result]
-                                    }
 
 
-                                if since_last_update >= 2000:
-                                    pbar.update(since_last_update)
-                                    since_last_update = 0
-                        
-                        # Update progress for remaining items
-                        if since_last_update > 0:
-                            pbar.update(since_last_update)
-                except Exception as e:
-                    print(f"Error: {e}")
-                    raise e
-                finally:
-                    # Clean up shared memory
-                    try:
-                        fingerprint_shm.close()
-                        fingerprint_shm.unlink()
-                    except Exception as e:
-                        print(f"Cleanup error: {e}")
-            
-            return iterator
+        _num_workers = num_workers if num_workers is not None else mp.cpu_count()
+        print(f"Using {_num_workers} workers for processing...")
 
-        # pubchem_builder = tfds.dataset_builders.AdhocBuilder(
-        #     name="pubchem_large",
-        #     version="1.0.3",
-        #     features=tfds.features.FeaturesDict(
-        #         {
-        #             "smiles": tfds.features.Text(),
-        #             "fingerprint": tfds.features.Tensor(
-        #                 shape=(fp_bits,), dtype=np.bool_
-        #             ),
-        #         }
-        #     ),
-        #     split_datasets={
-        #         "train": iterator_closure(train_ds)(),
-        #         "validation": iterator_closure(val_ds)(),
-        #     },
-        #     config="pubchem_large",
-        #     data_dir=data_dir,
-        #     description=f"PubChem dataset with SAFE, SMILES, Morgan fingerprints (radius={fp_radius}, bits={fp_bits}) and atom types",
-        #     file_format="array_record",
-        #     disable_shuffling=True,
-        #     download_config=tfds.download.DownloadConfig(
-        #         num_shards=32,
-        #     )
-        # )
+        training_shard_size = len(train_ds) // training_shards
+        if training_shard_size < 1:
+            training_shard_size = 1
+        training_shards_tasks = [train_ds["smiles"][i * training_shard_size:(i + 1) * training_shard_size] for i in range(training_shards)]
 
-        # NUM_SHARDS = 32
-        # dataset_info = tfds.core.DatasetInfo(
-        #     builder=tfds.dataset_builders.AdhocBuilder,
-        #     name="pubchem_large",
-        #     version="1.0.3",
-        #     features=tfds.features.FeaturesDict(
-        #         {
-        #             "smiles": tfds.features.Text(),
-        #             "fingerprint": tfds.features.Tensor(
-        #                 shape=(fp_bits,), dtype=np.bool_
-        #             ),
-        #         }
-        #     ),
-        #     split_dict={
-        #         "train": tfds.core.SplitInfo(name="train", num_examples=len(train_ds), num_shards=NUM_SHARDS),
-        #         "validation": tfds.core.SplitInfo(name="validation", num_examples=len(val_ds), num_shards=NUM_SHARDS),
-        #     },
-        # )
+        validation_shard_size = len(val_ds) // validation_shards
+        if validation_shard_size < 1:
+            validation_shard_size = 1
+        validation_shards_tasks = [val_ds["smiles"][i * validation_shard_size:(i + 1) * validation_shard_size] for i in range(validation_shards)]
 
+        from tqdm.contrib.concurrent import process_map
 
-        pubchem_builder = tfds.dataset_builders.store_as_tfds_dataset(
-            name="pubchem_large",
-            version="1.0.3",
-            features=tfds.features.FeaturesDict(
-                {
-                    "smiles": tfds.features.Text(),
-                    "fingerprint": tfds.features.Tensor(
-                        shape=(fp_bits,), dtype=np.bool_
-                    ),
-                }
-            ),
-            split_datasets={
-                "train": iterator_closure(train_ds)(),
-                "validation": iterator_closure(val_ds)(),
-            },
-            config="pubchem_large",
-            data_dir=data_dir,
-            description=f"PubChem dataset with SAFE, SMILES, Morgan fingerprints (radius={fp_radius}, bits={fp_bits}) and atom types",
-            file_format="array_record",
-            disable_shuffling=True,
-            # download_config=tfds.download.DownloadConfig(
-                # num_shards=64,
-            # )
+        features = tfds.features.FeaturesDict(
+            {
+                "smiles": tfds.features.Text(),
+                "fingerprint": tfds.features.Tensor(
+                    shape=(fp_bits,), dtype=np.int8
+                ),
+            }
         )
+
+        tfds_data_dir = Path(data_dir) / "1.0.3"
+        if not tfds_data_dir.exists():
+            tfds_data_dir.mkdir(parents=True, exist_ok=True)
+
+        valid_training_counts = process_map(
+            process_and_write_shard,
+            [(i, len(training_shards_tasks), shard, "train", tfds_data_dir, features, fp_bits) for i, shard in enumerate(training_shards_tasks)],
+            max_workers=_num_workers,
+        )
+
+        valid_validation_counts = process_map(
+            process_and_write_shard,
+            [(i, len(validation_shards_tasks), shard, "validation", tfds_data_dir, features, fp_bits) for i, shard in enumerate(validation_shards_tasks)],
+            max_workers=_num_workers,
+        )
+
+        tfds.folder_dataset.write_metadata(
+            data_dir=str(tfds_data_dir),
+            features=features,
+            split_infos=[
+                tfds.core.SplitInfo(name="train", shard_lengths=valid_training_counts, num_bytes=0),
+                tfds.core.SplitInfo(name="validation", shard_lengths=valid_validation_counts, num_bytes=0)
+            ],
+            description="PubChem dataset with SMILES, Morgan fingerprints (radius={fp_radius}, bits={fp_bits})",
+            check_data=False,
+        )
+
+        pubchem_builder = tfds.builder_from_directory(tfds_data_dir)
 
         return pubchem_builder
 
@@ -262,43 +154,37 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
     fp_radius = config.get("fp_radius", 2)
     fp_bits = config.get("fp_bits", 2048)
     max_length = config.get("max_length", 160)
-    vocab_size = config.get("vocab_size", 1024)
-    pad_to_length = config.get("pad_to_length", 160)
-    tokenizer_path = config.get("tokenizer", _SAFE_TOKENIZER)    
+    tokenizer_path = config.get("tokenizer", _SMILES_TOKENIZER)    
 
     # Use preprocess_pubchem to get the dataset builder
     num_processes = config.get("num_processes", None)
-    chunk_size = config.get("chunk_size", 64)
     pubchem_builder = preprocess_or_load_pubchem(
-        data_dir=os.path.join("./data", "pubchem_safe"), 
+        data_dir=os.path.join("./data", "pubchem_large"), 
         fp_radius=fp_radius, 
         fp_bits=fp_bits,
-        pad_to_length=pad_to_length,
-        chunk_size=chunk_size,
-        num_processes=num_processes
+        training_shards=config.get("training_shards", 128),
+        validation_shards=config.get("validation_shards", 8),
+        num_workers=num_processes,
     )
     data_source = pubchem_builder.as_data_source()
     # Load SAFE tokenizer
     tokenizer = transformers.PreTrainedTokenizerFast.from_pretrained(tokenizer_path)
-    
+    vocab_size = tokenizer.vocab_size
+
     train_transformations = [
-        TokenizeSafe(tokenizer, max_length=max_length),
-        ProcessMolecular(),
+        Tokenize(tokenizer=tokenizer, max_length=max_length),
     ]
     train_source = data_source["train"]
     eval_transformations = [
-        TokenizeSafe(tokenizer, max_length=max_length),
-        ProcessMolecular(),
+        Tokenize(tokenizer=tokenizer, max_length=max_length),
     ]
-    eval_source = {k: v for k, v in data_source.items() if k != "train"}
+    eval_source = data_source["validation"]
 
     info = {
         "fp_radius": fp_radius,
         "fp_bits": fp_bits,
-        "atom_types": rdkit_utils.ATOM_TYPES,
         "tokenizer": tokenizer,
         "vocab_size": vocab_size,
-        "pad_to_length": pad_to_length,
     }
 
     return train_source, train_transformations, eval_source, eval_transformations, info
@@ -309,8 +195,47 @@ if __name__ == "__main__":
         data_dir="./data/pubchem_large",
         fp_radius=2,
         fp_bits=2048,
-        chunk_size=64,
-        num_processes=16
+        num_workers=64,
+        training_shards=128,
+        validation_shards=8,
     )
 
     print(data_loader.info)
+
+    exit()
+    import transformers
+
+    # Example usage
+    tokenizer = transformers.PreTrainedTokenizerFast.from_pretrained(_SMILES_TOKENIZER)
+
+    train_loader = grain.load(
+        source=data_loader.as_data_source(split="train"),
+        num_epochs=1,
+        shuffle=True,
+        seed=42,
+        transformations=[
+            Tokenize(tokenizer=tokenizer, max_length=128),
+        ],
+        shard_options=grain.ShardByJaxProcess(drop_remainder=True),
+        batch_size=512,
+        worker_count=16,
+        read_options=grain.ReadOptions(num_threads=4, prefetch_buffer_size=128),
+        drop_remainder=True,
+    )
+
+    from tqdm import tqdm
+    # Test throughput with tqdm
+    print("\nTesting data loading throughput...")
+    try:
+        with tqdm(desc="Fetching molecules", unit="mol", smoothing=0.1) as pbar:
+            for i, batch in enumerate(train_loader):
+                pbar.update(batch["fingerprint"].shape[0])
+                pbar.set_postfix({"batch_size": batch["fingerprint"].shape[0]})
+                
+                # Stop after a reasonable number of samples for testing
+                    
+    except KeyboardInterrupt:
+        print("\nStopped by user")
+    except Exception as e:
+        print(f"\nError during data loading: {e}")
+    
