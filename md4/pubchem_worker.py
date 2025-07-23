@@ -62,3 +62,32 @@ def process_and_write_shard(args):
     writer.close()
     print(f"Shard {shard_index} processed: {written_count} entries written to {shard_filename}")
     return written_count
+
+def process_and_write_shard_tfrecord(args):
+    """Process a shard of SMILES and write results to shared memory.
+    
+    Args:
+        args: Tuple of (shard_index, total_shards, shard, split, output_dir, features, fp_bits)
+    """
+    shard_index, total_shards, shard, split, output_dir, features, fp_bits = args[:7]
+
+    import tensorflow as tf
+    from md4.rdkit_utils import process_smiles
+    import os
+
+    shard_filename = os.path.join(output_dir, f"pubchem_large-{split}.tfrecord-{shard_index:05d}-of-{total_shards:05d}") # args[4] = num_total_chunks
+    
+    with tf.io.TFRecordWriter(shard_filename) as writer:
+        written_count = 0
+        for smi in shard:
+            result = process_smiles(smi, fp_radius=2, fp_bits=fp_bits)
+            if result is not None:
+                serialised = features.serialize_example({
+                    "smiles": smi,
+                    "fingerprint": result,
+                })
+                writer.write(serialised)
+                written_count += 1
+
+    print(f"Shard {shard_index} processed: {written_count} entries written to {shard_filename}")
+    return written_count
