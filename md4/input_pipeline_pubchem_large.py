@@ -15,9 +15,13 @@ from pathlib import Path
 
 import grain.python as grain
 import numpy as np
+import polars as pl
+import tensorflow as tf
+import tensorflow_datasets as tfds
+import transformers
 from ml_collections import config_dict
 
-from md4.pubchem_worker import process_and_write_shard
+from md4.pubchem_worker import process_and_write_shard_tfrecord
 
 # Heavy imports are now imported conditionally within functions to reduce memory usage
 
@@ -27,6 +31,59 @@ def find_data_files(data_file_pattern):
   data_files = glob.glob(str(Path(data_file_pattern).expanduser().resolve()))
   assert len(data_files) > 0, f"No file found with pattern {data_file_pattern}."
   return data_files
+
+def tokenize(tokenizer: "transformers.PreTrainedTokenizerFast", max_length: int = 128):
+    def _tokenize_py_func(features):
+        
+        def _py_tokenize(smiles_bytes):
+            # Convert bytes to string if needed
+            smiles_str = smiles_bytes.numpy().decode('utf-8') if hasattr(smiles_bytes, 'numpy') else smiles_bytes.decode('utf-8')
+            
+            # Tokenize using the tokenizer
+            tokens = tokenizer.encode(
+                smiles_str,
+                add_special_tokens=True,
+                padding="max_length",
+                truncation=True,
+                max_length=max_length,
+                return_tensors="np",
+            ).reshape(-1)
+            
+            return tokens.astype(np.int32)
+        
+        # Use tf.py_function to wrap the Python function
+        tokenized_smiles = tf.py_function(
+            func=_py_tokenize,
+            inp=[features["smiles"]],
+            Tout=tf.int32
+        )
+        tokenized_smiles.set_shape([max_length])
+        
+        # Update features dict
+        features["smiles"] = tokenized_smiles
+        return features
+    
+    return _tokenize_py_func
+
+
+def tokenize1(tokenizer: "transformers.PreTrainedTokenizerFast", max_length: int = 128):
+    def _tokenize_py_func(features):
+        
+        # Tokenize using the tokenizer
+        tokens = tokenizer.encode(
+            str(features["smiles"]),
+            add_special_tokens=True,
+            padding="max_length",
+            truncation=True,
+            max_length=max_length,
+            return_tensors="np",
+        ).reshape(-1)
+        
+        features["smiles"] = tokens
+
+        return features
+        
+    return _tokenize_py_func
 
 @dataclasses.dataclass
 class Tokenize(grain.MapTransform):
@@ -47,6 +104,7 @@ class Tokenize(grain.MapTransform):
 
 def preprocess_or_load_pubchem(
         data_dir, 
+        version="1.0.3",
         fp_radius=2, 
         fp_bits=2048, 
         training_shards=16,
@@ -64,14 +122,11 @@ def preprocess_or_load_pubchem(
         num_processes: Number of processes to use (default: min(cpu_count(), 8))
     """
     # Import heavy modules only when needed
-    import polars as pl
-    import tensorflow_datasets as tfds
 
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
 
-    tfds_data_dir = Path(data_dir) / "1.0.3"
-
+    tfds_data_dir = Path(data_dir) / version
     try:
         # Check if dataset already exists
         pubchem_builder = tfds.builder_from_directory(tfds_data_dir)
@@ -113,18 +168,17 @@ def preprocess_or_load_pubchem(
             }
         )
 
-        tfds_data_dir = Path(data_dir) / "1.0.3"
         if not tfds_data_dir.exists():
             tfds_data_dir.mkdir(parents=True, exist_ok=True)
 
         valid_training_counts = process_map(
-            process_and_write_shard,
+            process_and_write_shard_tfrecord,
             [(i, len(training_shards_tasks), shard, "train", tfds_data_dir, features, fp_bits) for i, shard in enumerate(training_shards_tasks)],
             max_workers=_num_workers,
         )
 
         valid_validation_counts = process_map(
-            process_and_write_shard,
+            process_and_write_shard_tfrecord,
             [(i, len(validation_shards_tasks), shard, "validation", tfds_data_dir, features, fp_bits) for i, shard in enumerate(validation_shards_tasks)],
             max_workers=_num_workers,
         )
@@ -148,7 +202,6 @@ def preprocess_or_load_pubchem(
 def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
     """Create PubChem datasets with SAFE encoding and molecular features."""
     # Import heavy modules only when needed
-    import transformers
 
     # Molecular dataset with SAFE, SMILES and Morgan fingerprints
     fp_radius = config.get("fp_radius", 2)
@@ -160,25 +213,41 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
     num_processes = config.get("num_processes", None)
     pubchem_builder = preprocess_or_load_pubchem(
         data_dir=os.path.join("./data", "pubchem_large"), 
+        version=config.get("version", "1.0.5"),
         fp_radius=fp_radius, 
         fp_bits=fp_bits,
-        training_shards=config.get("training_shards", 128),
-        validation_shards=config.get("validation_shards", 8),
+        training_shards=config.get("training_shards", 64),
+        validation_shards=config.get("validation_shards", 2),
         num_workers=num_processes,
     )
-    data_source = pubchem_builder.as_data_source()
+
     # Load SAFE tokenizer
     tokenizer = transformers.PreTrainedTokenizerFast.from_pretrained(tokenizer_path)
+    tokenization = tokenize1(tokenizer=tokenizer, max_length=max_length)
     vocab_size = tokenizer.vocab_size
 
-    train_transformations = [
-        Tokenize(tokenizer=tokenizer, max_length=max_length),
-    ]
-    train_source = data_source["train"]
-    eval_transformations = [
-        Tokenize(tokenizer=tokenizer, max_length=max_length),
-    ]
-    eval_source = data_source["validation"]
+    # Load Datasets
+    train_split = tfds.split_for_jax_process('train', drop_remainder=True)
+    train_dataset = pubchem_builder.as_dataset(
+        split=train_split,
+        shuffle_files=True,
+    )
+    train_dataset = train_dataset.map(tokenization, num_parallel_calls=tf.data.AUTOTUNE)
+    train_dataset = train_dataset.shuffle(128)
+    train_dataset = train_dataset.batch(512, drop_remainder=True)
+    train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
+    train_dataset = train_dataset.as_numpy_iterator()
+
+    validation_split = tfds.split_for_jax_process('validation', drop_remainder=True)
+    eval_dataset = pubchem_builder.as_dataset(
+        split=validation_split,
+        shuffle_files=True,
+    )
+    eval_dataset = eval_dataset.map(tokenization, num_parallel_calls=tf.data.AUTOTUNE)
+    eval_dataset = eval_dataset.shuffle(128)
+    eval_dataset = eval_dataset.batch(512, drop_remainder=True)
+    eval_dataset = eval_dataset.prefetch(tf.data.AUTOTUNE)
+    eval_dataset = eval_dataset.as_numpy_iterator()
 
     info = {
         "fp_radius": fp_radius,
@@ -187,55 +256,59 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         "vocab_size": vocab_size,
     }
 
-    return train_source, train_transformations, eval_source, eval_transformations, info
+    return train_dataset, eval_dataset, info
 
 
 if __name__ == "__main__":
     data_loader =preprocess_or_load_pubchem(
         data_dir="./data/pubchem_large",
+        version="1.0.5",
         fp_radius=2,
         fp_bits=2048,
         num_workers=64,
-        training_shards=128,
-        validation_shards=8,
+        training_shards=64,
+        validation_shards=2,
     )
-
     print(data_loader.info)
+    import tensorflow_datasets as tfds
 
-    exit()
+    ds = data_loader.as_dataset(split=split, shuffle_files=True)
+
+
+    import tensorflow as tf
+    import tensorflow_datasets as tfds
     import transformers
-
     # Example usage
     tokenizer = transformers.PreTrainedTokenizerFast.from_pretrained(_SMILES_TOKENIZER)
 
-    train_loader = grain.load(
-        source=data_loader.as_data_source(split="train"),
-        num_epochs=1,
-        shuffle=True,
-        seed=42,
-        transformations=[
-            Tokenize(tokenizer=tokenizer, max_length=128),
-        ],
-        shard_options=grain.ShardByJaxProcess(drop_remainder=True),
-        batch_size=512,
-        worker_count=16,
-        read_options=grain.ReadOptions(num_threads=4, prefetch_buffer_size=128),
-        drop_remainder=True,
-    )
+    ds = ds.shuffle(64)
+    ds = ds.batch(512, drop_remainder=True)
+    ds = ds.prefetch(tf.data.AUTOTUNE)
+    ds = ds.as_numpy_iterator()
 
-    from tqdm import tqdm
-    # Test throughput with tqdm
-    print("\nTesting data loading throughput...")
-    try:
-        with tqdm(desc="Fetching molecules", unit="mol", smoothing=0.1) as pbar:
-            for i, batch in enumerate(train_loader):
-                pbar.update(batch["fingerprint"].shape[0])
-                pbar.set_postfix({"batch_size": batch["fingerprint"].shape[0]})
-                
-                # Stop after a reasonable number of samples for testing
-                    
-    except KeyboardInterrupt:
-        print("\nStopped by user")
-    except Exception as e:
-        print(f"\nError during data loading: {e}")
-    
+    # train_loader = grain.load(
+    #     source=data_loader.as_data_source(split="train", decoders={"smiles": tfds.decode.SkipDecoding()}),
+    #     num_epochs=1,
+    #     shuffle=True,
+    #     seed=42,
+    #     transformations=[
+    #         Tokenize(tokenizer=tokenizer, max_length=128),
+    #     ],
+    #     shard_options=grain.ShardByJaxProcess(drop_remainder=True),
+    #     batch_size=512,
+    #     worker_count=16,
+    #     read_options=grain.ReadOptions(num_threads=8, prefetch_buffer_size=1024),
+    #     drop_remainder=True,
+    # )
+
+    import tensorflow_datasets as tfds
+
+    results = tfds.benchmark(ds, num_iter=100, batch_size=512)
+    print(results)
+
+    # Example usage
+    features = next(ds)
+    print(features["smiles"].shape)
+    print(features["fingerprint"].shape)
+    print(features["smiles"][:5])
+    print(features["fingerprint"][:5])

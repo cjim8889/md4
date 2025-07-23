@@ -360,14 +360,9 @@ def create_datasets(
         ) = input_pipeline_pubchem.create_pubchem_datasets(config, seed)
         info.update(pubchem_info)
     elif config.dataset == "pubchem_large":
-        (
-            train_source,
-            train_transformations,
-            eval_source,
-            eval_transformations,
-            pubchem_info,
-        ) = input_pipeline_pubchem_large.create_pubchem_datasets(config, seed)
+        train_dataset, eval_dataset, pubchem_info = input_pipeline_pubchem_large.create_pubchem_datasets(config, seed)
         info.update(pubchem_info)
+        return train_dataset, eval_dataset, info
     elif (
         config.dataset.startswith("mnist")
         or config.dataset.startswith("cifar")
