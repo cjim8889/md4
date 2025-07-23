@@ -33,7 +33,7 @@ def get_config() -> config_dict.ConfigDict:
   config.cont_time = True
   config.fingerprint_dim = 2048
 
-  config.feature_dim = 128
+  config.feature_dim = 64
   config.n_layers = 12
   config.ch_mult = (1,)  # not used
   config.n_dit_layers = 0  # not used
@@ -41,7 +41,7 @@ def get_config() -> config_dict.ConfigDict:
   config.dit_hidden_size = 768  # not used
   config.dropout_rate = 0.02
 
-  config.num_heads = 8
+  config.num_heads = 12
   config.mlp_type = "glu"
   config.depth_scaled_init = True
   config.cond_type = "adaln_zero"
@@ -70,7 +70,7 @@ def get_config() -> config_dict.ConfigDict:
   # ancestral, mean, or topp
   config.sampler = "ancestral"
   # uniform, cosine
-  config.sampling_grid = "uniform"
+  config.sampling_grid = "cosine"
   # for topp sampler
   config.topp = 0.98
 
