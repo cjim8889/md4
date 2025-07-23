@@ -10,14 +10,14 @@ def get_config() -> config_dict.ConfigDict:
 
   # dataset configs
   config.vocab_size = 1024
-  config.dataset = "pubchem_safe"
+  config.dataset = "pubchem_large"
   config.classes = -1
-  config.max_length = 128
-  config.tokenizer = "data/pubchem_safe/safe_tokenizer"
+  config.max_length = 160
+  config.tokenizer = "data/pubchem_large_tokenizer"
 
   config.min_frequency = 200
-  config.pad_to_length = 128
-  config.atom_type_size = 9
+  config.pad_to_length = 128 # Not used
+  config.atom_type_size = 0 # Not used
 
   config.task_type = "text"  # text or image
   config.model_type = "md4"
@@ -56,10 +56,10 @@ def get_config() -> config_dict.ConfigDict:
   config.ema_rate = 0.9999
   # If num_train_steps==-1 then the number of training steps is calculated from
   # num_epochs.
-  config.num_train_steps = 1_000_000
+  config.num_train_steps = 10_000_000
   # Evaluates for a full epoch if num_eval_steps==-1.
   config.num_eval_steps = 1000
-  config.batch_size = 1024
+  config.batch_size = 512
   config.num_microbatches = 1
   config.per_device_batch_size = -1
   # If batches should be added to evaluate the entire dataset.

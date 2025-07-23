@@ -119,6 +119,12 @@ def create_train_state(
                 (input_shape[0], config.pad_to_length), dtype="int32"
             ),
         }
+    elif config.fingerprint_dim > 0:
+        conditioning = {
+            "fingerprint": jnp.zeros(
+                (input_shape[0], config.fingerprint_dim), dtype="int32"
+            ),
+        }
     else:
         conditioning = None
     rng, sample_rng, init_rng = jax.random.split(rng, 3)
@@ -235,6 +241,10 @@ def loss_fn(params, state, rng, model, batch, train=False):
         conditioning = {
             "fingerprint": batch["fingerprint"].astype("int32"),
             "atom_types": batch["atom_types"].astype("int32"),
+        }
+    elif "fingerprint" in batch:
+        conditioning = {
+            "fingerprint": batch["fingerprint"].astype("int32"),
         }
     else:
         conditioning = None
@@ -488,7 +498,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
         else input_pipeline.create_datasets
     )
     train_loader, eval_loaders, dataset_info = create_datasets(config, data_seed)
-    train_iter = iter(train_loader)
+    train_iter = iter(train_loader) if config.dataset != "pubchem_large" else train_loader
 
     # Initialize model.
     rng, model_rng = jax.random.split(rng)
@@ -504,13 +514,17 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
     checkpoint_manager = _get_checkpoint_manager(config, workdir)
 
     # Retrieve data from previous checkpoints if possible.
-    checkpointed_state = dict(train_state=train_state, train_iter=train_iter)
+    if config.dataset == "pubchem_large":
+        checkpointed_state = dict(train_state=train_state)
+    else:
+        checkpointed_state = dict(train_state=train_state, train_iter=train_iter)
+    
     if checkpoint_manager.latest_step() is not None:
         checkpointed_state = checkpoint_manager.restore(
             checkpoint_manager.latest_step(), items=checkpointed_state
         )
     train_state = checkpointed_state["train_state"]
-    train_iter = checkpointed_state["train_iter"]
+    train_iter = checkpointed_state["train_iter"] if "train_iter" in checkpointed_state else train_iter
 
     # Distribute training.
     train_state = flax_utils.replicate(train_state)
@@ -621,6 +635,10 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                                 "fingerprint": dummy_batch["fingerprint"].astype("int32"),
                                 "atom_types": dummy_batch["atom_types"].astype("int32"),
                             }
+                        elif "fingerprint" in dummy_batch:
+                            conditioning = {
+                                "fingerprint": dummy_batch["fingerprint"].astype("int32"),
+                            }
                         else:
                             conditioning = None
 
@@ -655,7 +673,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                             train_state=jax.tree_util.tree_map(
                                 np.array, flax_utils.unreplicate(train_state)
                             ),
-                            train_iter=train_iter,
+                            train_iter=train_iter if config.dataset != "pubchem_large" else None,
                         ),
                         metrics=jax.tree_util.tree_map(lambda x: x.item(), eval_metrics_cpu)
                     )

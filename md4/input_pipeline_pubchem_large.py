@@ -256,7 +256,9 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         "vocab_size": vocab_size,
     }
 
-    return train_dataset, eval_dataset, info
+    return train_dataset, {
+        "validation": eval_dataset,
+    }, info
 
 
 if __name__ == "__main__":
