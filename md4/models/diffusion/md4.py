@@ -145,7 +145,7 @@ class MD4(nn.Module):
         if self.classes > 0:
             self.cond_embeddings = nn.Embed(self.classes, self.feature_dim)
         if self.fingerprint_dim > 0:
-            self.cond_embeddings = SimpleMLP(features=[self.fingerprint_dim // 2, self.feature_dim, self.feature_dim])
+            self.cond_embeddings = SimpleMLP(features=[self.fingerprint_dim // 2, self.feature_dim * 2, self.feature_dim, self.feature_dim])
         if self.atom_type_size > 0:
             self.atom_embeddings = nn.Embed(self.atom_type_size, self.feature_dim)
             self.atom_embeddings_agg = nn.Dense(features=self.feature_dim, name="atom_embeddings_agg")
@@ -183,18 +183,22 @@ class MD4(nn.Module):
     def get_cond_embedding(self, conditioning):
         if conditioning is not None:
             if isinstance(conditioning, dict):
-                atom_contioning = self.atom_embeddings(conditioning["atom_types"])
-                atom_contioning = jax.vmap(self.atom_embeddings_agg)(atom_contioning)
-                atom_contioning = nn.swish(atom_contioning)
+                if "atom_types" in conditioning:
+                    atom_conditioning = self.atom_embeddings(conditioning["atom_types"])
+                    atom_conditioning = jax.vmap(self.atom_embeddings_agg)(atom_conditioning)
+                    atom_conditioning = nn.swish(atom_conditioning)
 
-                if atom_contioning.ndim == 2:
-                    atom_contioning = jnp.sum(atom_contioning, axis=0)
-                elif atom_contioning.ndim == 3:
-                    atom_contioning = jnp.sum(atom_contioning, axis=1)
+                    if atom_conditioning.ndim == 2:
+                        atom_conditioning = jnp.sum(atom_conditioning, axis=0)
+                    elif atom_conditioning.ndim == 3:
+                        atom_conditioning = jnp.sum(atom_conditioning, axis=1)
+                    else:
+                        raise ValueError("Atom conditioning has invalid shape")
+
+                    cond = jnp.concat([conditioning["fingerprint"], atom_conditioning], axis=-1)
                 else:
-                    raise ValueError("Atom contioning has invalid shape")
-
-                cond = jnp.concat([conditioning["fingerprint"], atom_contioning], axis=-1)
+                    cond = conditioning["fingerprint"]
+                    
                 return self.cond_embeddings(cond)
 
             return self.cond_embeddings(conditioning)
