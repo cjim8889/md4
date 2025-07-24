@@ -230,8 +230,8 @@ def loss_fn(params, state, rng, model, batch, train=False):
         x = batch["image"]
     elif "text" in batch:
         x = batch["text"]
-    elif "safe" in batch:
-        x = batch["safe"]
+    elif "smiles" in batch:
+        x = batch["smiles"]
     else:
         raise ValueError("Unsupported targets/tasks.")
 
@@ -526,6 +526,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
     train_state = checkpointed_state["train_state"]
     train_iter = checkpointed_state["train_iter"] if "train_iter" in checkpointed_state else train_iter
 
+    logging.info("Batch Size: %s", config.batch_size)
+
     # Distribute training.
     train_state = flax_utils.replicate(train_state)
     train_step_func = functools.partial(
@@ -625,8 +627,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                         dummy_batch = utils.reshape_batch(next(iter(dummy_loader)))
                         dummy_inputs = (
                             dummy_batch[config.task_type]
-                            if "safe" not in dummy_batch
-                            else dummy_batch["safe"]
+                            if "smiles" not in dummy_batch
+                            else dummy_batch["smiles"]
                         )
                         if "label" in dummy_batch:
                             conditioning = dummy_batch["label"].astype("int32")
@@ -667,15 +669,26 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
             if step % config.checkpoint_every_steps == 0 or is_last_step:
                 with report_progress.timed("checkpoint"):
                     train_state = merge_batch_stats(train_state)
-                    checkpoint_manager.save(
-                        step,
-                        items=dict(
-                            train_state=jax.tree_util.tree_map(
-                                np.array, flax_utils.unreplicate(train_state)
+                    if config.dataset == "pubchem_large":
+                        checkpoint_manager.save(
+                            step,
+                            items=dict(
+                                train_state=jax.tree_util.tree_map(
+                                    np.array, flax_utils.unreplicate(train_state)
+                                ),
                             ),
-                            train_iter=train_iter if config.dataset != "pubchem_large" else None,
-                        ),
-                        metrics=jax.tree_util.tree_map(lambda x: x.item(), eval_metrics_cpu)
-                    )
+                            metrics=jax.tree_util.tree_map(lambda x: x.item(), eval_metrics_cpu)
+                        )
+                    else:
+                        checkpoint_manager.save(
+                            step,
+                            items=dict(
+                                train_state=jax.tree_util.tree_map(
+                                    np.array, flax_utils.unreplicate(train_state)
+                                ),
+                                train_iter=train_iter,
+                            ),
+                            metrics=jax.tree_util.tree_map(lambda x: x.item(), eval_metrics_cpu)
+                        )
 
     logging.info("Finishing training at step %d", num_train_steps)

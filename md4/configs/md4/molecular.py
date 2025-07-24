@@ -12,8 +12,9 @@ def get_config() -> config_dict.ConfigDict:
   config.vocab_size = 1024
   config.dataset = "pubchem_large"
   config.classes = -1
-  config.max_length = 160
+  config.max_length = 128
   config.tokenizer = "data/pubchem_large_tokenizer"
+  config.version = "1.0.6"
 
   config.min_frequency = 200
   config.pad_to_length = 128 # Not used
@@ -26,7 +27,7 @@ def get_config() -> config_dict.ConfigDict:
   # timesteps: int or None
   config.timesteps = 1000
   # linear, cosine, poly[exponent], e.g., poly3
-  config.noise_schedule = "linear"
+  config.noise_schedule = "cosine"
   config.outside_embed = True
   # t or none (removes time dependence)
   config.time_features = "t"
@@ -42,7 +43,7 @@ def get_config() -> config_dict.ConfigDict:
   config.dropout_rate = 0.02
 
   config.num_heads = 12
-  config.mlp_type = "glu"
+  config.mlp_type = "swiglu"
   config.depth_scaled_init = True
   config.cond_type = "adaln_zero"
 
@@ -56,10 +57,10 @@ def get_config() -> config_dict.ConfigDict:
   config.ema_rate = 0.9999
   # If num_train_steps==-1 then the number of training steps is calculated from
   # num_epochs.
-  config.num_train_steps = 10_000_000
+  config.num_train_steps = 2_000_000
   # Evaluates for a full epoch if num_eval_steps==-1.
   config.num_eval_steps = 1000
-  config.batch_size = 512
+  config.batch_size = 1024
   config.num_microbatches = 1
   config.per_device_batch_size = -1
   # If batches should be added to evaluate the entire dataset.
@@ -70,13 +71,13 @@ def get_config() -> config_dict.ConfigDict:
   # ancestral, mean, or topp
   config.sampler = "ancestral"
   # uniform, cosine
-  config.sampling_grid = "cosine"
+  config.sampling_grid = "uniform"
   # for topp sampler
   config.topp = 0.98
 
-  config.log_loss_every_steps = 10000
-  config.eval_every_steps = 40000
-  config.checkpoint_every_steps = 40000
+  config.log_loss_every_steps = 1000
+  config.eval_every_steps = 20000
+  config.checkpoint_every_steps = 20000
   config.checkpoint_keep_period = 200000
 
   # Single integer or tuple. If None will use (XManager ID, work unit).

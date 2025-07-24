@@ -7,13 +7,11 @@ Memory Optimizations:
 - This reduces worker memory footprint by avoiding unnecessary module imports
 """
 
-import dataclasses
 import glob
 import multiprocessing as mp
 import os
 from pathlib import Path
 
-import grain.python as grain
 import numpy as np
 import polars as pl
 import tensorflow as tf
@@ -32,83 +30,15 @@ def find_data_files(data_file_pattern):
   assert len(data_files) > 0, f"No file found with pattern {data_file_pattern}."
   return data_files
 
-def tokenize(tokenizer: "transformers.PreTrainedTokenizerFast", max_length: int = 128):
-    def _tokenize_py_func(features):
-        
-        def _py_tokenize(smiles_bytes):
-            # Convert bytes to string if needed
-            smiles_str = smiles_bytes.numpy().decode('utf-8') if hasattr(smiles_bytes, 'numpy') else smiles_bytes.decode('utf-8')
-            
-            # Tokenize using the tokenizer
-            tokens = tokenizer.encode(
-                smiles_str,
-                add_special_tokens=True,
-                padding="max_length",
-                truncation=True,
-                max_length=max_length,
-                return_tensors="np",
-            ).reshape(-1)
-            
-            return tokens.astype(np.int32)
-        
-        # Use tf.py_function to wrap the Python function
-        tokenized_smiles = tf.py_function(
-            func=_py_tokenize,
-            inp=[features["smiles"]],
-            Tout=tf.int32
-        )
-        tokenized_smiles.set_shape([max_length])
-        
-        # Update features dict
-        features["smiles"] = tokenized_smiles
-        return features
-    
-    return _tokenize_py_func
-
-
-def tokenize1(tokenizer: "transformers.PreTrainedTokenizerFast", max_length: int = 128):
-    def _tokenize_py_func(features):
-        
-        # Tokenize using the tokenizer
-        tokens = tokenizer.encode(
-            str(features["smiles"]),
-            add_special_tokens=True,
-            padding="max_length",
-            truncation=True,
-            max_length=max_length,
-            return_tensors="np",
-        ).reshape(-1)
-        
-        features["smiles"] = tokens
-
-        return features
-        
-    return _tokenize_py_func
-
-@dataclasses.dataclass
-class Tokenize(grain.MapTransform):
-    tokenizer: "transformers.PreTrainedTokenizerFast"
-    max_length: int = 128
-
-    def map(self, features):
-        smiles_repr = features["smiles"]
-        features["smiles"] = self.tokenizer.encode(
-            smiles_repr.decode() if isinstance(smiles_repr, bytes) else smiles_repr,
-            add_special_tokens=True,
-            padding="max_length",
-            truncation=True,
-            max_length=self.max_length,
-            return_tensors="np",
-        ).reshape(-1)
-        return features
-
 def preprocess_or_load_pubchem(
         data_dir, 
+        tokenizer: "transformers.PreTrainedTokenizerFast",
         version="1.0.3",
         fp_radius=2, 
         fp_bits=2048, 
         training_shards=16,
         validation_shards=4,
+        max_length=160,
         num_workers=None
     ):
     """Load and preprocess PubChem dataset with SAFE encoding and tokenizer training.
@@ -157,11 +87,14 @@ def preprocess_or_load_pubchem(
             validation_shard_size = 1
         validation_shards_tasks = [val_ds["smiles"][i * validation_shard_size:(i + 1) * validation_shard_size] for i in range(validation_shards)]
 
+
         from tqdm.contrib.concurrent import process_map
 
         features = tfds.features.FeaturesDict(
             {
-                "smiles": tfds.features.Text(),
+                "smiles": tfds.features.Tensor(
+                    shape=(max_length,), dtype=np.int32
+                ),
                 "fingerprint": tfds.features.Tensor(
                     shape=(fp_bits,), dtype=np.int8
                 ),
@@ -173,13 +106,13 @@ def preprocess_or_load_pubchem(
 
         valid_training_counts = process_map(
             process_and_write_shard_tfrecord,
-            [(i, len(training_shards_tasks), shard, "train", tfds_data_dir, features, fp_bits) for i, shard in enumerate(training_shards_tasks)],
+            [(i, len(training_shards_tasks), shard, "train", tfds_data_dir, features, fp_bits, tokenizer, max_length) for i, shard in enumerate(training_shards_tasks)],
             max_workers=_num_workers,
         )
 
         valid_validation_counts = process_map(
             process_and_write_shard_tfrecord,
-            [(i, len(validation_shards_tasks), shard, "validation", tfds_data_dir, features, fp_bits) for i, shard in enumerate(validation_shards_tasks)],
+            [(i, len(validation_shards_tasks), shard, "validation", tfds_data_dir, features, fp_bits, tokenizer, max_length) for i, shard in enumerate(validation_shards_tasks)],
             max_workers=_num_workers,
         )
 
@@ -207,12 +140,17 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
     fp_radius = config.get("fp_radius", 2)
     fp_bits = config.get("fp_bits", 2048)
     max_length = config.get("max_length", 160)
-    tokenizer_path = config.get("tokenizer", _SMILES_TOKENIZER)    
+    tokenizer_path = config.get("tokenizer", _SMILES_TOKENIZER)  
+    batch_size = config.get("batch_size", 512)  
+
+    tokenizer = transformers.PreTrainedTokenizerFast.from_pretrained(tokenizer_path)
 
     # Use preprocess_pubchem to get the dataset builder
-    num_processes = config.get("num_processes", None)
+    num_processes = config.get("num_processes", 64)
     pubchem_builder = preprocess_or_load_pubchem(
         data_dir=os.path.join("./data", "pubchem_large"), 
+        tokenizer=tokenizer,
+        max_length=max_length,
         version=config.get("version", "1.0.5"),
         fp_radius=fp_radius, 
         fp_bits=fp_bits,
@@ -221,9 +159,7 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         num_workers=num_processes,
     )
 
-    # Load SAFE tokenizer
-    tokenizer = transformers.PreTrainedTokenizerFast.from_pretrained(tokenizer_path)
-    tokenization = tokenize1(tokenizer=tokenizer, max_length=max_length)
+    # Load SMILES tokenizer
     vocab_size = tokenizer.vocab_size
 
     # Load Datasets
@@ -232,9 +168,9 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         split=train_split,
         shuffle_files=True,
     )
-    train_dataset = train_dataset.map(tokenization, num_parallel_calls=tf.data.AUTOTUNE)
-    train_dataset = train_dataset.shuffle(128)
-    train_dataset = train_dataset.batch(512, drop_remainder=True)
+    train_dataset = train_dataset.repeat()  # Repeat for continuous training
+    train_dataset = train_dataset.shuffle(batch_size * 8)  # Shuffle with larger buffer
+    train_dataset = train_dataset.batch(batch_size, drop_remainder=True)
     train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
     train_dataset = train_dataset.as_numpy_iterator()
 
@@ -243,9 +179,9 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         split=validation_split,
         shuffle_files=True,
     )
-    eval_dataset = eval_dataset.map(tokenization, num_parallel_calls=tf.data.AUTOTUNE)
-    eval_dataset = eval_dataset.shuffle(128)
-    eval_dataset = eval_dataset.batch(512, drop_remainder=True)
+    eval_dataset = eval_dataset.repeat()  # Repeat for continuous evaluation
+    eval_dataset = eval_dataset.shuffle(batch_size * 8)  # Shuffle with larger buffer
+    eval_dataset = eval_dataset.batch(batch_size, drop_remainder=True)
     eval_dataset = eval_dataset.prefetch(tf.data.AUTOTUNE)
     eval_dataset = eval_dataset.as_numpy_iterator()
 
@@ -260,57 +196,75 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         "validation": eval_dataset,
     }, info
 
+def calculate_sequence_lengths(dataset_iterator, num_batches=100):
+    """Calculate average sequence lengths before padding (excluding token id 0)."""
+    all_lengths = []
+    
+    for i, batch in enumerate(dataset_iterator):
+        if i >= num_batches:
+            break
+            
+        smiles_batch = batch['smiles']  # Shape: (batch_size, max_length)
+        
+        # Vectorized approach: find first occurrence of padding token (0) for each sequence
+        # Create a mask where True indicates padding tokens
+        padding_mask = (smiles_batch == 0)
+        
+        # Find the first True (padding token) along axis 1 for each sequence
+        # If no padding found, argmax returns 0, so we need to handle that case
+        first_padding_idx = np.argmax(padding_mask, axis=1)
+        
+        # Handle sequences with no padding (where argmax returns 0 but position 0 is not padding)
+        no_padding_mask = ~padding_mask[:, 0] & (first_padding_idx == 0)
+        lengths_before_padding = np.where(no_padding_mask, smiles_batch.shape[1], first_padding_idx)
+        
+        all_lengths.extend(lengths_before_padding)
+    
+    return np.array(all_lengths)
 
 if __name__ == "__main__":
-    data_loader =preprocess_or_load_pubchem(
-        data_dir="./data/pubchem_large",
-        version="1.0.5",
-        fp_radius=2,
-        fp_bits=2048,
-        num_workers=64,
-        training_shards=64,
-        validation_shards=2,
+    train_dataset, eval_datasets, info = create_pubchem_datasets(
+        config_dict.ConfigDict({
+            "fp_radius": 2,
+            "fp_bits": 2048,
+            "max_length": 128,
+            "tokenizer": _SMILES_TOKENIZER,
+            "batch_size": 512,
+            "version": "1.0.6",
+            "training_shards": 128,
+            "validation_shards": 4,
+            "num_processes": 128,
+        }),
+        seed=42
     )
-    print(data_loader.info)
-    import tensorflow_datasets as tfds
 
-    ds = data_loader.as_dataset(split=split, shuffle_files=True)
+    features = next(train_dataset)
 
+    tokenizer = info["tokenizer"]
+    decoded = tokenizer.decode(features["smiles"][0])  # Decode smiles of the first sample
+    print("Decoded SMILES:", decoded)
 
-    import tensorflow as tf
-    import tensorflow_datasets as tfds
-    import transformers
-    # Example usage
-    tokenizer = transformers.PreTrainedTokenizerFast.from_pretrained(_SMILES_TOKENIZER)
+    decoded_2 = tokenizer.decode(features["smiles"][1])  # Decode smiles of the second sample
+    print("Decoded SMILES 2:", decoded_2)
+    print("Sample features:", features["smiles"][:2])  # Print first 10 tokens of the first sample
+    # Calculate average sequence lengths before padding
+    # print("Calculating average sequence lengths before padding...")
+    # lengths = calculate_sequence_lengths(train_dataset, num_batches=10000)
+    
+    # avg_length = np.mean(lengths)
+    # median_length = np.median(lengths)
+    # std_length = np.std(lengths)
+    # min_length = np.min(lengths)
+    # max_length = np.max(lengths)
+    
+    # print(f"Average length before padding: {avg_length:.2f}")
+    # print(f"Median length before padding: {median_length:.2f}")
+    # print(f"Standard deviation: {std_length:.2f}")
+    # print(f"Min length: {min_length}")
+    # print(f"Max length: {max_length}")
+    # print(f"Total sequences analyzed: {len(lengths)}")
 
-    ds = ds.shuffle(64)
-    ds = ds.batch(512, drop_remainder=True)
-    ds = ds.prefetch(tf.data.AUTOTUNE)
-    ds = ds.as_numpy_iterator()
-
-    # train_loader = grain.load(
-    #     source=data_loader.as_data_source(split="train", decoders={"smiles": tfds.decode.SkipDecoding()}),
-    #     num_epochs=1,
-    #     shuffle=True,
-    #     seed=42,
-    #     transformations=[
-    #         Tokenize(tokenizer=tokenizer, max_length=128),
-    #     ],
-    #     shard_options=grain.ShardByJaxProcess(drop_remainder=True),
-    #     batch_size=512,
-    #     worker_count=16,
-    #     read_options=grain.ReadOptions(num_threads=8, prefetch_buffer_size=1024),
-    #     drop_remainder=True,
-    # )
-
-    import tensorflow_datasets as tfds
-
-    results = tfds.benchmark(ds, num_iter=100, batch_size=512)
-    print(results)
+    results = tfds.benchmark(train_dataset, num_iter=1000, batch_size=512)
+    # print(results)
 
     # Example usage
-    features = next(ds)
-    print(features["smiles"].shape)
-    print(features["fingerprint"].shape)
-    print(features["smiles"][:5])
-    print(features["fingerprint"][:5])

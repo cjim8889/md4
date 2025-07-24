@@ -69,7 +69,7 @@ def process_and_write_shard_tfrecord(args):
     Args:
         args: Tuple of (shard_index, total_shards, shard, split, output_dir, features, fp_bits)
     """
-    shard_index, total_shards, shard, split, output_dir, features, fp_bits = args[:7]
+    shard_index, total_shards, shard, split, output_dir, features, fp_bits, tokenizer, max_length = args[:9]
 
     import tensorflow as tf
     from md4.rdkit_utils import process_smiles
@@ -82,8 +82,17 @@ def process_and_write_shard_tfrecord(args):
         for smi in shard:
             result = process_smiles(smi, fp_radius=2, fp_bits=fp_bits)
             if result is not None:
+                smiles = tokenizer.encode(
+                    smi,
+                    add_special_tokens=True,
+                    padding="max_length",
+                    truncation=True,
+                    max_length=max_length,
+                    return_tensors="np",
+                ).reshape(-1).astype(np.int32)
+
                 serialised = features.serialize_example({
-                    "smiles": smi,
+                    "smiles": smiles,
                     "fingerprint": result,
                 })
                 writer.write(serialised)
