@@ -40,6 +40,7 @@ from orbax import checkpoint as orbax_checkpoint
 
 from md4 import input_pipeline
 from md4 import input_pipeline_v2
+from md4 import rdkit_utils
 from md4 import sampling
 from md4 import utils
 from md4.models import utils as model_utils
@@ -92,8 +93,10 @@ def _get_checkpoint_manager(
         options=orbax_checkpoint.CheckpointManagerOptions(
             create=True,
             # preservation_policy=orbax_checkpoint.checkpoint_managers.LatestN(n=20),
-            best_fn=lambda x: x["validation_loss"] if "validation_loss" in x else x["loss"],
-            best_mode='min',
+            best_fn=lambda x: x["validation_loss"]
+            if "validation_loss" in x
+            else x["loss"],
+            best_mode="min",
             max_to_keep=20,
         ),
     )
@@ -498,7 +501,9 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
         else input_pipeline.create_datasets
     )
     train_loader, eval_loaders, dataset_info = create_datasets(config, data_seed)
-    train_iter = iter(train_loader) if config.dataset != "pubchem_large" else train_loader
+    train_iter = (
+        iter(train_loader) if config.dataset != "pubchem_large" else train_loader
+    )
 
     # Initialize model.
     rng, model_rng = jax.random.split(rng)
@@ -518,13 +523,17 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
         checkpointed_state = dict(train_state=train_state)
     else:
         checkpointed_state = dict(train_state=train_state, train_iter=train_iter)
-    
+
     if checkpoint_manager.latest_step() is not None:
         checkpointed_state = checkpoint_manager.restore(
             checkpoint_manager.latest_step(), items=checkpointed_state
         )
     train_state = checkpointed_state["train_state"]
-    train_iter = checkpointed_state["train_iter"] if "train_iter" in checkpointed_state else train_iter
+    train_iter = (
+        checkpointed_state["train_iter"]
+        if "train_iter" in checkpointed_state
+        else train_iter
+    )
 
     logging.info("Batch Size: %s", config.batch_size)
 
@@ -632,14 +641,20 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                         )
                         if "label" in dummy_batch:
                             conditioning = dummy_batch["label"].astype("int32")
-                        elif "fingerprint" in dummy_batch and "atom_types" in dummy_batch:
+                        elif (
+                            "fingerprint" in dummy_batch and "atom_types" in dummy_batch
+                        ):
                             conditioning = {
-                                "fingerprint": dummy_batch["fingerprint"].astype("int32"),
+                                "fingerprint": dummy_batch["fingerprint"].astype(
+                                    "int32"
+                                ),
                                 "atom_types": dummy_batch["atom_types"].astype("int32"),
                             }
                         elif "fingerprint" in dummy_batch:
                             conditioning = {
-                                "fingerprint": dummy_batch["fingerprint"].astype("int32"),
+                                "fingerprint": dummy_batch["fingerprint"].astype(
+                                    "int32"
+                                ),
                             }
                         else:
                             conditioning = None
@@ -666,6 +681,18 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                             texts = utils.detokenize_texts(all_samples, tokenizer)
                             writer.write_texts(step, {"samples": texts})
 
+                            # Calculate SMILES validity for pubchem_large dataset
+                            if config.dataset == "pubchem_large":
+                                validity_metrics = (
+                                    rdkit_utils.calculate_smiles_validity(texts)
+                                )
+                                # Write validity metrics to the writer
+                                validity_scalars = {
+                                    f"sample_{k}": v
+                                    for k, v in validity_metrics.items()
+                                }
+                                writer.write_scalars(step, validity_scalars)
+
             if step % config.checkpoint_every_steps == 0 or is_last_step:
                 with report_progress.timed("checkpoint"):
                     train_state = merge_batch_stats(train_state)
@@ -677,7 +704,9 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                                     np.array, flax_utils.unreplicate(train_state)
                                 ),
                             ),
-                            metrics=jax.tree_util.tree_map(lambda x: x.item(), eval_metrics_cpu)
+                            metrics=jax.tree_util.tree_map(
+                                lambda x: x.item(), eval_metrics_cpu
+                            ),
                         )
                     else:
                         checkpoint_manager.save(
@@ -688,7 +717,9 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                                 ),
                                 train_iter=train_iter,
                             ),
-                            metrics=jax.tree_util.tree_map(lambda x: x.item(), eval_metrics_cpu)
+                            metrics=jax.tree_util.tree_map(
+                                lambda x: x.item(), eval_metrics_cpu
+                            ),
                         )
 
     logging.info("Finishing training at step %d", num_train_steps)

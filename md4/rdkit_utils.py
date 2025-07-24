@@ -127,7 +127,7 @@ def process_smiles(smi, fp_radius=2, fp_bits=2048):
             fingerprint = get_generator(fp_radius, fp_bits).GetFingerprintAsNumPy(mol)
 
             return np.asarray(fingerprint, dtype=np.int8)
-    except:
+    except Exception:
         pass
     return None
 
@@ -137,7 +137,62 @@ def process_smiles_with_shared_memory(smi, i, fp_radius=2, fp_bits=2048):
         if filter_molecule(mol):
             fingerprint = get_generator(fp_radius, fp_bits).GetFingerprintAsNumPy(mol)
             return i, fingerprint
-    except:
+    except Exception:
         pass
 
     return i, None
+
+def calculate_smiles_validity(texts_array):
+    """Calculate validity metrics for a batch of SMILES strings.
+    
+    Args:
+        texts_array: numpy array of strings with shape (batch_size,) containing SMILES strings
+        
+    Returns:
+        dict: Dictionary containing validity metrics:
+            - validity_rate: float, fraction of valid SMILES
+            - valid_count: int, number of valid SMILES
+            - total_count: int, total number of SMILES
+            - filtered_count: int, number of SMILES that pass filtering
+            - filtered_rate: float, fraction of SMILES that pass filtering
+    """
+    if len(texts_array.shape) != 1:
+        raise ValueError(f"Expected 1D array, got shape {texts_array.shape}")
+    
+    total_count = len(texts_array)
+    valid_count = 0
+    filtered_count = 0
+    
+    for smiles_str in texts_array:
+        # Convert numpy string to Python string if needed
+        if isinstance(smiles_str, np.bytes_):
+            smiles_str = smiles_str.decode('utf-8')
+        elif isinstance(smiles_str, np.str_):
+            smiles_str = str(smiles_str)
+        
+        # Strip whitespace and handle empty strings
+        smiles_str = smiles_str.strip()
+        if not smiles_str:
+            continue
+            
+        try:
+            mol = Chem.MolFromSmiles(smiles_str)
+            if mol is not None:
+                valid_count += 1
+                # Also check if it passes our molecule filtering
+                if filter_molecule(mol):
+                    filtered_count += 1
+        except Exception:
+            # Any exception during parsing means invalid SMILES
+            pass
+    
+    validity_rate = valid_count / total_count if total_count > 0 else 0.0
+    filtered_rate = filtered_count / total_count if total_count > 0 else 0.0
+    
+    return {
+        'validity_rate': validity_rate,
+        'valid_count': valid_count,
+        'total_count': total_count,
+        'filtered_count': filtered_count,
+        'filtered_rate': filtered_rate,
+    }
