@@ -678,11 +678,15 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                             del all_samples, sample_grid
                         elif config.task_type == "text":
                             tokenizer = dataset_info["tokenizer"]
-                            texts = utils.detokenize_texts(all_samples, tokenizer)
-                            writer.write_texts(step, {"samples": texts})
+                            texts = None
+                            try:
+                                texts = tokenizer.batch_decode(all_samples, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+                                writer.write_texts(step, {"samples": texts})
+                            except Exception as e:
+                                logging.error("Error decoding texts: %s", e)
 
                             # Calculate SMILES validity for pubchem_large dataset
-                            if config.dataset == "pubchem_large":
+                            if config.dataset == "pubchem_large" and texts is not None:
                                 validity_metrics = (
                                     rdkit_utils.calculate_smiles_validity(texts)
                                 )
