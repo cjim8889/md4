@@ -23,12 +23,6 @@ import math
 from typing import Any
 
 import flax.linen as nn
-import jax
-import jax.experimental
-import jax.experimental.pallas
-import jax.experimental.pallas.mosaic_gpu
-import jax.experimental.pallas.ops
-import jax.experimental.pallas.tpu
 import jax.numpy as jnp
 import numpy as np
 
