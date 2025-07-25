@@ -682,20 +682,20 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                             try:
                                 texts = tokenizer.batch_decode(all_samples, skip_special_tokens=True, clean_up_tokenization_spaces=True)
                                 writer.write_texts(step, {"samples": texts})
+
+                                # Calculate SMILES validity for pubchem_large dataset
+                                if config.dataset == "pubchem_large" and texts is not None:
+                                    validity_metrics = (
+                                        rdkit_utils.calculate_smiles_validity(texts)
+                                    )
+                                    # Write validity metrics to the writer
+                                    validity_scalars = {
+                                        f"sample_{k}": v
+                                        for k, v in validity_metrics.items()
+                                    }
+                                    writer.write_scalars(step, validity_scalars)
                             except Exception as e:
                                 logging.error("Error decoding texts: %s", e)
-
-                            # Calculate SMILES validity for pubchem_large dataset
-                            if config.dataset == "pubchem_large" and texts is not None:
-                                validity_metrics = (
-                                    rdkit_utils.calculate_smiles_validity(texts)
-                                )
-                                # Write validity metrics to the writer
-                                validity_scalars = {
-                                    f"sample_{k}": v
-                                    for k, v in validity_metrics.items()
-                                }
-                                writer.write_scalars(step, validity_scalars)
 
             if step % config.checkpoint_every_steps == 0 or is_last_step:
                 with report_progress.timed("checkpoint"):

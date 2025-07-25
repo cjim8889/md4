@@ -172,11 +172,11 @@ def process_smiles_with_shared_memory(smi, i, fp_radius=2, fp_bits=2048):
     return i, None
 
 
-def calculate_smiles_validity(texts_array):
+def calculate_smiles_validity(texts_list):
     """Calculate validity metrics for a batch of SMILES strings.
 
     Args:
-        texts_array: numpy array of strings with shape (batch_size,) containing SMILES strings
+        texts_list: list of strings containing SMILES strings
 
     Returns:
         dict: Dictionary containing validity metrics:
@@ -186,14 +186,20 @@ def calculate_smiles_validity(texts_array):
             - filtered_count: int, number of SMILES that pass filtering
             - filtered_rate: float, fraction of SMILES that pass filtering
     """
-    if len(texts_array.shape) != 1:
-        raise ValueError(f"Expected 1D array, got shape {texts_array.shape}")
+    if not texts_list:
+        return {
+            "validity_rate": 0.0,
+            "valid_count": 0,
+            "total_count": 0,
+            "filtered_count": 0,
+            "filtered_rate": 0.0,
+        }
 
-    total_count = len(texts_array)
+    total_count = len(texts_list)
     valid_count = 0
     filtered_count = 0
 
-    for smiles_str in texts_array:
+    for smiles_str in texts_list:
         # Convert numpy string to Python string if needed
         if isinstance(smiles_str, np.bytes_):
             smiles_str = smiles_str.decode("utf-8")
@@ -204,6 +210,8 @@ def calculate_smiles_validity(texts_array):
         smiles_str = smiles_str.strip()
         if not smiles_str:
             continue
+
+        smiles_str = smiles_str.replace(" ", "").replace("\n", "")
 
         try:
             mol = Chem.MolFromSmiles(smiles_str)
