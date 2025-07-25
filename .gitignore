@@ -34,3 +34,6 @@ results/
 *.parquet
 
 cache/
+
+profile/
+profilenew/
