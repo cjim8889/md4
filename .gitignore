@@ -37,3 +37,9 @@ cache/
 
 profile/
 profilenew/
+*.zip
+
+expt/
+large_expt/
+
+finetune_*/

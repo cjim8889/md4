@@ -1012,7 +1012,9 @@ dependencies = [
     { name = "rdkit" },
     { name = "safe-mol" },
     { name = "seaborn" },
+    { name = "tb-nightly" },
     { name = "tensorflow-datasets" },
+    { name = "tf-keras-nightly" },
     { name = "tf-nightly" },
     { name = "torch", version = "2.7.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
     { name = "torch", version = "2.7.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
@@ -1034,7 +1036,9 @@ requires-dist = [
     { name = "rdkit", specifier = ">=2025.3.3" },
     { name = "safe-mol", specifier = ">=0.1.13" },
     { name = "seaborn", specifier = ">=0.13.2" },
+    { name = "tb-nightly", specifier = ">=2.19.0a20250218" },
     { name = "tensorflow-datasets", specifier = ">=4.9.9" },
+    { name = "tf-keras-nightly", specifier = ">=2.20.0.dev2025062209" },
     { name = "tf-nightly", specifier = "==2.20.0.dev20250715" },
     { name = "torch", specifier = "==2.7.1", index = "https://download.pytorch.org/whl/cpu" },
     { name = "transformers", specifier = "==4.51.2" },
@@ -2023,6 +2027,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/ca/6c/3d75c196ac07ac8749600b60b03f4f6094d54e132c4d94ebac6ee0e0add0/termcolor-3.1.0.tar.gz", hash = "sha256:6a6dd7fbee581909eeec6a756cff1d7f7c376063b14e4a298dc4980309e55970", size = 14324, upload-time = "2025-04-30T11:37:53.791Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4f/bd/de8d508070629b6d84a30d01d57e4a65c69aa7f5abe7560b8fad3b50ea59/termcolor-3.1.0-py3-none-any.whl", hash = "sha256:591dd26b5c2ce03b9e43f391264626557873ce1d379019786f99b0c2bee140aa", size = 7684, upload-time = "2025-04-30T11:37:52.382Z" },
+]
+
+[[package]]
+name = "tf-keras-nightly"
+version = "2.20.0.dev2025062209"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "tf-nightly" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/fc/1f/90d9d91dc9ed41495c1abf8c267329f5f7f4fb8304e19a5a236d9b9439e1/tf_keras_nightly-2.20.0.dev2025062209.tar.gz", hash = "sha256:be8c9858347752f1cc51d3545f788ed1ac243a2e82b6df6f98c5d6ca5ff5d8dc", size = 1264362, upload-time = "2025-06-22T09:59:19.299Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/77/ff/a0e572e1a965390463779d37a6052bbda80ab99338440c0e3f935c0e41b1/tf_keras_nightly-2.20.0.dev2025062209-py3-none-any.whl", hash = "sha256:29dc0f89c8da0dd62472a35cda08a28a852f97f5d8281a405ab875acdd348f8c", size = 1729145, upload-time = "2025-06-22T09:59:17.203Z" },
 ]
 
 [[package]]
