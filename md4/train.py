@@ -126,7 +126,7 @@ def create_train_state(
     elif config.fingerprint_dim > 0:
         conditioning = {
             "fingerprint": jnp.zeros(
-                (input_shape[0], config.fingerprint_dim), dtype="int32"
+                (input_shape[0], config.raw_fingerprint_dim if config.get("raw_fingerprint_dim", 0) > 0 else config.fingerprint_dim), dtype="int32"
             ),
         }
     else:
@@ -533,7 +533,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
         # Check if we should use partial loading
         if partial_load_utils.should_use_partial_loading(config):
             try:
-                train_state, train_iter = partial_load_utils.partial_load_checkpoint(
+                train_state, _ = partial_load_utils.partial_load_checkpoint(
                     config=config,
                     train_state=train_state,
                     train_iter=train_iter if config.dataset != "pubchem_large" else None,
@@ -548,7 +548,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                 raise
         else:
             # Standard checkpoint loading
-            train_state, train_iter = partial_load_utils.standard_checkpoint_loading(
+            train_state, _ = partial_load_utils.standard_checkpoint_loading(
                 train_state=train_state,
                 train_iter=train_iter if config.dataset != "pubchem_large" else None,
                 checkpoint_manager=load_checkpoint_manager
