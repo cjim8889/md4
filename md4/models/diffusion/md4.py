@@ -187,10 +187,17 @@ class MD4(nn.Module):
     def get_cond_embedding(self, conditioning):
         if conditioning is not None:
             if isinstance(conditioning, dict):
+                _cond = conditioning["fingerprint"]
                 if self.raw_fingerprint_dim > 0 and self.raw_fingerprint_dim != self.fingerprint_dim:
                     # Convert raw fingerprint to the desired dimension
-                    conditioning["fingerprint"] = nn.sigmoid(self.cond_conversion(conditioning["fingerprint"]))
-                    
+                    if conditioning["fingerprint"].shape[1] != self.raw_fingerprint_dim:
+                        # Print stack trace for debugging
+                        raise ValueError(
+                            f"Expected fingerprint shape {self.raw_fingerprint_dim}, got {conditioning['fingerprint'].shape[1]}"
+                        )
+                    _cond = nn.sigmoid(self.cond_conversion(conditioning["fingerprint"]))
+
+
                 if "atom_types" in conditioning:
                     atom_conditioning = self.atom_embeddings(conditioning["atom_types"])
                     atom_conditioning = jax.vmap(self.atom_embeddings_agg)(atom_conditioning)
@@ -203,11 +210,9 @@ class MD4(nn.Module):
                     else:
                         raise ValueError("Atom conditioning has invalid shape")
 
-                    cond = jnp.concat([conditioning["fingerprint"], atom_conditioning], axis=-1)
-                else:
-                    cond = conditioning["fingerprint"]
-                    
-                return self.cond_embeddings(cond)
+                    _cond = jnp.concat([_cond, atom_conditioning], axis=-1)
+
+                return self.cond_embeddings(_cond)
 
             return self.cond_embeddings(conditioning)
         return None

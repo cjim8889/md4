@@ -505,7 +505,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
     )
     train_loader, eval_loaders, dataset_info = create_datasets(config, data_seed)
     train_iter = (
-        iter(train_loader) if config.dataset != "pubchem_large" else train_loader
+        iter(train_loader) if config.dataset not in  ["pubchem_large", "msg_finetune"] else train_loader
     )
 
     # Initialize model.
@@ -536,7 +536,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                 train_state, _ = partial_load_utils.partial_load_checkpoint(
                     config=config,
                     train_state=train_state,
-                    train_iter=train_iter if config.dataset != "pubchem_large" else None,
+                    train_iter=train_iter if config.dataset not in ["pubchem_large", "msg_finetune"] else None,
                     checkpoint_manager=load_checkpoint_manager,
                     create_train_state_fn=create_train_state,
                     schedule_fn=schedule_fn,
@@ -550,7 +550,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
             # Standard checkpoint loading
             train_state, _ = partial_load_utils.standard_checkpoint_loading(
                 train_state=train_state,
-                train_iter=train_iter if config.dataset != "pubchem_large" else None,
+                train_iter=train_iter if config.dataset not in ["pubchem_large", "msg_finetune"] else None,
                 checkpoint_manager=load_checkpoint_manager
             )
 
@@ -703,7 +703,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                                 writer.write_texts(step, {"samples": texts})
 
                                 # Calculate SMILES validity for pubchem_large dataset
-                                if config.dataset == "pubchem_large" and texts is not None:
+                                if config.dataset in ["pubchem_large", "msg_finetune"] and texts is not None:
                                     validity_metrics = (
                                         rdkit_utils.calculate_smiles_validity(texts)
                                     )
@@ -719,7 +719,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
             if step % config.checkpoint_every_steps == 0 or is_last_step:
                 with report_progress.timed("checkpoint"):
                     train_state = merge_batch_stats(train_state)
-                    if config.dataset == "pubchem_large":
+                    if config.dataset in ["pubchem_large", "msg_finetune"]:
                         save_checkpoint_manager.save(
                             step,
                             items=dict(

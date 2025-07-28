@@ -92,7 +92,7 @@ def partial_load_checkpoint(
         
         # Prepare checkpoint state for old model
         old_checkpointed_state = {"train_state": old_train_state}
-        if config.dataset != "pubchem_large":
+        if config.dataset not in ["pubchem_large", "msg_finetune"]:
             old_checkpointed_state["train_iter"] = train_iter
             
         # Load checkpoint into old train state
@@ -141,7 +141,6 @@ def partial_load_checkpoint(
         updated_train_state = train_state.replace(
             params=new_params,
             ema_params=new_ema_params,
-            step=loaded_train_state.step
         )
         
         # Handle train_iter if it exists in the old checkpoint

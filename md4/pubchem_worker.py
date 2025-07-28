@@ -100,3 +100,52 @@ def process_and_write_shard_tfrecord(args):
 
     print(f"Shard {shard_index} processed: {written_count} entries written to {shard_filename}")
     return written_count
+
+def process_and_write_msg_tfrecord(args):
+    """Process MSG finetune data (INCHI + fingerprints) and write to TFRecord.
+    
+    Args:
+        args: Tuple of (shard_index, total_shards, data_tuples, split, output_dir, features, tokenizer, max_length)
+    """
+    shard_index, total_shards, data_tuples, split, output_dir, features, tokenizer, max_length = args[:8]
+
+    import tensorflow as tf
+    from rdkit.Chem import MolFromInchi, MolToSmiles
+    import os
+
+    shard_filename = os.path.join(output_dir, f"msg_finetune-{split}.tfrecord-{shard_index:05d}-of-{total_shards:05d}")
+    
+    with tf.io.TFRecordWriter(shard_filename) as writer:
+        written_count = 0
+        for inchi, fingerprint in data_tuples:
+            # Convert INCHI to SMILES
+            try:
+                mol = MolFromInchi(inchi)
+                if mol is not None:
+                    smiles_str = MolToSmiles(mol)
+                    
+                    # Tokenize SMILES
+                    smiles = tokenizer.encode(
+                        smiles_str,
+                        add_special_tokens=True,
+                        padding="max_length",
+                        truncation=True,
+                        max_length=max_length,
+                        return_tensors="np",
+                    ).reshape(-1).astype(np.int32)
+
+                    # Convert fingerprint to int8 and ensure correct shape
+                    fingerprint_array = np.array(fingerprint, dtype=np.int8)
+                    
+                    serialised = features.serialize_example({
+                        "smiles": smiles,
+                        "fingerprint": fingerprint_array,
+                    })
+                    writer.write(serialised)
+                    written_count += 1
+            except Exception as e:
+                print(f"Error processing INCHI: {e}")
+                continue
+
+    print(f"Shard {shard_index} processed: {written_count} entries written to {shard_filename}")
+    return written_count
