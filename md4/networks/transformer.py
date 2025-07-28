@@ -200,7 +200,8 @@ class Attention(nn.Module):
     xk = xk.swapaxes(1, 2)
     xv = xv.swapaxes(1, 2)
 
-    scores = jnp.matmul(xq, xk.swapaxes(2, 3)) / math.sqrt(self.head_dim)
+    xk_transposed = xk.swapaxes(2, 3)
+    scores = jnp.matmul(xq, xk_transposed) / math.sqrt(self.head_dim)
     if self.causal:
       mask = jnp.full((1, 1, seqlen, seqlen), -jnp.inf)
       mask = jnp.triu(mask, k=1)
