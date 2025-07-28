@@ -137,6 +137,7 @@ class MD4(nn.Module):
     topp: float = 0.98
     model_sharding: bool = False
     fingerprint_dim: int = 0
+    raw_fingerprint_dim: int = 0
     atom_type_size: int = 0
 
     def setup(self):
@@ -145,6 +146,9 @@ class MD4(nn.Module):
         if self.classes > 0:
             self.cond_embeddings = nn.Embed(self.classes, self.feature_dim)
         if self.fingerprint_dim > 0:
+            if self.raw_fingerprint_dim > 0 and self.raw_fingerprint_dim != self.fingerprint_dim:
+                self.cond_conversion = nn.Dense(features=self.fingerprint_dim, name="cond_conversion")
+
             self.cond_embeddings = SimpleMLP(features=[self.fingerprint_dim // 2, self.feature_dim * 2, self.feature_dim, self.feature_dim])
         if self.atom_type_size > 0:
             self.atom_embeddings = nn.Embed(self.atom_type_size, self.feature_dim)
@@ -183,6 +187,10 @@ class MD4(nn.Module):
     def get_cond_embedding(self, conditioning):
         if conditioning is not None:
             if isinstance(conditioning, dict):
+                if self.raw_fingerprint_dim > 0 and self.raw_fingerprint_dim != self.fingerprint_dim:
+                    # Convert raw fingerprint to the desired dimension
+                    conditioning["fingerprint"] = nn.sigmoid(self.cond_conversion(conditioning["fingerprint"]))
+                    
                 if "atom_types" in conditioning:
                     atom_conditioning = self.atom_embeddings(conditioning["atom_types"])
                     atom_conditioning = jax.vmap(self.atom_embeddings_agg)(atom_conditioning)

@@ -44,6 +44,7 @@ from md4 import rdkit_utils
 from md4 import sampling
 from md4 import utils
 from md4.models import utils as model_utils
+from md4 import partial_load_utils
 
 
 @flax.struct.dataclass
@@ -73,7 +74,7 @@ def merge_batch_stats(replicated_state: TrainState) -> TrainState:
 
 
 def _get_checkpoint_manager(
-    config: ml_collections.ConfigDict, workdir: epath.PathLike
+    config: ml_collections.ConfigDict, workdir: epath.PathLike, create: bool = True
 ) -> orbax_checkpoint.CheckpointManager:
     """Loads the orbax checkpoint manager for train state and data iterator."""
     # The keys in this dict should match the keys in `checkpointed_state`.
@@ -91,7 +92,7 @@ def _get_checkpoint_manager(
         checkpoint_dir,
         checkpointers=checkpointers,
         options=orbax_checkpoint.CheckpointManagerOptions(
-            create=True,
+            create=create,
             # preservation_policy=orbax_checkpoint.checkpoint_managers.LatestN(n=20),
             best_fn=lambda x: x["validation_loss"]
             if "validation_loss" in x
@@ -457,13 +458,15 @@ def evaluate(
     return eval_metrics
 
 
-def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLike):
+def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLike, olddir: epath.PathLike | None = None):
     """Runs a training and evaluation loop.
 
     Args:
       config: Configuration to use.
       workdir: Working directory for checkpoints and TF summaries. If this
         contains checkpoint training will be resumed from the latest checkpoint.
+      olddir: Optional directory to load old checkpoints from for partial loading.
+        If provided, checkpoints will be loaded from olddir but saved to workdir.
     """
     workdir = epath.Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -516,24 +519,40 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
     )
 
     # Set up checkpointing of the model and the input pipeline.
-    checkpoint_manager = _get_checkpoint_manager(config, workdir)
+    # Create checkpoint manager for saving (new checkpoints)
+    save_checkpoint_manager = _get_checkpoint_manager(config, workdir, create=True)
+    
+    # Create checkpoint manager for loading (old checkpoints if olddir is provided)
+    if olddir is not None:
+        load_checkpoint_manager = _get_checkpoint_manager(config, olddir, create=False)
+    else:
+        load_checkpoint_manager = save_checkpoint_manager
 
     # Retrieve data from previous checkpoints if possible.
-    if config.dataset == "pubchem_large":
-        checkpointed_state = dict(train_state=train_state)
-    else:
-        checkpointed_state = dict(train_state=train_state, train_iter=train_iter)
-
-    if checkpoint_manager.latest_step() is not None:
-        checkpointed_state = checkpoint_manager.restore(
-            checkpoint_manager.latest_step(), items=checkpointed_state
-        )
-    train_state = checkpointed_state["train_state"]
-    train_iter = (
-        checkpointed_state["train_iter"]
-        if "train_iter" in checkpointed_state
-        else train_iter
-    )
+    if load_checkpoint_manager.latest_step() is not None:
+        # Check if we should use partial loading
+        if partial_load_utils.should_use_partial_loading(config):
+            try:
+                train_state, train_iter = partial_load_utils.partial_load_checkpoint(
+                    config=config,
+                    train_state=train_state,
+                    train_iter=train_iter if config.dataset != "pubchem_large" else None,
+                    checkpoint_manager=load_checkpoint_manager,
+                    create_train_state_fn=create_train_state,
+                    schedule_fn=schedule_fn,
+                    per_device_batch_size=per_device_batch_size,
+                    data_shape=data_shape
+                )
+            except Exception as e:
+                logging.error(f"Partial loading failed: {e}")
+                raise
+        else:
+            # Standard checkpoint loading
+            train_state, train_iter = partial_load_utils.standard_checkpoint_loading(
+                train_state=train_state,
+                train_iter=train_iter if config.dataset != "pubchem_large" else None,
+                checkpoint_manager=load_checkpoint_manager
+            )
 
     logging.info("Batch Size: %s", config.batch_size)
 
@@ -701,7 +720,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                 with report_progress.timed("checkpoint"):
                     train_state = merge_batch_stats(train_state)
                     if config.dataset == "pubchem_large":
-                        checkpoint_manager.save(
+                        save_checkpoint_manager.save(
                             step,
                             items=dict(
                                 train_state=jax.tree_util.tree_map(
@@ -713,7 +732,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                             ),
                         )
                     else:
-                        checkpoint_manager.save(
+                        save_checkpoint_manager.save(
                             step,
                             items=dict(
                                 train_state=jax.tree_util.tree_map(

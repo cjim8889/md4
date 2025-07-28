@@ -591,7 +591,7 @@ def _process_metrics(batch_metrics, matrics_class):
 
 
 def train_and_evaluate(
-    config: ml_collections.ConfigDict, workdir: epath.PathLike
+    config: ml_collections.ConfigDict, workdir: epath.PathLike, olddir: epath.PathLike | None = None
 ) -> Mapping[str, Any]:
   """Runs a training and evaluation loop.
 
@@ -599,6 +599,8 @@ def train_and_evaluate(
     config: Configuration to use.
     workdir: Working directory for checkpoints and TF summaries. If this
       contains checkpoint training will be resumed from the latest checkpoint.
+    olddir: Optional directory to load old checkpoints from for partial loading.
+      If provided, checkpoints will be loaded from olddir but saved to workdir.
 
   Returns:
     A dictionary that maps "train_state" to the TrainState and "train_iter" to

@@ -2,6 +2,7 @@ from collections import abc
 
 from ml_collections import config_dict
 
+
 def get_config() -> config_dict.ConfigDict:
   """Default config."""
 
@@ -31,7 +32,10 @@ def get_config() -> config_dict.ConfigDict:
   # t or none (removes time dependence)
   config.time_features = "t"
   config.cont_time = True
+  config.raw_fingerprint_dim = 4096
   config.fingerprint_dim = 2048
+  config.old_config = "md4/configs/md4/molecular.py"
+
 
   config.feature_dim = 64
   config.n_layers = 12

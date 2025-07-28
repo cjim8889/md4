@@ -35,7 +35,7 @@ import transformers
 try:
     import cv2
 except ImportError:
-    print("cv2 not found")
+    pass
 try:
     from md4 import input_pipeline_pubchem, input_pipeline_pubchem_large
 except ImportError as e:
