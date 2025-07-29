@@ -37,6 +37,7 @@ import ml_collections
 import numpy as np
 import optax
 from orbax import checkpoint as orbax_checkpoint
+from flax import traverse_util
 
 from md4 import input_pipeline
 from md4 import input_pipeline_v2
@@ -103,6 +104,105 @@ def _get_checkpoint_manager(
     )
 
 
+def create_frozen_train_state(
+    config: ml_collections.ConfigDict,
+    rng: jnp.ndarray,
+    input_shape: Sequence[int] | Mapping[str, Sequence[int]],
+    schedule_fn: Callable[[Any], Any],
+) -> tuple[nn.Module, optax.GradientTransformation, TrainState, Any]:
+    """Create and initialize the model."""
+    model = model_utils.get_model(config)
+
+    if config.classes > 0:
+        conditioning = jnp.zeros(input_shape[0], dtype="int32")
+    elif config.fingerprint_dim > 0 and config.atom_type_size > 0:
+        conditioning = {
+            "fingerprint": jnp.zeros(
+                (input_shape[0], config.fingerprint_dim), dtype="int32"
+            ),
+            "atom_types": jnp.zeros(
+                (input_shape[0], config.pad_to_length), dtype="int32"
+            ),
+        }
+    elif config.fingerprint_dim > 0:
+        conditioning = {
+            "fingerprint": jnp.zeros(
+                (
+                    input_shape[0],
+                    config.raw_fingerprint_dim
+                    if config.get("raw_fingerprint_dim", 0) > 0
+                    else config.fingerprint_dim,
+                ),
+                dtype="int32",
+            ),
+        }
+    else:
+        conditioning = None
+
+    rng, sample_rng, init_rng = jax.random.split(rng, 3)
+    dummy_input = jnp.ones(input_shape, dtype="int32")
+
+    output, variables = model.init_with_output(
+        {"sample": sample_rng, "params": init_rng},
+        dummy_input,
+        cond=conditioning,
+        train=False,
+    )
+
+    metric_keys = sorted(list(output.keys()) + ["learning_rate"])
+    logging.info("metric_keys: %s", metric_keys)
+    metrics_class = create_metrics_class_from_keys(metric_keys)
+    state, params = flax.core.pop(variables, "params")
+    del variables
+    parameter_overview.log_parameter_overview(
+        state, msg="############# state #############"
+    )
+    parameter_overview.log_parameter_overview(
+        params, msg="############# params #############"
+    )
+
+    def _should_freeze(path, v) -> bool:
+        if "fp_adapter" in path:
+            return False
+        
+        return True
+
+    mask = traverse_util.path_aware_map(
+        _should_freeze, params
+    )
+
+    mask["cond_embeddings"]["cond_dense_0"]["kernel"] = False
+    mask["cond_embeddings"]["cond_dense_0"]["bias"] = False
+
+    freezer = optax.transforms.freeze(
+        mask
+    )
+
+    optimizer = optax.chain(
+        optax.clip(config.clip) if config.clip > 0.0 else optax.identity(),
+        optax.adamw(
+            schedule_fn,
+            b1=0.9,
+            b2=config.b2,
+            weight_decay=config.weight_decay,
+        ),
+        freezer,
+    )
+    return (
+        model,
+        optimizer,
+        TrainState(
+            step=0,
+            rng=rng,
+            params=params,
+            ema_params=copy.deepcopy(params) if config.ema_rate > 0.0 else None,
+            opt_state=optimizer.init(params),
+            state=state,
+        ),
+        metrics_class,
+    )
+
+
 def create_train_state(
     config: ml_collections.ConfigDict,
     rng: jnp.ndarray,
@@ -126,7 +226,13 @@ def create_train_state(
     elif config.fingerprint_dim > 0:
         conditioning = {
             "fingerprint": jnp.zeros(
-                (input_shape[0], config.raw_fingerprint_dim if config.get("raw_fingerprint_dim", 0) > 0 else config.fingerprint_dim), dtype="int32"
+                (
+                    input_shape[0],
+                    config.raw_fingerprint_dim
+                    if config.get("raw_fingerprint_dim", 0) > 0
+                    else config.fingerprint_dim,
+                ),
+                dtype="int32",
             ),
         }
     else:
@@ -458,7 +564,11 @@ def evaluate(
     return eval_metrics
 
 
-def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLike, olddir: epath.PathLike | None = None):
+def train_and_evaluate(
+    config: ml_collections.ConfigDict,
+    workdir: epath.PathLike,
+    olddir: epath.PathLike | None = None,
+):
     """Runs a training and evaluation loop.
 
     Args:
@@ -505,23 +615,34 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
     )
     train_loader, eval_loaders, dataset_info = create_datasets(config, data_seed)
     train_iter = (
-        iter(train_loader) if config.dataset not in  ["pubchem_large", "msg_finetune"] else train_loader
+        iter(train_loader)
+        if config.dataset not in ["pubchem_large", "msg_finetune"]
+        else train_loader
     )
 
     # Initialize model.
     rng, model_rng = jax.random.split(rng)
     data_shape = input_pipeline.get_data_shape(config)
-    model, optimizer, train_state, metrics_class = create_train_state(  # pylint: disable=invalid-name
-        config,
-        model_rng,
-        input_shape=(per_device_batch_size,) + data_shape,
-        schedule_fn=schedule_fn,
-    )
+
+    if config.get("frozen", False):
+        model, optimizer, train_state, metrics_class = create_frozen_train_state(  # pylint: disable=invalid-name
+            config,
+            model_rng,
+            input_shape=(per_device_batch_size,) + data_shape,
+            schedule_fn=schedule_fn,
+        )
+    else:
+        model, optimizer, train_state, metrics_class = create_train_state(
+            config,
+            model_rng,
+            input_shape=(per_device_batch_size,) + data_shape,
+            schedule_fn=schedule_fn,
+        )
 
     # Set up checkpointing of the model and the input pipeline.
     # Create checkpoint manager for saving (new checkpoints)
     save_checkpoint_manager = _get_checkpoint_manager(config, workdir, create=True)
-    
+
     # Create checkpoint manager for loading (old checkpoints if olddir is provided)
     if olddir is not None:
         load_checkpoint_manager = _get_checkpoint_manager(config, olddir, create=False)
@@ -536,12 +657,14 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                 train_state, _ = partial_load_utils.partial_load_checkpoint(
                     config=config,
                     train_state=train_state,
-                    train_iter=train_iter if config.dataset not in ["pubchem_large", "msg_finetune"] else None,
+                    train_iter=train_iter
+                    if config.dataset not in ["pubchem_large", "msg_finetune"]
+                    else None,
                     checkpoint_manager=load_checkpoint_manager,
                     create_train_state_fn=create_train_state,
                     schedule_fn=schedule_fn,
                     per_device_batch_size=per_device_batch_size,
-                    data_shape=data_shape
+                    data_shape=data_shape,
                 )
             except Exception as e:
                 logging.error(f"Partial loading failed: {e}")
@@ -550,8 +673,10 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
             # Standard checkpoint loading
             train_state, _ = partial_load_utils.standard_checkpoint_loading(
                 train_state=train_state,
-                train_iter=train_iter if config.dataset not in ["pubchem_large", "msg_finetune"] else None,
-                checkpoint_manager=load_checkpoint_manager
+                train_iter=train_iter
+                if config.dataset not in ["pubchem_large", "msg_finetune"]
+                else None,
+                checkpoint_manager=load_checkpoint_manager,
             )
 
     logging.info("Batch Size: %s", config.batch_size)
@@ -699,11 +824,18 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                             tokenizer = dataset_info["tokenizer"]
                             texts = None
                             try:
-                                texts = tokenizer.batch_decode(all_samples, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+                                texts = tokenizer.batch_decode(
+                                    all_samples,
+                                    skip_special_tokens=True,
+                                    clean_up_tokenization_spaces=True,
+                                )
                                 writer.write_texts(step, {"samples": texts})
 
                                 # Calculate SMILES validity for pubchem_large dataset
-                                if config.dataset in ["pubchem_large", "msg_finetune"] and texts is not None:
+                                if (
+                                    config.dataset in ["pubchem_large", "msg_finetune"]
+                                    and texts is not None
+                                ):
                                     validity_metrics = (
                                         rdkit_utils.calculate_smiles_validity(texts)
                                     )

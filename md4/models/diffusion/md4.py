@@ -103,8 +103,7 @@ class FingerprintAdapter(nn.Module):
         x = nn.swish(x)
         x = nn.Dense(features=self.raw_fingerprint_dim, name="fingerprint_adapter_out")(x)
         x = nn.sigmoid(x)
-        x[x < 0.5] = 0
-        x[x >= 0.5] = 1
+        x = jnp.where(x < 0.5, 0, 1)
 
         output = jnp.logical_xor(
             x[:, :self.fingerprint_dim], x[:, self.fingerprint_dim:]

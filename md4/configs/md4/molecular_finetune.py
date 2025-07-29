@@ -32,10 +32,12 @@ def get_config() -> config_dict.ConfigDict:
   # t or none (removes time dependence)
   config.time_features = "t"
   config.cont_time = True
-  config.fingerprint_adapter = False
+  config.fingerprint_adapter = True
   config.raw_fingerprint_dim = 4096
   config.fingerprint_dim = 2048
   config.old_config = "md4/configs/md4/molecular.py"
+  config.frozen = True
+  config.partial_load = False
 
 
   config.feature_dim = 64
@@ -47,7 +49,7 @@ def get_config() -> config_dict.ConfigDict:
   config.dropout_rate = 0.02
 
   config.num_heads = 16
-  config.mlp_type = "swiglu"
+  config.mlp_type = "geglu"
   config.depth_scaled_init = True
   config.cond_type = "adaln_zero"
 
