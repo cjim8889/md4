@@ -37,7 +37,7 @@ def get_config() -> config_dict.ConfigDict:
   config.fingerprint_dim = 2048
   config.old_config = "md4/configs/md4/molecular.py"
   config.frozen = True
-  config.partial_load = False
+  config.partial_load = True
 
 
   config.feature_dim = 64
@@ -54,7 +54,7 @@ def get_config() -> config_dict.ConfigDict:
   config.cond_type = "adaln_zero"
 
   config.learning_rate = 1e-5
-  config.learning_rate_schedule = "cosine"
+  config.learning_rate_schedule = "constant"
   config.warmup_steps = 200
   config.weight_decay = 1e-06
   config.clip = 0.0
@@ -63,7 +63,7 @@ def get_config() -> config_dict.ConfigDict:
   config.ema_rate = 0.9999
   # If num_train_steps==-1 then the number of training steps is calculated from
   # num_epochs.
-  config.num_train_steps = 100_000
+  config.num_train_steps = 10_000
   # Evaluates for a full epoch if num_eval_steps==-1.
   config.num_eval_steps = 100
   config.batch_size = 512

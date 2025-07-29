@@ -15,13 +15,17 @@
 
 """Utilities for partial loading of model checkpoints."""
 
-from typing import Any, Tuple
+import copy
 import logging
+from typing import Any, Tuple
+
 import jax
+import jax.numpy as jnp
+from flax import traverse_util
+from clu import parameter_overview
 from orbax import checkpoint as orbax_checkpoint
+
 from md4.configs.md4 import molecular
-import ml_collections
-from collections.abc import Callable, Mapping, Sequence
 
 
 def should_use_partial_loading(config) -> bool:
@@ -112,10 +116,9 @@ def partial_load_checkpoint(
 
         logging.info(f"Loaded checkpoint at step: {loaded_train_state.step}")
 
-        # Copy compatible parameters to the new train state
-        new_params = dict(train_state.params)
+        new_params = copy.deepcopy(train_state.params)
         new_ema_params = (
-            dict(train_state.ema_params)
+            copy.deepcopy(train_state.ema_params)
             if hasattr(train_state, "ema_params") and train_state.ema_params is not None
             else None
         )
@@ -126,7 +129,7 @@ def partial_load_checkpoint(
 
         for key in loaded_params:
             if key in new_params:
-                new_params[key] = loaded_params[key]
+                new_params[key] = copy.deepcopy(loaded_params[key])
                 params_copied.append(key)
             else:
                 params_skipped.append(key)
@@ -135,7 +138,7 @@ def partial_load_checkpoint(
         if new_ema_params is not None and loaded_ema_params is not None:
             for key in loaded_ema_params:
                 if key in new_ema_params:
-                    new_ema_params[key] = loaded_ema_params[key]
+                    new_ema_params[key] = copy.deepcopy(loaded_ema_params[key])
 
         logging.info(f"Copied parameters: {params_copied}")
         if params_skipped:
@@ -152,6 +155,12 @@ def partial_load_checkpoint(
         updated_train_state = train_state.replace(
             params=new_params,
             ema_params=new_ema_params,
+        )
+
+        logging.info("Created updated train state.")
+        parameter_overview.log_parameter_overview(
+            updated_train_state.params,
+            msg="Updated Train State Parameters Overview",
         )
 
         # Handle train_iter if it exists in the old checkpoint

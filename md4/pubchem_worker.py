@@ -134,9 +134,9 @@ def process_and_write_msg_tfrecord(args):
                         return_tensors="np",
                     ).reshape(-1).astype(np.int32)
 
-                    # Convert fingerprint to int8 and ensure correct shape
-                    fingerprint_array = np.array(fingerprint, dtype=np.int8)
-                    
+                    # Convert fingerprint to float32 and ensure correct shape
+                    fingerprint_array = np.array(fingerprint, dtype=np.float32)
+
                     serialised = features.serialize_example({
                         "smiles": smiles,
                         "fingerprint": fingerprint_array,

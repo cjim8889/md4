@@ -44,3 +44,5 @@ large_expt/
 
 finetune_*/
 *expt/
+*expt*/
+
