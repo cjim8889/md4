@@ -51,6 +51,7 @@ def get_model(config: ml_collections.ConfigDict):
         model_sharding=config.get("model_sharding", False),
         fingerprint_dim=config.get("fingerprint_dim", 0),
         raw_fingerprint_dim=config.get("raw_fingerprint_dim", 0),
+        fingerprint_adapter=config.get("fingerprint_adapter", False),
         atom_type_size=config.get("atom_type_size", 0),
     )
   elif config.model_type == "genmd4":

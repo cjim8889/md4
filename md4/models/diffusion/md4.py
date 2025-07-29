@@ -73,6 +73,44 @@ class MaskingSchedule(nn.Module):
 
     def dgamma_times_alpha(self, t):
         return self.dalpha(t) / (1.0 - self.alpha(t))
+    
+class FingerprintAdapter(nn.Module):
+    """
+    A module that adapts a raw fingerprint to a desired dimension.
+
+    Attributes:
+        raw_fingerprint_dim: The dimension of the raw fingerprint.
+        fingerprint_dim: The desired dimension of the fingerprint.
+    """
+    raw_fingerprint_dim: int = 4096
+    fingerprint_dim: int = 2048
+
+    @nn.compact
+    def __call__(self, x):
+        """
+        Defines the forward pass of the module.
+
+        Args:
+            x: The input data (raw fingerprint).
+
+        Returns:
+            The adapted fingerprint.
+        """
+        x = nn.Dense(
+            features=self.raw_fingerprint_dim,
+            name="fingerprint_adapter_dense"
+        )(x)
+        x = nn.swish(x)
+        x = nn.Dense(features=self.raw_fingerprint_dim, name="fingerprint_adapter_out")(x)
+        x = nn.sigmoid(x)
+        x[x < 0.5] = 0
+        x[x >= 0.5] = 1
+
+        output = jnp.logical_xor(
+            x[:, :self.fingerprint_dim], x[:, self.fingerprint_dim:]
+        )
+
+        return output.astype("float32")  # Ensure output is float32 for compatibility
 
 class SimpleMLP(nn.Module):
     """
@@ -137,6 +175,7 @@ class MD4(nn.Module):
     topp: float = 0.98
     model_sharding: bool = False
     fingerprint_dim: int = 0
+    fingerprint_adapter: bool = False
     raw_fingerprint_dim: int = 0
     atom_type_size: int = 0
 
@@ -146,8 +185,11 @@ class MD4(nn.Module):
         if self.classes > 0:
             self.cond_embeddings = nn.Embed(self.classes, self.feature_dim)
         if self.fingerprint_dim > 0:
-            if self.raw_fingerprint_dim > 0 and self.raw_fingerprint_dim != self.fingerprint_dim:
-                self.cond_conversion = nn.Dense(features=self.fingerprint_dim, name="cond_conversion")
+            if self.fingerprint_adapter and self.raw_fingerprint_dim != self.fingerprint_dim:
+                self.fp_adapter = FingerprintAdapter(
+                    raw_fingerprint_dim=self.raw_fingerprint_dim,
+                    fingerprint_dim=self.fingerprint_dim
+                )
 
             self.cond_embeddings = SimpleMLP(features=[self.fingerprint_dim // 2, self.feature_dim * 2, self.feature_dim, self.feature_dim])
         if self.atom_type_size > 0:
@@ -188,15 +230,15 @@ class MD4(nn.Module):
         if conditioning is not None:
             if isinstance(conditioning, dict):
                 _cond = conditioning["fingerprint"]
-                if self.raw_fingerprint_dim > 0 and self.raw_fingerprint_dim != self.fingerprint_dim:
+                if self.fingerprint_adapter and self.raw_fingerprint_dim != self.fingerprint_dim:
                     # Convert raw fingerprint to the desired dimension
                     if conditioning["fingerprint"].shape[1] != self.raw_fingerprint_dim:
                         # Print stack trace for debugging
                         raise ValueError(
                             f"Expected fingerprint shape {self.raw_fingerprint_dim}, got {conditioning['fingerprint'].shape[1]}"
                         )
-                    _cond = nn.sigmoid(self.cond_conversion(conditioning["fingerprint"]))
-
+                    # _cond = nn.sigmoid(self.cond_conversion(conditioning["fingerprint"]))
+                    _cond = self.fp_adapter(conditioning["fingerprint"])
 
                 if "atom_types" in conditioning:
                     atom_conditioning = self.atom_embeddings(conditioning["atom_types"])

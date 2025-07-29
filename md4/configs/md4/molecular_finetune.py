@@ -32,6 +32,7 @@ def get_config() -> config_dict.ConfigDict:
   # t or none (removes time dependence)
   config.time_features = "t"
   config.cont_time = True
+  config.fingerprint_adapter = False
   config.raw_fingerprint_dim = 4096
   config.fingerprint_dim = 2048
   config.old_config = "md4/configs/md4/molecular.py"
@@ -46,23 +47,23 @@ def get_config() -> config_dict.ConfigDict:
   config.dropout_rate = 0.02
 
   config.num_heads = 16
-  config.mlp_type = "geglu"
+  config.mlp_type = "swiglu"
   config.depth_scaled_init = True
   config.cond_type = "adaln_zero"
 
-  config.learning_rate = 6e-5
+  config.learning_rate = 1e-5
   config.learning_rate_schedule = "cosine"
-  config.warmup_steps = 100
-  config.weight_decay = 1e-08
+  config.warmup_steps = 200
+  config.weight_decay = 1e-06
   config.clip = 0.0
   config.b2 = 0.999
   config.num_epochs = -1
   config.ema_rate = 0.9999
   # If num_train_steps==-1 then the number of training steps is calculated from
   # num_epochs.
-  config.num_train_steps = 10_000
+  config.num_train_steps = 100_000
   # Evaluates for a full epoch if num_eval_steps==-1.
-  config.num_eval_steps = 25
+  config.num_eval_steps = 100
   config.batch_size = 512
   config.num_microbatches = 1
   config.per_device_batch_size = -1
@@ -79,9 +80,9 @@ def get_config() -> config_dict.ConfigDict:
   config.topp = 0.98
 
   config.log_loss_every_steps = 1000
-  config.eval_every_steps = 1000
-  config.checkpoint_every_steps = 1000
-  config.checkpoint_keep_period = 4000
+  config.eval_every_steps = 2000
+  config.checkpoint_every_steps = 2000
+  config.checkpoint_keep_period = 6000
 
   # Single integer or tuple. If None will use (XManager ID, work unit).
   config.seed = 88
