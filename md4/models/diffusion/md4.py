@@ -84,6 +84,7 @@ class FingerprintAdapter(nn.Module):
     """
     raw_fingerprint_dim: int = 4096
     fingerprint_dim: int = 2048
+    layers: int = 4
 
     @nn.compact
     def __call__(self, x):
@@ -96,13 +97,16 @@ class FingerprintAdapter(nn.Module):
         Returns:
             The adapted fingerprint.
         """
+
+        for i in range(self.layers - 1):
+            x = nn.Dense(
+                features=self.raw_fingerprint_dim // 2,
+                name=f"fingerprint_adapter_dense_{i}"
+            )(x)
+            x = nn.swish(x)
+
         x = nn.Dense(
-            features=self.raw_fingerprint_dim // 2,
-            name="fingerprint_adapter_dense"
-        )(x)
-        x = nn.relu(x)
-        x = nn.Dense(
-            features=self.raw_fingerprint_dim // 2,
+            features=self.fingerprint_dim,
             name="fingerprint_adapter_out"
         )(x)
         logits = x
@@ -319,11 +323,14 @@ class MD4(nn.Module):
         return jnp.array(0.0)
     
     def fp_ce_loss(self, logits, labels):
-        labels = jnp.astype(labels, logits.dtype)
-        log_p = jax.nn.log_sigmoid(logits)
-        # log(1 - sigmoid(x)) = log_sigmoid(-x), the latter more numerically stable
-        log_not_p = jax.nn.log_sigmoid(-logits)
-        return -labels * log_p - (1.0 - labels) * log_not_p
+        gamma = 2.0
+        labels  = labels.astype(logits.dtype)
+        probas  = jax.nn.sigmoid(logits)
+        pt      = labels * probas + (1.0 - labels) * (1.0 - probas)
+
+        ce      = -labels * jnp.log(probas + 1e-8) - (1.0 - labels) * jnp.log(1.0 - probas + 1e-8)
+        loss    = jnp.power(1.0 - pt, gamma) * ce
+        return jnp.mean(loss)
     
     def bracket_loss(self, logits): 
         # 2. Probability mass for open / close brackets

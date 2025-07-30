@@ -38,6 +38,18 @@ def get_config() -> config_dict.ConfigDict:
   config.old_config = "md4/configs/md4/molecular.py"
   config.frozen = True
   config.partial_load = True
+  
+  # Frozen parameter configuration
+  # Note: paths are matched using 'in' operator against the parameter path tuple
+  # e.g., for parameter path ('transformer', 'layer_0', 'fp_adapter', 'kernel')
+  # - "fp_adapter" in path would match (exact string match in tuple)
+  # - "layer_0" in path would match
+  # - "transformer" in path would match
+  config.frozen_paths = []  # Paths to freeze (empty means freeze all except unfrozen_paths)
+  config.unfrozen_paths = ["fp_adapter"]  # Paths to keep unfrozen
+  
+  # Adapter initialization paths (for special initialization)
+  config.adapter_init_paths = ["fp_adapter"]
 
 
   config.feature_dim = 64
@@ -53,9 +65,9 @@ def get_config() -> config_dict.ConfigDict:
   config.depth_scaled_init = True
   config.cond_type = "adaln_zero"
 
-  config.learning_rate = 1e-5
+  config.learning_rate = 2e-5
   config.learning_rate_schedule = "constant"
-  config.warmup_steps = 200
+  config.warmup_steps = 1000
   config.weight_decay = 1e-06
   config.clip = 0.0
   config.b2 = 0.999
@@ -63,7 +75,7 @@ def get_config() -> config_dict.ConfigDict:
   config.ema_rate = 0.9999
   # If num_train_steps==-1 then the number of training steps is calculated from
   # num_epochs.
-  config.num_train_steps = 10_000
+  config.num_train_steps = 100_000
   # Evaluates for a full epoch if num_eval_steps==-1.
   config.num_eval_steps = 100
   config.batch_size = 512

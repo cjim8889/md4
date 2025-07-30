@@ -46,23 +46,9 @@ from md4 import sampling
 from md4 import utils
 from md4.models import utils as model_utils
 from md4 import partial_load_utils
+from md4 import state_utils
 
-
-@flax.struct.dataclass
-class TrainState:
-    """State of the model and the training.
-
-    This includes parameters, statistics and optimizer.
-    """
-
-    rng: jnp.ndarray
-    step: int
-    params: Any
-    ema_params: Any
-    opt_state: optax.OptState
-    state: Any
-
-def merge_batch_stats(replicated_state: TrainState) -> TrainState:
+def merge_batch_stats(replicated_state: state_utils.TrainState) -> state_utils.TrainState:
     """Merge model batch stats."""
     if jax.tree.leaves(replicated_state.state):
         cross_replica_mean = jax.pmap(lambda x: jax.lax.pmean(x, "batch"), "batch")
@@ -103,161 +89,6 @@ def _get_checkpoint_manager(
     )
 
 
-def create_frozen_train_state(
-    config: ml_collections.ConfigDict,
-    rng: jnp.ndarray,
-    input_shape: Sequence[int] | Mapping[str, Sequence[int]],
-    schedule_fn: Callable[[Any], Any],
-) -> tuple[nn.Module, optax.GradientTransformation, TrainState, Any]:
-    """Create and initialize the model."""
-    model = model_utils.get_model(config)
-
-    conditioning = get_dummy_conditioning(config, input_shape)
-
-    rng, sample_rng, init_rng = jax.random.split(rng, 3)
-    dummy_input = jnp.ones(input_shape, dtype="int32")
-
-    output, variables = model.init_with_output(
-        {"sample": sample_rng, "params": init_rng},
-        dummy_input,
-        cond=conditioning,
-        train=False,
-    )
-
-    metric_keys = sorted(list(output.keys()) + ["learning_rate"])
-    logging.info("metric_keys: %s", metric_keys)
-    metrics_class = create_metrics_class_from_keys(metric_keys)
-    state, params = flax.core.pop(variables, "params")
-    del variables
-    parameter_overview.log_parameter_overview(
-        state, msg="############# state #############"
-    )
-    parameter_overview.log_parameter_overview(
-        params, msg="############# params #############"
-    )
-
-    def _should_freeze(path, v) -> bool:
-        if "fp_adapter" in path:
-            return False
-        
-        return True
-
-    mask = traverse_util.path_aware_map(
-        _should_freeze, params
-    )
-
-    def _initialise_adapter(path, v):
-        if "fp_adapter" in path:
-            if "kernel" in path:
-                return jnp.eye(v.shape[0], v.shape[1], dtype=v.dtype)
-            elif "bias" in path:
-                return jnp.zeros(v.shape, dtype=v.dtype)
-        return v
-
-    params = traverse_util.path_aware_map(
-        _initialise_adapter, params
-    )
-
-    mask["cond_embeddings"]["cond_dense_0"]["kernel"] = False
-    mask["cond_embeddings"]["cond_dense_0"]["bias"] = False
-
-    adam = optax.transforms.selective_transform(
-        optax.adamw(
-            schedule_fn,
-            b1=0.9,
-            b2=config.b2,
-            weight_decay=config.weight_decay,
-        ),
-        freeze_mask=mask,
-    )
-
-    optimizer = optax.chain(
-        optax.clip(config.clip) if config.clip > 0.0 else optax.identity(),
-        adam,
-    )
-
-    return (
-        model,
-        optimizer,
-        TrainState(
-            step=0,
-            rng=rng,
-            params=params,
-            ema_params=copy.deepcopy(params) if config.ema_rate > 0.0 else None,
-            opt_state=optimizer.init(params),
-            state=state,
-        ),
-        metrics_class,
-    )
-
-
-def create_train_state(
-    config: ml_collections.ConfigDict,
-    rng: jnp.ndarray,
-    input_shape: Sequence[int] | Mapping[str, Sequence[int]],
-    schedule_fn: Callable[[Any], Any],
-) -> tuple[nn.Module, optax.GradientTransformation, TrainState, Any]:
-    """Create and initialize the model."""
-    model = model_utils.get_model(config)
-
-    conditioning = get_dummy_conditioning(config, input_shape)
-    rng, sample_rng, init_rng = jax.random.split(rng, 3)
-    dummy_input = jnp.ones(input_shape, dtype="int32")
-
-    output, variables = model.init_with_output(
-        {"sample": sample_rng, "params": init_rng},
-        dummy_input,
-        cond=conditioning,
-        train=False,
-    )
-    metric_keys = sorted(list(output.keys()) + ["learning_rate"])
-    logging.info("metric_keys: %s", metric_keys)
-    metrics_class = create_metrics_class_from_keys(metric_keys)
-    state, params = flax.core.pop(variables, "params")
-    del variables
-    parameter_overview.log_parameter_overview(
-        state, msg="############# state #############"
-    )
-    parameter_overview.log_parameter_overview(
-        params, msg="############# params #############"
-    )
-
-    optimizer = optax.chain(
-        optax.clip(config.clip) if config.clip > 0.0 else optax.identity(),
-        optax.adamw(
-            schedule_fn,
-            b1=0.9,
-            b2=config.b2,
-            weight_decay=config.weight_decay,
-        ),
-    )
-    return (
-        model,
-        optimizer,
-        TrainState(
-            step=0,
-            rng=rng,
-            params=params,
-            ema_params=copy.deepcopy(params) if config.ema_rate > 0.0 else None,
-            opt_state=optimizer.init(params),
-            state=state,
-        ),
-        metrics_class,
-    )
-
-
-def create_metrics_class_from_keys(metric_keys):
-    """Create train/eval metrics collection from dictionary."""
-    average_keys = []
-    stats = dict(
-        (k, metrics.Average.from_output(k))
-        if (k in average_keys) or ("loss" in k)
-        else (k, metrics.LastValue.from_output(k))
-        for k in metric_keys
-    )
-    return metrics.Collection.create(**stats)
-
-
 def cosine_decay(lr: float, current_step: float, total_steps: float) -> float:
     ratio = jnp.maximum(0.0, current_step / total_steps)
     mult = 0.5 * (1.0 + jnp.cos(jnp.pi * ratio))
@@ -291,67 +122,6 @@ def get_learning_rate(
     return lr * warmup  # pytype: disable=bad-return-type  # jax-types
 
 
-def get_conditioning_from_batch(batch):
-    """Extract conditioning information from batch data.
-    
-    Handles all combinations of fingerprint, true_fingerprint, and atom_types.
-    """
-    if "label" in batch:
-        return batch["label"].astype("int32")
-    
-    # Build conditioning dict based on available fields
-    conditioning = {}
-    
-    # Handle fingerprint (prioritize true_fingerprint if available)
-    if "true_fingerprint" in batch:
-        conditioning["fingerprint"] = batch["true_fingerprint"].astype("float32")
-    elif "fingerprint" in batch:
-        conditioning["fingerprint"] = batch["fingerprint"].astype("float32")
-    
-    # Handle atom_types
-    if "atom_types" in batch:
-        conditioning["atom_types"] = batch["atom_types"].astype("int32")
-    
-    # Return None if no conditioning information is available
-    return conditioning if conditioning else None
-
-
-def get_dummy_conditioning(config, input_shape):
-    """Create dummy conditioning for model initialization.
-    
-    Handles all combinations based on config settings.
-    """
-    if config.classes > 0:
-        return jnp.zeros(input_shape[0], dtype="int32")
-    
-    conditioning = {}
-    
-    # Handle fingerprint dimension
-    if config.fingerprint_dim > 0:
-        fingerprint_dim = (
-            config.raw_fingerprint_dim
-            if config.get("raw_fingerprint_dim", 0) > 0
-            else config.fingerprint_dim
-        )
-        conditioning["fingerprint"] = jnp.zeros(
-            (input_shape[0], fingerprint_dim), dtype="float32"
-        )
-    
-    # Handle atom types
-    if config.atom_type_size > 0:
-        conditioning["atom_types"] = jnp.zeros(
-            (input_shape[0], config.pad_to_length), dtype="int32"
-        )
-    
-    if config.raw_fingerprint_dim > 0 and config.raw_fingerprint_dim != config.fingerprint_dim:
-        conditioning["true_fingerprint"] = jnp.zeros(
-            (input_shape[0], config.fingerprint_dim), dtype="float32"
-        )
-    
-    # Return None if no conditioning information is available
-    return conditioning if conditioning else None
-
-
 def loss_fn(params, state, rng, model, batch, train=False):
     """Loss function."""
     rng, sample_rng = jax.random.split(rng)
@@ -370,7 +140,7 @@ def loss_fn(params, state, rng, model, batch, train=False):
     else:
         raise ValueError("Unsupported targets/tasks.")
 
-    conditioning = get_conditioning_from_batch(batch)
+    conditioning = state_utils.get_conditioning_from_batch(batch)
 
     new_state = {}
     if train:
@@ -401,13 +171,13 @@ def merge_metrics(a_tree, b_tree):
 def train_step(
     model: nn.Module,
     optimizer: optax.GradientTransformation,
-    train_state: TrainState,
+    train_state: state_utils.TrainState,
     batch: Mapping[str, jnp.ndarray],
     learning_rate_fn: Callable[[int], float],
     train_metrics_class: Any,
     ema_rate: float = 0.0,
     num_microbatches: int | None = None,
-) -> tuple[TrainState, metrics.Collection]:
+) -> tuple[state_utils.TrainState, metrics.Collection]:
     """Perform a single training step."""
     logging.info("train_step(batch=%s)", batch)
     rng, new_rng = jax.random.split(train_state.rng)
@@ -529,7 +299,7 @@ def train_step(
 def eval_step(
     model: nn.Module,
     rng: jnp.ndarray,
-    train_state: TrainState,
+    train_state: state_utils.TrainState,
     batch: Mapping[str, jnp.ndarray],
     eval_metrics_class: Any,
     ema_rate: float = 0.0,
@@ -548,7 +318,7 @@ def eval_step(
 def evaluate(
     p_eval_step: Any,
     rng: jnp.ndarray,
-    train_state: TrainState,
+    train_state: state_utils.TrainState,
     eval_loader: grain.DataLoader,
     num_eval_steps: int = -1,
 ):
@@ -639,7 +409,7 @@ def train_and_evaluate(
 
     if config.get("frozen", False):
         logging.info("Creating frozen train state.")
-        model, optimizer, train_state, metrics_class = create_frozen_train_state(  # pylint: disable=invalid-name
+        model, optimizer, train_state, metrics_class = state_utils.create_train_state(  # pylint: disable=invalid-name
             config,
             model_rng,
             input_shape=(per_device_batch_size,) + data_shape,
@@ -647,7 +417,7 @@ def train_and_evaluate(
         )
     else:
         logging.info("Creating train state.")
-        model, optimizer, train_state, metrics_class = create_train_state(
+        model, optimizer, train_state, metrics_class = state_utils.create_train_state(
             config,
             model_rng,
             input_shape=(per_device_batch_size,) + data_shape,
@@ -676,7 +446,7 @@ def train_and_evaluate(
                     if config.dataset not in ["pubchem_large", "msg_finetune"]
                     else None,
                     checkpoint_manager=load_checkpoint_manager,
-                    create_train_state_fn=create_train_state,
+                    create_train_state_fn=state_utils.create_train_state,
                     schedule_fn=schedule_fn,
                     per_device_batch_size=per_device_batch_size,
                     data_shape=data_shape,
@@ -798,7 +568,7 @@ def train_and_evaluate(
                             if "smiles" not in dummy_batch
                             else dummy_batch["smiles"]
                         )
-                        conditioning = get_conditioning_from_batch(dummy_batch)
+                        conditioning = state_utils.get_conditioning_from_batch(dummy_batch)
 
                         samples = sampling.generate(
                             model,
