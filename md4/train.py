@@ -62,7 +62,6 @@ class TrainState:
     opt_state: optax.OptState
     state: Any
 
-
 def merge_batch_stats(replicated_state: TrainState) -> TrainState:
     """Merge model batch stats."""
     if jax.tree.leaves(replicated_state.state):
@@ -113,31 +112,7 @@ def create_frozen_train_state(
     """Create and initialize the model."""
     model = model_utils.get_model(config)
 
-    if config.classes > 0:
-        conditioning = jnp.zeros(input_shape[0], dtype="int32")
-    elif config.fingerprint_dim > 0 and config.atom_type_size > 0:
-        conditioning = {
-            "fingerprint": jnp.zeros(
-                (input_shape[0], config.fingerprint_dim), dtype="int32"
-            ),
-            "atom_types": jnp.zeros(
-                (input_shape[0], config.pad_to_length), dtype="int32"
-            ),
-        }
-    elif config.fingerprint_dim > 0:
-        conditioning = {
-            "fingerprint": jnp.zeros(
-                (
-                    input_shape[0],
-                    config.raw_fingerprint_dim
-                    if config.get("raw_fingerprint_dim", 0) > 0
-                    else config.fingerprint_dim,
-                ),
-                dtype="int32",
-            ),
-        }
-    else:
-        conditioning = None
+    conditioning = get_dummy_conditioning(config, input_shape)
 
     rng, sample_rng, init_rng = jax.random.split(rng, 3)
     dummy_input = jnp.ones(input_shape, dtype="int32")
@@ -171,23 +146,36 @@ def create_frozen_train_state(
         _should_freeze, params
     )
 
+    def _initialise_adapter(path, v):
+        if "fp_adapter" in path:
+            if "kernel" in path:
+                return jnp.eye(v.shape[0], v.shape[1], dtype=v.dtype)
+            elif "bias" in path:
+                return jnp.zeros(v.shape, dtype=v.dtype)
+        return v
+
+    params = traverse_util.path_aware_map(
+        _initialise_adapter, params
+    )
+
     mask["cond_embeddings"]["cond_dense_0"]["kernel"] = False
     mask["cond_embeddings"]["cond_dense_0"]["bias"] = False
 
-    freezer = optax.transforms.freeze(
-        mask
-    )
-
-    optimizer = optax.chain(
-        optax.clip(config.clip) if config.clip > 0.0 else optax.identity(),
+    adam = optax.transforms.selective_transform(
         optax.adamw(
             schedule_fn,
             b1=0.9,
             b2=config.b2,
             weight_decay=config.weight_decay,
         ),
-        freezer,
+        freeze_mask=mask,
     )
+
+    optimizer = optax.chain(
+        optax.clip(config.clip) if config.clip > 0.0 else optax.identity(),
+        adam,
+    )
+
     return (
         model,
         optimizer,
@@ -212,31 +200,7 @@ def create_train_state(
     """Create and initialize the model."""
     model = model_utils.get_model(config)
 
-    if config.classes > 0:
-        conditioning = jnp.zeros(input_shape[0], dtype="int32")
-    elif config.fingerprint_dim > 0 and config.atom_type_size > 0:
-        conditioning = {
-            "fingerprint": jnp.zeros(
-                (input_shape[0], config.fingerprint_dim), dtype="int32"
-            ),
-            "atom_types": jnp.zeros(
-                (input_shape[0], config.pad_to_length), dtype="int32"
-            ),
-        }
-    elif config.fingerprint_dim > 0:
-        conditioning = {
-            "fingerprint": jnp.zeros(
-                (
-                    input_shape[0],
-                    config.raw_fingerprint_dim
-                    if config.get("raw_fingerprint_dim", 0) > 0
-                    else config.fingerprint_dim,
-                ),
-                dtype="int32",
-            ),
-        }
-    else:
-        conditioning = None
+    conditioning = get_dummy_conditioning(config, input_shape)
     rng, sample_rng, init_rng = jax.random.split(rng, 3)
     dummy_input = jnp.ones(input_shape, dtype="int32")
 
@@ -327,6 +291,67 @@ def get_learning_rate(
     return lr * warmup  # pytype: disable=bad-return-type  # jax-types
 
 
+def get_conditioning_from_batch(batch):
+    """Extract conditioning information from batch data.
+    
+    Handles all combinations of fingerprint, true_fingerprint, and atom_types.
+    """
+    if "label" in batch:
+        return batch["label"].astype("int32")
+    
+    # Build conditioning dict based on available fields
+    conditioning = {}
+    
+    # Handle fingerprint (prioritize true_fingerprint if available)
+    if "true_fingerprint" in batch:
+        conditioning["fingerprint"] = batch["true_fingerprint"].astype("float32")
+    elif "fingerprint" in batch:
+        conditioning["fingerprint"] = batch["fingerprint"].astype("float32")
+    
+    # Handle atom_types
+    if "atom_types" in batch:
+        conditioning["atom_types"] = batch["atom_types"].astype("int32")
+    
+    # Return None if no conditioning information is available
+    return conditioning if conditioning else None
+
+
+def get_dummy_conditioning(config, input_shape):
+    """Create dummy conditioning for model initialization.
+    
+    Handles all combinations based on config settings.
+    """
+    if config.classes > 0:
+        return jnp.zeros(input_shape[0], dtype="int32")
+    
+    conditioning = {}
+    
+    # Handle fingerprint dimension
+    if config.fingerprint_dim > 0:
+        fingerprint_dim = (
+            config.raw_fingerprint_dim
+            if config.get("raw_fingerprint_dim", 0) > 0
+            else config.fingerprint_dim
+        )
+        conditioning["fingerprint"] = jnp.zeros(
+            (input_shape[0], fingerprint_dim), dtype="float32"
+        )
+    
+    # Handle atom types
+    if config.atom_type_size > 0:
+        conditioning["atom_types"] = jnp.zeros(
+            (input_shape[0], config.pad_to_length), dtype="int32"
+        )
+    
+    if config.raw_fingerprint_dim > 0 and config.raw_fingerprint_dim != config.fingerprint_dim:
+        conditioning["true_fingerprint"] = jnp.zeros(
+            (input_shape[0], config.fingerprint_dim), dtype="float32"
+        )
+    
+    # Return None if no conditioning information is available
+    return conditioning if conditioning else None
+
+
 def loss_fn(params, state, rng, model, batch, train=False):
     """Loss function."""
     rng, sample_rng = jax.random.split(rng)
@@ -345,19 +370,7 @@ def loss_fn(params, state, rng, model, batch, train=False):
     else:
         raise ValueError("Unsupported targets/tasks.")
 
-    if "label" in batch:
-        conditioning = batch["label"].astype("int32")
-    elif "fingerprint" in batch and "atom_types" in batch:
-        conditioning = {
-            "fingerprint": batch["fingerprint"].astype("int32"),
-            "atom_types": batch["atom_types"].astype("int32"),
-        }
-    elif "fingerprint" in batch:
-        conditioning = {
-            "fingerprint": batch["fingerprint"].astype("int32"),
-        }
-    else:
-        conditioning = None
+    conditioning = get_conditioning_from_batch(batch)
 
     new_state = {}
     if train:
@@ -625,6 +638,7 @@ def train_and_evaluate(
     data_shape = input_pipeline.get_data_shape(config)
 
     if config.get("frozen", False):
+        logging.info("Creating frozen train state.")
         model, optimizer, train_state, metrics_class = create_frozen_train_state(  # pylint: disable=invalid-name
             config,
             model_rng,
@@ -632,6 +646,7 @@ def train_and_evaluate(
             schedule_fn=schedule_fn,
         )
     else:
+        logging.info("Creating train state.")
         model, optimizer, train_state, metrics_class = create_train_state(
             config,
             model_rng,
@@ -783,25 +798,7 @@ def train_and_evaluate(
                             if "smiles" not in dummy_batch
                             else dummy_batch["smiles"]
                         )
-                        if "label" in dummy_batch:
-                            conditioning = dummy_batch["label"].astype("int32")
-                        elif (
-                            "fingerprint" in dummy_batch and "atom_types" in dummy_batch
-                        ):
-                            conditioning = {
-                                "fingerprint": dummy_batch["fingerprint"].astype(
-                                    "int32"
-                                ),
-                                "atom_types": dummy_batch["atom_types"].astype("int32"),
-                            }
-                        elif "fingerprint" in dummy_batch:
-                            conditioning = {
-                                "fingerprint": dummy_batch["fingerprint"].astype(
-                                    "int32"
-                                ),
-                            }
-                        else:
-                            conditioning = None
+                        conditioning = get_conditioning_from_batch(dummy_batch)
 
                         samples = sampling.generate(
                             model,
