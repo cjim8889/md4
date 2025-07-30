@@ -68,7 +68,7 @@ def preprocess_or_load_msg_finetune(
         # Print Data Shape
         print(f"Train data: {len(train_data)} samples")
         print(f"Test data: {len(test_data)} samples")
-        print(f"Sample train data: {train_data[:2][1].shape}")
+        print(f"Sample train data: {train_data[:2][1]}")
 
         from tqdm import tqdm
 
@@ -78,7 +78,10 @@ def preprocess_or_load_msg_finetune(
                     shape=(max_length,), dtype=np.int32
                 ),
                 "fingerprint": tfds.features.Tensor(
-                    shape=(fp_bits,), dtype=np.int8  # MSG fingerprints are int8
+                    shape=(fp_bits,), dtype=np.float32  # MSG fingerprints are float32
+                ),
+                "true_fingerprint": tfds.features.Tensor(
+                    shape=(2048,), dtype=np.float32  # True fingerprint for loss calculation
                 ),
             }
         )
@@ -130,7 +133,7 @@ def create_msg_finetune_datasets(config: config_dict.ConfigDict, seed: int):
     pubchem_builder = preprocess_or_load_msg_finetune(
         data_dir=config.get("data_dir", "data/msg_finetune"),
         tokenizer=tokenizer,
-        version="1.0.0",
+        version="1.0.1",
         max_length=max_length,
         num_workers=config.get("num_workers", 4)
     )

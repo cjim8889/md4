@@ -110,42 +110,69 @@ def process_and_write_msg_tfrecord(args):
     shard_index, total_shards, data_tuples, split, output_dir, features, tokenizer, max_length = args[:8]
 
     import tensorflow as tf
-    from rdkit.Chem import MolFromInchi, MolToSmiles
+    from rdkit.Chem import MolFromInchi, MolToSmiles, rdFingerprintGenerator
     import os
 
     shard_filename = os.path.join(output_dir, f"msg_finetune-{split}.tfrecord-{shard_index:05d}-of-{total_shards:05d}")
     
+    # Create Morgan fingerprint generator (modern approach)
+    mfpgen = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+    
+    written_count = 0
+    skipped_count = 0
+    error_count = 0
+    
     with tf.io.TFRecordWriter(shard_filename) as writer:
-        written_count = 0
         for inchi, fingerprint in data_tuples:
-            # Convert INCHI to SMILES
             try:
+                # Convert INCHI to RDKit molecule object
                 mol = MolFromInchi(inchi)
-                if mol is not None:
-                    smiles_str = MolToSmiles(mol)
-                    
-                    # Tokenize SMILES
-                    smiles = tokenizer.encode(
-                        smiles_str,
-                        add_special_tokens=True,
-                        padding="max_length",
-                        truncation=True,
-                        max_length=max_length,
-                        return_tensors="np",
-                    ).reshape(-1).astype(np.int32)
+                if mol is None:
+                    skipped_count += 1
+                    continue
+                
+                # Generate canonical SMILES (no stereochemistry, standardized)
+                canonical_smiles = MolToSmiles(mol, isomericSmiles=False, canonical=True)
+                if not canonical_smiles:
+                    skipped_count += 1
+                    continue
+                
+                # Compute true fingerprint directly from molecule using modern generator (no filtering)
+                try:
+                    true_fingerprint = mfpgen.GetFingerprintAsNumPy(mol).astype(np.int8)
+                except Exception:
+                    skipped_count += 1
+                    continue
+                
+                # Tokenize canonical SMILES
+                smiles_tokens = tokenizer.encode(
+                    canonical_smiles,
+                    add_special_tokens=True,
+                    padding="max_length",
+                    truncation=True,
+                    max_length=max_length,
+                    return_tensors="np",
+                ).reshape(-1).astype(np.int32)
 
-                    # Convert fingerprint to float32 and ensure correct shape
-                    fingerprint_array = np.array(fingerprint, dtype=np.float32)
-
-                    serialised = features.serialize_example({
-                        "smiles": smiles,
-                        "fingerprint": fingerprint_array,
-                    })
-                    writer.write(serialised)
-                    written_count += 1
+                # Ensure fingerprints are in correct format and shape
+                fingerprint_array = np.array(fingerprint, dtype=np.float32)
+                true_fingerprint_array = np.array(true_fingerprint, dtype=np.float32)
+                
+                # Serialize and write to TFRecord
+                serialised = features.serialize_example({
+                    "smiles": smiles_tokens,
+                    "fingerprint": fingerprint_array,
+                    "true_fingerprint": true_fingerprint_array,
+                })
+                writer.write(serialised)
+                written_count += 1
+                
             except Exception as e:
-                print(f"Error processing INCHI: {e}")
+                error_count += 1
+                if error_count <= 5:  # Only print first few errors to avoid spam
+                    print(f"Error processing INCHI {inchi[:50]}...: {str(e)[:100]}")
                 continue
 
-    print(f"Shard {shard_index} processed: {written_count} entries written to {shard_filename}")
+    print(f"Shard {shard_index} processed: {written_count} entries written, {skipped_count} skipped, {error_count} errors")
+    print(f"Output file: {shard_filename}")
     return written_count

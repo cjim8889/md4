@@ -18,7 +18,6 @@ from tqdm import tqdm
 
 try:
     from rdkit import Chem
-
     RDKIT_AVAILABLE = True
 except ImportError:
     RDKIT_AVAILABLE = False
@@ -26,7 +25,7 @@ except ImportError:
 
 # Import MD4 modules
 from md4 import rdkit_utils, sampling, train, utils
-from md4.configs.md4 import molecular_finetune, molecular
+from md4.configs.md4 import molecular_finetune
 
 
 class MolecularEvaluator:
@@ -46,6 +45,13 @@ class MolecularEvaluator:
         self.tokenizer = self._load_tokenizer()
         self.model, self.train_state = self._load_model_and_state()
         self.rng = utils.get_rng(42)  # Fixed seed for reproducible evaluation
+        
+        # Pre-replicate training state for multi-device generation to avoid replicating it every batch
+        # Since training state doesn't change during inference, we can replicate it once at startup
+        # and reuse it for all batches, providing significant performance improvement
+        self.replicated_train_state = None
+        if jax.device_count() > 1:
+            self.replicated_train_state = flax_utils.replicate(self.train_state)
 
         # Debug: Check if parameters are loaded correctly
         print("Checking parameter values after checkpoint loading...")
@@ -93,21 +99,10 @@ class MolecularEvaluator:
                 else "No keys method",
             )
 
-        # Handle EMA params differently for debug vs batch mode
-        # Debug mode uses simple_generate which accesses train_state.params directly
-        # Batch mode uses generate which accesses train_state.ema_params via get_attr
+        # Log EMA availability
         if self.train_state.ema_params is not None:
-            # For debug mode (simple_generate), replace params with EMA params
-            self.train_state_debug = self.train_state.replace(
-                params=self.train_state.ema_params
-            )
-            # For batch mode (generate), keep original structure so get_attr works
-            self.train_state_batch = self.train_state
-            print("EMA weights available - will be used appropriately for each mode")
+            print("EMA weights available - will be used for generation")
         else:
-            # No EMA params available, use same state for both modes
-            self.train_state_debug = self.train_state
-            self.train_state_batch = self.train_state
             print("WARNING: No EMA params available, using regular params")
 
     def _setup_output_paths(self):
@@ -121,7 +116,7 @@ class MolecularEvaluator:
 
     def _load_config(self) -> ml_collections.ConfigDict:
         """Load molecular configuration."""
-        config = molecular.get_config()
+        config = molecular_finetune.get_config()
         config.batch_size = self.args.batch_size
         return config
 
@@ -159,15 +154,24 @@ class MolecularEvaluator:
         data_shape = (self.config.max_length,)
 
         # Create dummy schedule function (not used for inference)
-        schedule_fn = lambda step: self.config.learning_rate
+        def schedule_fn(step):
+            return self.config.learning_rate
 
         # Create model and train state
-        model, _, train_state, _ = train.create_train_state(
-            self.config,
-            rng,
-            input_shape=(self.config.batch_size * 10,) + data_shape,
-            schedule_fn=schedule_fn,
-        )
+        if self.config.get("frozen", False):
+            model, _, train_state, _ = train.create_frozen_train_state(
+                self.config,
+                rng,
+                input_shape=(self.config.batch_size * 10,) + data_shape,
+                schedule_fn=schedule_fn,
+            )
+        else:
+            model, _, train_state, _ = train.create_train_state(
+                self.config,
+                rng,
+                input_shape=(self.config.batch_size * 10,) + data_shape,
+                schedule_fn=schedule_fn,
+            )
 
         # Skip checkpoint loading if --no_checkpoint flag is used
         if self.args.no_checkpoint:
@@ -259,9 +263,9 @@ class MolecularEvaluator:
 
                 # Get fingerprints
                 predicted_fingerprint = (
-                    fingerprints_list[i]
+                    np.array(fingerprints_list[i], dtype=np.float32)
                     if i < len(fingerprints_list)
-                    else np.zeros(2048)
+                    else np.zeros(2048, dtype=np.float32)
                 )
                 original_fingerprint = (
                     features if isinstance(features, np.ndarray) else np.zeros(2048)
@@ -349,70 +353,16 @@ class MolecularEvaluator:
 
         return folded_predicted, bit_differences
 
-    def _generate_single_datapoint(
-        self, predicted_fingerprint: np.ndarray, original_fingerprint: np.ndarray
-    ) -> List[str]:
-        """Generate samples for a single datapoint using simple_generate."""
-        # Process fingerprint and get bit differences
-        processed_fp, bit_differences = self._process_fingerprints(
-            predicted_fingerprint[None, :],
-            original_fingerprint[None, :],
-            threshold=0.5,
-            mode=self.args.fingerprint_mode,
-        )
-        bit_diff = bit_differences[0]
-
-        print(
-            f"Fingerprint bit differences: {bit_diff}/2048 ({bit_diff / 2048 * 100:.1f}%)"
-        )
-
-        # Use the selected fingerprint for generation
-        if self.args.use_original_fingerprints:
-            # For original fingerprints, use them directly (they should already be processed)
-            fp_for_conditioning = original_fingerprint
-        else:
-            # For predicted fingerprints, use the processed version
-            fp_for_conditioning = processed_fp[0]
-
-        # Prepare conditioning
-        conditioning = {
-            "fingerprint": jnp.repeat(
-                jnp.array(fp_for_conditioning, dtype=jnp.int32)[None, :],
-                self.args.num_samples,
-                axis=0,
-            ),
-        }
-
-        # Generate samples - use appropriate train_state for debug mode (simple_generate)
-        self.rng, sample_rng = jax.random.split(self.rng)
-        
-        # Use debug train state which has EMA params moved to params
-        debug_train_state = self.train_state_debug
-        
-        samples = sampling.simple_generate(
-            sample_rng,
-            debug_train_state,
-            self.args.num_samples,
-            self.model,
-            conditioning=conditioning,
-        )
-
-        # Convert to SMILES strings
-        generated_smiles = []
-        for i in range(self.args.num_samples):
-            tokens = samples[i]
-            print(f"Generated tokens: {tokens}")
-            smiles = self.tokenizer.decode(
-                tokens, skip_special_tokens=False, clean_up_tokenization_spaces=True
-            )
-            generated_smiles.append(smiles)
-
-        return generated_smiles
-
-    def _generate_batch_samples(
+    def _generate_samples(
         self, predicted_fingerprints: np.ndarray, original_fingerprints: np.ndarray
     ) -> List[List[str]]:
-        """Generate samples for a batch using pmap."""
+        """Unified generation method that handles both single and multi-device scenarios."""
+        # Ensure fingerprints are 2D (batch_size, fingerprint_dim)
+        if predicted_fingerprints.ndim == 1:
+            predicted_fingerprints = predicted_fingerprints[None, :]
+        if original_fingerprints.ndim == 1:
+            original_fingerprints = original_fingerprints[None, :]
+            
         batch_size = predicted_fingerprints.shape[0]
 
         # Process fingerprints and get bit differences
@@ -423,23 +373,15 @@ class MolecularEvaluator:
             mode=self.args.fingerprint_mode,
         )
 
-        # Print average bit differences for the batch
-        avg_bit_diff = np.mean(bit_differences)
-        # print(
-        #     f"Average fingerprint bit differences for batch: {avg_bit_diff:.1f}/2048 ({avg_bit_diff / 2048 * 100:.1f}%)"
-        # )
-
         # Use the selected fingerprints for generation
         if self.args.use_original_fingerprints:
-            # For original fingerprints, use them directly (they should already be processed)
             fingerprints_for_conditioning = original_fingerprints
         else:
-            # For predicted fingerprints, use the processed version
             fingerprints_for_conditioning = processed_fingerprints
 
         # Expand for multiple samples per input
         expanded_fingerprints = jnp.repeat(
-            jnp.array(fingerprints_for_conditioning, dtype=jnp.int32),
+            jnp.array(fingerprints_for_conditioning, dtype=jnp.float32),
             self.args.num_samples,
             axis=0,
         )
@@ -451,57 +393,118 @@ class MolecularEvaluator:
             "fingerprint": expanded_fingerprints,
         }
 
-        # Handle multi-device distribution
+        # Handle device distribution
         num_devices = jax.device_count()
         
-        # Adjust total_samples to be divisible by num_devices to avoid padding
-        samples_per_device = total_samples // num_devices
-        if total_samples % num_devices != 0:
-            # Drop the remainder to avoid padding issues
-            adjusted_total_samples = samples_per_device * num_devices
-            print(f"Adjusting batch size from {total_samples} to {adjusted_total_samples} to fit {num_devices} devices")
-            
-            # Trim inputs and conditioning to the adjusted size
-            dummy_inputs = dummy_inputs[:adjusted_total_samples]
-            expanded_fingerprints = expanded_fingerprints[:adjusted_total_samples]
-            total_samples = adjusted_total_samples
+        # Check if we should use pmap (multi-device) or simple generation (single device)
+        use_pmap = num_devices > 1 and total_samples >= num_devices and self.replicated_train_state is not None
         
-        per_device_batch_size = total_samples // num_devices
+        if use_pmap:
+            # Multi-device path using pmap
+            # print(f"Using pmap with {num_devices} devices for generation")
+            
+            # Adjust total_samples to be divisible by num_devices to avoid padding
+            samples_per_device = total_samples // num_devices
+            if total_samples % num_devices != 0:
+                # Drop the remainder to avoid padding issues
+                adjusted_total_samples = samples_per_device * num_devices
+                print(f"Adjusting batch size from {total_samples} to {adjusted_total_samples} to fit {num_devices} devices")
+                
+                # Trim inputs and conditioning to the adjusted size
+                dummy_inputs = dummy_inputs[:adjusted_total_samples]
+                expanded_fingerprints = expanded_fingerprints[:adjusted_total_samples]
+                total_samples = adjusted_total_samples
+            
+            per_device_batch_size = total_samples // num_devices
 
-        # Reshape for pmap
-        dummy_inputs = dummy_inputs.reshape(
-            num_devices, per_device_batch_size, self.config.max_length
-        )
-        conditioning = {
-            "fingerprint": expanded_fingerprints.reshape(
-                num_devices, per_device_batch_size, -1
-            ),
-        }
+            # Reshape for pmap
+            dummy_inputs = dummy_inputs.reshape(
+                num_devices, per_device_batch_size, self.config.max_length
+            )
+            conditioning = {
+                "fingerprint": expanded_fingerprints.reshape(
+                    num_devices, per_device_batch_size, -1
+                ),
+            }
 
-        # Generate samples - follow the exact pattern from training code
-        # Use batch train state which keeps EMA params separate for get_attr access
-        batch_train_state = self.train_state_batch
-        replicated_train_state = flax_utils.replicate(batch_train_state)
-        self.rng, sample_rng = jax.random.split(self.rng)
-        replicated_rng = flax_utils.replicate(sample_rng)
+            # Generate samples using pmap - use pre-replicated training state
+            self.rng, sample_rng = jax.random.split(self.rng)
+            replicated_rng = flax_utils.replicate(sample_rng)
 
-        samples = sampling.generate(
-            model=self.model,
-            train_state=replicated_train_state,
-            rng=replicated_rng,
-            dummy_inputs=dummy_inputs,
-            conditioning=conditioning,
-        )
+            samples = sampling.generate(
+                self.model,
+                self.replicated_train_state,
+                replicated_rng,
+                dummy_inputs,
+                conditioning=conditioning,
+            )
 
-        # Collect results from all devices using all_gather like in training
-        all_samples = jax.pmap(
-            lambda x: jax.lax.all_gather(x, "batch"), axis_name="batch"
-        )(samples)
-        samples = flax_utils.unreplicate(all_samples)
-        samples = samples.reshape(-1, self.config.max_length)
+            # Collect results from all devices using all_gather
+            all_samples = jax.pmap(
+                lambda x: jax.lax.all_gather(x, "batch"), axis_name="batch"
+            )(samples)
+            samples = flax_utils.unreplicate(all_samples)
+            samples = samples.reshape(-1, self.config.max_length)
+            
+        else:
+            # Single device path using simple_generate or vmap
+            print(f"Using single device generation for {total_samples} samples")
+            
+            # For EMA params, we need to create appropriate variables
+            if self.train_state.ema_params is not None:
+                variables = {
+                    'params': self.train_state.ema_params,
+                    **self.train_state.state
+                }
+            else:
+                variables = {
+                    'params': self.train_state.params,
+                    **self.train_state.state
+                }
+            
+            self.rng, sample_rng = jax.random.split(self.rng)
+            
+            # Generate initial noise
+            zt = self.model.apply(
+                variables,
+                total_samples,
+                method=self.model.prior_sample,
+                rngs={'sample': sample_rng},
+            )
+            
+            self.rng, sample_rng = jax.random.split(self.rng)
+
+            # Diffusion sampling loop
+            def body_fn(i, zt):
+                return self.model.apply(
+                    variables,
+                    sample_rng,
+                    i,
+                    self.model.timesteps,
+                    zt,
+                    conditioning=conditioning,
+                    method=self.model.sample_step,
+                )
+
+            z0 = jax.lax.fori_loop(
+                lower=0, upper=self.model.timesteps, body_fun=body_fn, init_val=zt
+            )
+            
+            # Decode to tokens
+            samples = self.model.apply(
+                variables,
+                z0,
+                conditioning=conditioning,
+                method=self.model.decode,
+                rngs={'sample': self.rng},
+            )
+            
+            # samples should be tokens directly from decode method
+            # If it's a tuple, extract the first element
+            if isinstance(samples, tuple):
+                samples = samples[0]
 
         # Reshape to (batch_size, num_samples_per_input, max_length)
-        # Note: we may have fewer samples if we trimmed for device alignment
         actual_samples_per_input = total_samples // batch_size
         samples = samples.reshape(batch_size, actual_samples_per_input, -1)
 
@@ -509,10 +512,21 @@ class MolecularEvaluator:
         batch_results = []
         for batch_idx in range(batch_size):
             sample_list = []
-            smiles = self.tokenizer.batch_decode(
-                samples[batch_idx], skip_special_tokens=True, clean_up_tokenization_spaces=True
-            )
-            sample_list.extend(smiles)
+            if batch_size == 1 and actual_samples_per_input <= 10:
+                # For debug mode, decode individually and show tokens
+                for i in range(actual_samples_per_input):
+                    tokens = samples[batch_idx, i]
+                    print(f"Generated tokens: {tokens}")
+                    smiles = self.tokenizer.decode(
+                        tokens, skip_special_tokens=False, clean_up_tokenization_spaces=True
+                    )
+                    sample_list.append(smiles)
+            else:
+                # For batch mode, decode in batch
+                smiles = self.tokenizer.batch_decode(
+                    samples[batch_idx], skip_special_tokens=True, clean_up_tokenization_spaces=True
+                )
+                sample_list.extend(smiles)
             batch_results.append(sample_list)
 
         return batch_results
@@ -564,14 +578,8 @@ class MolecularEvaluator:
                 if features is None:
                     continue
 
-                predicted_fingerprint = (
-                    fingerprints_list[i]
-                    if i < len(fingerprints_list)
-                    else np.zeros(2048)
-                )
-                original_fingerprint = (
-                    features if isinstance(features, np.ndarray) else np.zeros(2048)
-                )
+                predicted_fingerprint = np.array(fingerprints_list[i], dtype=np.float32)
+                original_fingerprint = features
                 print(f"Found valid molecule at index {i}")
                 return smiles, inchi, predicted_fingerprint, original_fingerprint
 
@@ -605,17 +613,21 @@ class MolecularEvaluator:
         predicted_fingerprint = np.array(predicted_fingerprint)
         original_fingerprint = np.array(original_fingerprint)
 
+        print("=" * 20)
         print(f"Original InChI: {original_inchi}")
         print(f"Original SMILES: {original_smiles}")
+        print(f"Original Fingerprint: {original_fingerprint}")
+        print(f"Predicted fingerprint: {predicted_fingerprint}")
         print(f"Predicted fingerprint shape: {predicted_fingerprint.shape}")
         print(f"Original fingerprint shape: {original_fingerprint.shape}")
 
         print(f"Generating {self.args.num_samples} samples...")
 
-        # Generate samples
-        generated_smiles = self._generate_single_datapoint(
+        # Generate samples using unified method
+        generated_results = self._generate_samples(
             predicted_fingerprint, original_fingerprint
         )
+        generated_smiles = generated_results[0]  # First (and only) item in batch
 
         print("\n=== RESULTS ===")
         for i, smiles in enumerate(generated_smiles):
@@ -723,7 +735,7 @@ class MolecularEvaluator:
         # print(f"Processing batch {batch_idx} with {len(batch_data)} molecules...")
 
         # Generate samples for batch
-        batch_generated = self._generate_batch_samples(
+        batch_generated = self._generate_samples(
             batch_predicted_fingerprints, batch_original_fingerprints
         )
 
