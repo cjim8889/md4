@@ -84,7 +84,7 @@ class FingerprintAdapter(nn.Module):
     """
     raw_fingerprint_dim: int = 4096
     fingerprint_dim: int = 2048
-    layers: int = 4
+    layers: int = 2
 
     @nn.compact
     def __call__(self, x):
@@ -98,12 +98,22 @@ class FingerprintAdapter(nn.Module):
             The adapted fingerprint.
         """
 
+        x = jnp.where(
+            x < 0.5,
+            0,
+            1
+        )
+        x = jnp.logical_or(
+            x[:, :self.fingerprint_dim],
+            x[:, self.fingerprint_dim:],
+        )
+ 
         for i in range(self.layers - 1):
             x = nn.Dense(
                 features=self.raw_fingerprint_dim // 2,
                 name=f"fingerprint_adapter_dense_{i}"
             )(x)
-            x = nn.swish(x)
+            x = nn.relu(x)
 
         x = nn.Dense(
             features=self.fingerprint_dim,
@@ -113,8 +123,8 @@ class FingerprintAdapter(nn.Module):
 
         output = jnp.where(
             nn.sigmoid(logits) < 0.5,
-            0,
-            1
+            0.0,
+            1.0
         )
 
         # jax.debug.print("FingerprintAdapter: {x}, {output}, {sum}", x=x, output=output, sum=jnp.sum(output, axis=1))
@@ -185,6 +195,7 @@ class MD4(nn.Module):
     model_sharding: bool = False
     fingerprint_dim: int = 0
     fingerprint_adapter: bool = False
+    only_adapter: bool = False
     raw_fingerprint_dim: int = 0
     atom_type_size: int = 0
 
@@ -322,15 +333,39 @@ class MD4(nn.Module):
         # negligible
         return jnp.array(0.0)
     
-    def fp_ce_loss(self, logits, labels):
-        gamma = 2.0
-        labels  = labels.astype(logits.dtype)
-        probas  = jax.nn.sigmoid(logits)
-        pt      = labels * probas + (1.0 - labels) * (1.0 - probas)
-
-        ce      = -labels * jnp.log(probas + 1e-8) - (1.0 - labels) * jnp.log(1.0 - probas + 1e-8)
-        loss    = jnp.power(1.0 - pt, gamma) * ce
-        return jnp.mean(loss)
+    def fp_bce_loss(self, logits, labels):
+        """Binary Cross Entropy loss."""
+        labels = jnp.astype(labels, logits.dtype)
+        log_p = jax.nn.log_sigmoid(logits)
+        # log(1 - sigmoid(x)) = log_sigmoid(-x), the latter more numerically stable
+        log_not_p = jax.nn.log_sigmoid(-logits)
+        return -labels * log_p - (1.0 - labels) * log_not_p
+    
+    def fp_focal_loss(self, logits, labels, alpha=1.5, gamma=2.0):
+        """
+        Focal loss implementation.
+        
+        L(y, p̂) = -α y (1 - p̂)^γ log(p̂) - (1 - y) p̂^γ log(1 - p̂)
+        
+        Args:
+            logits: Model predictions (before sigmoid)
+            labels: Ground truth binary labels
+            alpha: Weighting factor for positive class
+            gamma: Focusing parameter
+        """
+        labels = labels.astype(logits.dtype)
+        probas = jax.nn.sigmoid(logits)
+        
+        # Calculate focal weights
+        pt = labels * probas + (1.0 - labels) * (1.0 - probas)
+        focal_weight = jnp.power(1.0 - pt, gamma)
+        
+        # Calculate cross entropy
+        ce = self.fp_bce_loss(logits, labels)
+        
+        # Apply focal loss formula
+        loss = alpha * focal_weight * ce
+        return loss
     
     def bracket_loss(self, logits): 
         # 2. Probability mass for open / close brackets
@@ -394,6 +429,22 @@ class MD4(nn.Module):
         bs = x.shape[0]
         cond_embedding, fp_logits = self.get_cond_embedding(cond)
 
+        # 0. FINGERPRINT ADAPTER LOSS: []
+        loss_fp = jnp.array(0.0)
+        avg_bit_diff = jnp.array(0.0)
+        
+        if (self.fingerprint_adapter and fp_logits is not None and 
+            cond is not None and isinstance(cond, dict) and "true_fingerprint" in cond):
+            # Binary cross entropy loss between logits and true fingerprint
+            true_fp = cond["true_fingerprint"]
+            loss_fp = jnp.mean(self.fp_focal_loss(fp_logits, true_fp))
+            
+            # Calculate average bit differences between true_fp and predicted fingerprint
+            # Convert logits to binary predictions
+            pred_fp = jnp.where(nn.sigmoid(fp_logits) < 0.5, 0.0, 1.0)
+            bit_diff = jnp.abs(true_fp - pred_fp)
+            avg_bit_diff = jnp.mean(jnp.sum(bit_diff, axis=-1))
+
         # 1. RECONSTRUCTION LOSS: []
         # add noise and reconstruct
         loss_recon = self.recon_loss()
@@ -401,15 +452,7 @@ class MD4(nn.Module):
         # 2. LATENT LOSS: []
         loss_prior = self.latent_loss()
 
-        # 3. FINGERPRINT ADAPTER LOSS: []
-        loss_fp = jnp.array(0.0)
-        if (self.fingerprint_adapter and fp_logits is not None and 
-            cond is not None and isinstance(cond, dict) and "true_fingerprint" in cond):
-            # Binary cross entropy loss between logits and true fingerprint
-            true_fp = cond["true_fingerprint"]
-            loss_fp = jnp.mean(self.fp_ce_loss(fp_logits, true_fp))
-
-        # 4. DIFFUSION LOSS: [bs]
+        # 3. DIFFUSION LOSS: [bs]
         # sample time steps
         rng1 = self.make_rng("sample")
         if self.antithetic_time_sampling:
@@ -420,7 +463,11 @@ class MD4(nn.Module):
 
         loss_diff, _ = self.diffusion_loss(t, x, cond=cond_embedding, train=train)
         loss_diff = loss_diff.mean()
-        loss = loss_diff + loss_prior + loss_recon + loss_fp
+
+        if self.only_adapter:
+            loss = loss_fp
+        else:
+            loss = loss_diff + loss_prior + loss_recon + loss_fp
 
         model_stats = {
             "loss": loss,
@@ -428,7 +475,7 @@ class MD4(nn.Module):
             "loss_prior": loss_prior,
             "loss_recon": loss_recon,
             "loss_fp": loss_fp,
-            # "loss_bracket": loss_bracket,
+            "avg_bit_diff": avg_bit_diff,
         }
         model_stats = utils.loss2bpt(model_stats, self.data_shape)
         return model_stats

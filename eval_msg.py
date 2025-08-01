@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""Evaluation script for MSG dataset: load checkpoints and generate SMILES."""
+"""Evaluation script for MSG dataset: load checkpoints and generate SMILES.
+
+The script assigns unique eval_id to each datapoint in the evaluation dataset.
+This ensures that even if multiple entries have the same InChI but different 
+predicted fingerprints, they are treated as separate evaluation instances.
+
+Output CSV format:
+- eval_id: Unique identifier for each evaluation datapoint (from original dataset index)
+- original_inchi: Original InChI string
+- original_smiles: SMILES converted from InChI
+- generated_smiles: Generated SMILES from the model
+- sample_idx: Index of the generated sample (0 to num_samples-1)
+
+Each eval_id will have num_samples rows in the output, one for each generated molecule.
+"""
 
 import argparse
 import os
@@ -24,7 +38,7 @@ except ImportError:
     print("WARNING: RDKit not available. InChI to SMILES conversion will not work.")
 
 # Import MD4 modules
-from md4 import rdkit_utils, sampling, train, utils
+from md4 import rdkit_utils, sampling, utils, state_utils
 from md4.configs.md4 import molecular_finetune
 
 
@@ -148,7 +162,7 @@ class MolecularEvaluator:
             options=orbax_checkpoint.CheckpointManagerOptions(create=False),
         )
 
-    def _load_model_and_state(self) -> Tuple[nn.Module, train.TrainState]:
+    def _load_model_and_state(self) -> Tuple[nn.Module, state_utils.TrainState]:
         """Load model and checkpoint state."""
         rng = utils.get_rng(self.config.seed)
         data_shape = (self.config.max_length,)
@@ -158,20 +172,12 @@ class MolecularEvaluator:
             return self.config.learning_rate
 
         # Create model and train state
-        if self.config.get("frozen", False):
-            model, _, train_state, _ = train.create_frozen_train_state(
-                self.config,
-                rng,
-                input_shape=(self.config.batch_size * 10,) + data_shape,
-                schedule_fn=schedule_fn,
-            )
-        else:
-            model, _, train_state, _ = train.create_train_state(
-                self.config,
-                rng,
-                input_shape=(self.config.batch_size * 10,) + data_shape,
-                schedule_fn=schedule_fn,
-            )
+        model, _, train_state, _ = state_utils.create_train_state(
+            self.config,
+            rng,
+            input_shape=(self.config.batch_size * 10,) + data_shape,
+            schedule_fn=schedule_fn,
+        )
 
         # Skip checkpoint loading if --no_checkpoint flag is used
         if self.args.no_checkpoint:
@@ -208,14 +214,14 @@ class MolecularEvaluator:
 
     def _prepare_molecular_data_iterator(
         self, eval_df: pl.DataFrame
-    ) -> Iterator[Tuple[str, str, np.ndarray, np.ndarray]]:
+    ) -> Iterator[Tuple[int, str, str, np.ndarray, np.ndarray]]:
         """Convert InChI data to SMILES and extract features sequentially.
 
         Args:
             eval_df: DataFrame containing InChI data
 
         Yields:
-            Tuples of (smiles, inchi, predicted_fingerprint, original_fingerprint) for successfully processed molecules
+            Tuples of (unique_id, smiles, inchi, predicted_fingerprint, original_fingerprint) for successfully processed molecules
         """
         if not RDKIT_AVAILABLE:
             raise ImportError("RDKit is required to convert InChI to SMILES.")
@@ -272,7 +278,9 @@ class MolecularEvaluator:
                 )
 
                 processed_count += 1
-                yield smiles, inchi, predicted_fingerprint, original_fingerprint
+                # Use original dataset index as unique ID - this ensures each datapoint has a unique identifier
+                # even if InChI values are the same but predicted_fingerprints are different
+                yield i, smiles, inchi, predicted_fingerprint, original_fingerprint
 
             except Exception:
                 # Skip molecules that fail to process
@@ -533,7 +541,7 @@ class MolecularEvaluator:
 
     def _process_single_molecule_debug(
         self, eval_df: pl.DataFrame
-    ) -> Optional[Tuple[str, str, np.ndarray, np.ndarray]]:
+    ) -> Optional[Tuple[int, str, str, np.ndarray, np.ndarray]]:
         """Process a single molecule for debug mode - finds first valid molecule."""
         if not RDKIT_AVAILABLE:
             raise ImportError("RDKit is required to convert InChI to SMILES.")
@@ -581,7 +589,7 @@ class MolecularEvaluator:
                 predicted_fingerprint = np.array(fingerprints_list[i], dtype=np.float32)
                 original_fingerprint = features
                 print(f"Found valid molecule at index {i}")
-                return smiles, inchi, predicted_fingerprint, original_fingerprint
+                return i, smiles, inchi, predicted_fingerprint, original_fingerprint
 
             except Exception as e:
                 print(f"Failed to process molecule {i}: {e}")
@@ -607,13 +615,14 @@ class MolecularEvaluator:
             print("ERROR: No valid molecules found in dataset")
             return
 
-        original_smiles, original_inchi, predicted_fingerprint, original_fingerprint = (
+        unique_id, original_smiles, original_inchi, predicted_fingerprint, original_fingerprint = (
             result
         )
         predicted_fingerprint = np.array(predicted_fingerprint)
         original_fingerprint = np.array(original_fingerprint)
 
         print("=" * 20)
+        print(f"Unique ID: {unique_id}")
         print(f"Original InChI: {original_inchi}")
         print(f"Original SMILES: {original_smiles}")
         print(f"Original Fingerprint: {original_fingerprint}")
@@ -636,6 +645,7 @@ class MolecularEvaluator:
         # Save results if output file specified
         if self.output_file:
             results_data = {
+                "eval_id": [unique_id] * len(generated_smiles),
                 "original_inchi": [original_inchi] * len(generated_smiles),
                 "original_smiles": [original_smiles] * len(generated_smiles),
                 "generated_smiles": generated_smiles,
@@ -650,6 +660,7 @@ class MolecularEvaluator:
     def _save_batch_results(
         self,
         batch_idx: int,
+        batch_eval_ids: List[int],
         batch_smiles: List[str],
         batch_fingerprints: np.ndarray,
         batch_generated: List[List[str]],
@@ -659,6 +670,7 @@ class MolecularEvaluator:
         os.makedirs(self.intermediate_dir, exist_ok=True)
 
         batch_data = {
+            "eval_id": [],
             "original_smiles": [],
             "generated_smiles": [],
         }
@@ -668,6 +680,7 @@ class MolecularEvaluator:
 
         for i in range(len(batch_smiles)):
             for j, gen_smi in enumerate(batch_generated[i]):
+                batch_data["eval_id"].append(batch_eval_ids[i])
                 batch_data["original_smiles"].append(batch_smiles[i])
                 batch_data["generated_smiles"].append(gen_smi)
                 if batch_inchi is not None:
@@ -716,7 +729,7 @@ class MolecularEvaluator:
         print(f"Total samples: {len(combined_df)}")
 
     def _process_and_save_batch(
-        self, batch_data: List[Tuple[str, str, np.ndarray, np.ndarray]], batch_idx: int
+        self, batch_data: List[Tuple[int, str, str, np.ndarray, np.ndarray]], batch_idx: int
     ):
         """Process a single batch of molecules and save results."""
         if not batch_data:
@@ -724,6 +737,7 @@ class MolecularEvaluator:
 
         # Unpack batch data
         (
+            batch_eval_ids,
             batch_smiles,
             batch_inchi,
             batch_predicted_fingerprints,
@@ -742,6 +756,7 @@ class MolecularEvaluator:
         # Save batch results
         self._save_batch_results(
             batch_idx,
+            list(batch_eval_ids),
             list(batch_smiles),
             batch_predicted_fingerprints,
             batch_generated,
@@ -772,13 +787,14 @@ class MolecularEvaluator:
 
         try:
             for (
+                eval_id,
                 smiles,
                 inchi,
                 predicted_fingerprint,
                 original_fingerprint,
             ) in molecule_iterator:
                 current_batch.append(
-                    (smiles, inchi, predicted_fingerprint, original_fingerprint)
+                    (eval_id, smiles, inchi, predicted_fingerprint, original_fingerprint)
                 )
 
                 # Process batch when full

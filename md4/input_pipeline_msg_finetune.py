@@ -176,6 +176,7 @@ def create_msg_finetune_datasets(config: config_dict.ConfigDict, seed: int):
     }, info
 
 if __name__ == "__main__":
+    import numpy as np
     train_dataset, eval_datasets, info = create_msg_finetune_datasets(
         config_dict.ConfigDict({
             "fp_radius": 2,
@@ -197,14 +198,18 @@ if __name__ == "__main__":
 
     fingerprint = features["fingerprint"][0]  # Get fingerprint of the first sample
     print("Fingerprint shape:", fingerprint.shape)
+    print("Fingerprint sum:", np.sum(fingerprint))  # Check if it has non-zero values
+    print(fingerprint)
+
+    true_fingerprint = features["true_fingerprint"][0]  # Get true fingerprint of the first sample
+    print("True fingerprint shape:", true_fingerprint.shape)
+    print("True fingerprint sum:", np.sum(true_fingerprint))  # Check if it has non-zero values
+    print(true_fingerprint)
 
 
     decoded = tokenizer.decode(features["smiles"][0])  # Decode smiles of the first sample
     print("Decoded SMILES:", decoded)
 
-    decoded_2 = tokenizer.decode(features["smiles"][1])  # Decode smiles of the second sample
-    print("Decoded SMILES 2:", decoded_2)
-    print("Sample features:", features["smiles"][:2])  # Print first 10 tokens of the first sample
     # Calculate average sequence lengths before padding
     # print("Calculating average sequence lengths before padding...")
     # lengths = calculate_sequence_lengths(train_dataset, num_batches=10000)
@@ -222,7 +227,7 @@ if __name__ == "__main__":
     # print(f"Max length: {max_length}")
     # print(f"Total sequences analyzed: {len(lengths)}")
 
-    results = tfds.benchmark(train_dataset, num_iter=1000, batch_size=512)
+    # results = tfds.benchmark(train_dataset, num_iter=1000, batch_size=512)
     # print(results)
 
     # Example usage

@@ -41,8 +41,8 @@ def get_config() -> config_dict.ConfigDict:
   config.dit_hidden_size = 768  # not used
   config.dropout_rate = 0.02
 
-  config.num_heads = 16
-  config.mlp_type = "geglu"
+  config.num_heads = 12
+  config.mlp_type = "swiglu"
   config.depth_scaled_init = True
   config.cond_type = "adaln_zero"
 

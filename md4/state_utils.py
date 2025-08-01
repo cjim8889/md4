@@ -109,11 +109,12 @@ def create_metrics_class_from_keys(metric_keys):
     return metrics.Collection.create(**stats)
 
 
-def _should_freeze_parameter(path, config: ml_collections.ConfigDict) -> bool:
+def _should_freeze_parameter(path, v, config: ml_collections.ConfigDict) -> bool:
     """Determine if a parameter should be frozen based on config.
     
     Args:
         path: Parameter path tuple
+        v: Parameter value
         config: Configuration with frozen_paths and unfrozen_paths
         
     Returns:
@@ -121,18 +122,23 @@ def _should_freeze_parameter(path, config: ml_collections.ConfigDict) -> bool:
     """
     # Check unfrozen paths first (these take precedence)
     unfrozen_paths = config.get("unfrozen_paths", [])
-    if unfrozen_paths and isinstance(unfrozen_paths, (list, tuple)):
+    if isinstance(unfrozen_paths, (list, tuple)):
         for unfrozen_path in unfrozen_paths:
             if unfrozen_path in path:
                 return False
     
-    # If frozen_paths is specified and non-empty, only freeze those paths
+    # If frozen_paths is specified as a non-empty list, only freeze those paths
     frozen_paths = config.get("frozen_paths", [])
-    if frozen_paths and isinstance(frozen_paths, (list, tuple)):
-        for frozen_path in frozen_paths:
-            if frozen_path in path:
-                return True
-        return False  # Not in frozen_paths, so don't freeze
+    if isinstance(frozen_paths, (list, tuple)):
+        if len(frozen_paths) > 0:
+            # Non-empty frozen_paths: only freeze specified paths
+            for frozen_path in frozen_paths:
+                if frozen_path in path:
+                    return True
+            return False  # Not in frozen_paths, so don't freeze
+        else:
+            # Empty frozen_paths: freeze all except unfrozen_paths
+            return True
     
     # Default behavior: freeze all except unfrozen_paths
     return True
