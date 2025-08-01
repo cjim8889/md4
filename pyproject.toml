@@ -20,10 +20,11 @@ dependencies = [
     "seaborn>=0.13.2",
     "transformers==4.51.2",
     "torch==2.7.1",
-    "tf-nightly-cpu>=2.21.0.dev20250722",
+    "tf-nightly>=2.21.0.dev20250722",
     "tb-nightly>=2.19.0a20250218",
     "tfds-nightly>=4.9.9.dev202507250045",
     "tf-keras-nightly>=2.16.0.dev2024021410",
+    "tokenizers==0.21.4",
 ]
 
 

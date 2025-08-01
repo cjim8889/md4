@@ -33,10 +33,10 @@ def train_smiles_tokenizer(
     tokenizer_name: str = "pubchem_large_tokenizer"
 ) -> PreTrainedTokenizerFast:
     """
-    Train a BPE tokenizer on SMILES strings with special tokens.
+    Train a BPE tokenizer on SMILES strings and molecular formulas with special tokens.
     
     Args:
-        dataset_name: HuggingFace dataset name containing SMILES strings
+        dataset_name: HuggingFace dataset name containing SMILES strings and molecular formulas
         vocab_size: Target vocabulary size
         min_frequency: Minimum frequency for tokens
         output_dir: Directory to save the tokenizer
@@ -80,13 +80,27 @@ def train_smiles_tokenizer(
     ds = datasets.load_dataset(dataset_name, split="train")
     print(f"Dataset loaded with {len(ds)} examples")
     
+    # Create iterator that yields both SMILES and molecular formulas
+    def text_iterator():
+        for example in ds:
+            # Always yield SMILES if available
+            if "smiles" in example and example["smiles"]:
+                yield example["smiles"]
+            
+            # Yield molecular formula only if it exists and is not empty/None
+            if "molecular_formula" in example and example["molecular_formula"]:
+                molecular_formula = example["molecular_formula"].strip()
+                if molecular_formula and molecular_formula.lower() not in ["none", "null", ""]:
+                    yield molecular_formula
+    
     # Train the tokenizer
     print(f"Training tokenizer with vocab_size={vocab_size}, min_frequency={min_frequency}...")
-    tokenizer.train_from_iterator(ds["smiles"], trainer=trainer)
+    print("Training on both SMILES and molecular formulas...")
+    tokenizer.train_from_iterator(text_iterator(), trainer=trainer)
     
     # Add post-processor to add special tokens
     tokenizer.post_processor = TemplateProcessing(
-        single="[CLS] $A [SEP]",
+        single="[CLS] $A [SEP] $B [SEP]",
         special_tokens=[
             ("[CLS]", tokenizer.token_to_id("[CLS]")),
             ("[SEP]", tokenizer.token_to_id("[SEP]")),
@@ -113,17 +127,17 @@ def train_smiles_tokenizer(
     return fast_tokenizer
 
 
-def test_tokenizer(tokenizer: PreTrainedTokenizerFast, test_smiles: List[str]):
-    """Test the trained tokenizer on sample SMILES strings."""
+def test_tokenizer(tokenizer: PreTrainedTokenizerFast, test_texts: List[str]):
+    """Test the trained tokenizer on sample SMILES strings and molecular formulas."""
     print("\n" + "="*50)
     print("TESTING TOKENIZER")
     print("="*50)
     
-    for i, smiles in enumerate(test_smiles[:3]):
-        print(f"\nTest {i+1}: {smiles}")
+    for i, text in enumerate(test_texts[:6]):  # Show more examples since we have both types
+        print(f"\nTest {i+1}: {text}")
         
         # Tokenize
-        encoded = tokenizer(smiles, return_tensors="np", padding=True, truncation=True)
+        encoded = tokenizer(text, return_tensors="np", padding=True, truncation=True)
         tokens = encoded['input_ids'][0].tolist()
         
         print(f"  Tokens: {tokens}")
@@ -133,7 +147,7 @@ def test_tokenizer(tokenizer: PreTrainedTokenizerFast, test_smiles: List[str]):
         # Decode back
         decoded = tokenizer.decode(tokens, skip_special_tokens=True)
         print(f"  Decoded: {decoded}")
-        print(f"  Match original: {decoded.replace(' ', '') == smiles.replace(' ', '')}")
+        print(f"  Match original: {decoded.replace(' ', '') == text.replace(' ', '')}")
 
 
 def main():
@@ -159,10 +173,21 @@ def main():
     # Load dataset for testing
     print("Loading test samples...")
     ds = datasets.load_dataset(args.dataset_name, split="train")
-    test_smiles = ds["smiles"][:5]  # Get first 5 for testing
+    test_examples = ds[:5]  # Get first 5 examples for testing
     
-    if test_smiles:
-        test_tokenizer(tokenizer, test_smiles)
+    # Test with both SMILES and molecular formulas
+    test_texts = []
+    for example in test_examples:
+        if "smiles" in example and example["smiles"]:
+            test_texts.append(example["smiles"])
+        
+        if "molecular_formula" in example and example["molecular_formula"]:
+            molecular_formula = example["molecular_formula"].strip()
+            if molecular_formula and molecular_formula.lower() not in ["none", "null", ""]:
+                test_texts.append(molecular_formula)
+    
+    if test_texts:
+        test_tokenizer(tokenizer, test_texts)
     
     print(f"\nTokenizer training complete!")
     print(f"To use the tokenizer:")
