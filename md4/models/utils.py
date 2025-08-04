@@ -54,6 +54,7 @@ def get_model(config: ml_collections.ConfigDict):
         fingerprint_adapter=config.get("fingerprint_adapter", False),
         atom_type_size=config.get("atom_type_size", 0),
         only_adapter=config.get("only_adapter", False),
+        fingerprint_mlp_layers=config.get("fingerprint_mlp_layers", ()),
     )
   elif config.model_type == "genmd4":
     return genmd4.GenMD4(

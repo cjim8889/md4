@@ -198,6 +198,7 @@ class MD4(nn.Module):
     only_adapter: bool = False
     raw_fingerprint_dim: int = 0
     atom_type_size: int = 0
+    fingerprint_mlp_layers: Sequence[int] = ()
 
     def setup(self):
         self.noise_schedule = MaskingSchedule(self.data_shape, self.noise_schedule_type)
@@ -211,7 +212,13 @@ class MD4(nn.Module):
                     fingerprint_dim=self.fingerprint_dim
                 )
 
-            self.cond_embeddings = SimpleMLP(features=[self.fingerprint_dim // 2, self.feature_dim * 2, self.feature_dim, self.feature_dim])
+            # Use configurable layers if provided, otherwise use default
+            if self.fingerprint_mlp_layers:
+                mlp_features = list(self.fingerprint_mlp_layers)
+            else:
+                mlp_features = [self.fingerprint_dim // 2, self.feature_dim * 2, self.feature_dim, self.feature_dim]
+            
+            self.cond_embeddings = SimpleMLP(features=mlp_features)
         if self.atom_type_size > 0:
             self.atom_embeddings = nn.Embed(self.atom_type_size, self.feature_dim)
             self.atom_embeddings_agg = nn.Dense(features=self.feature_dim, name="atom_embeddings_agg")
