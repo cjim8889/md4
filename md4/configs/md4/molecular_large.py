@@ -18,7 +18,6 @@ def get_config() -> config_dict.ConfigDict:
   config.classes = -1
   config.max_length = 128
   config.tokenizer = "data/pubchem_large_tokenizer_2048"
-  config.version = "1.0.6"
 
   config.min_frequency = 200
   config.pad_to_length = 128 # Not used
