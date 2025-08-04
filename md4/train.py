@@ -593,7 +593,7 @@ def train_and_evaluate(
                             try:
                                 texts = tokenizer.batch_decode(
                                     all_samples,
-                                    skip_special_tokens=True,
+                                    skip_special_tokens=False,
                                     clean_up_tokenization_spaces=True,
                                 )
                                 writer.write_texts(step, {"samples": texts})

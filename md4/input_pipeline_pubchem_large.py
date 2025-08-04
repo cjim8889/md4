@@ -39,7 +39,8 @@ def preprocess_or_load_pubchem(
         training_shards=16,
         validation_shards=4,
         max_length=160,
-        num_workers=None
+        num_workers=None,
+        include_formula=False
     ):
     """Load and preprocess PubChem dataset with SAFE encoding and tokenizer training.
     
@@ -87,6 +88,15 @@ def preprocess_or_load_pubchem(
             validation_shard_size = 1
         validation_shards_tasks = [val_ds["smiles"][i * validation_shard_size:(i + 1) * validation_shard_size] for i in range(validation_shards)]
 
+        # Include formula shards if include_formula is True
+        # Use the same indexing as SMILES shards to ensure perfect alignment
+        if include_formula:
+            training_formula_shards = [train_ds["molecular_formula"][i * training_shard_size:(i + 1) * training_shard_size] for i in range(len(training_shards_tasks))]
+            validation_formula_shards = [val_ds["molecular_formula"][i * validation_shard_size:(i + 1) * validation_shard_size] for i in range(len(validation_shards_tasks))]
+        else:
+            training_formula_shards = [None] * len(training_shards_tasks)
+            validation_formula_shards = [None] * len(validation_shards_tasks)
+
 
         from tqdm.contrib.concurrent import process_map
 
@@ -106,13 +116,13 @@ def preprocess_or_load_pubchem(
 
         valid_training_counts = process_map(
             process_and_write_shard_tfrecord,
-            [(i, len(training_shards_tasks), shard, "train", tfds_data_dir, features, fp_bits, tokenizer, max_length) for i, shard in enumerate(training_shards_tasks)],
+            [(i, len(training_shards_tasks), shard, "train", tfds_data_dir, features, fp_bits, tokenizer, max_length, include_formula, training_formula_shards[i]) for i, shard in enumerate(training_shards_tasks)],
             max_workers=_num_workers,
         )
 
         valid_validation_counts = process_map(
             process_and_write_shard_tfrecord,
-            [(i, len(validation_shards_tasks), shard, "validation", tfds_data_dir, features, fp_bits, tokenizer, max_length) for i, shard in enumerate(validation_shards_tasks)],
+            [(i, len(validation_shards_tasks), shard, "validation", tfds_data_dir, features, fp_bits, tokenizer, max_length, include_formula, validation_formula_shards[i]) for i, shard in enumerate(validation_shards_tasks)],
             max_workers=_num_workers,
         )
 
@@ -147,6 +157,7 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
 
     # Use preprocess_pubchem to get the dataset builder
     num_processes = config.get("num_processes", 64)
+    include_formula = config.get("include_formula", False)
     pubchem_builder = preprocess_or_load_pubchem(
         data_dir=os.path.join("./data", "pubchem_large"), 
         tokenizer=tokenizer,
@@ -157,6 +168,7 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         training_shards=config.get("training_shards", 64),
         validation_shards=config.get("validation_shards", 2),
         num_workers=num_processes,
+        include_formula=include_formula,
     )
 
     # Load SMILES tokenizer
@@ -226,14 +238,15 @@ if __name__ == "__main__":
     train_dataset, eval_datasets, info = create_pubchem_datasets(
         config_dict.ConfigDict({
             "fp_radius": 2,
-            "fp_bits": 2048,
+            "fp_bits": 4096,
             "max_length": 128,
-            "tokenizer": _SMILES_TOKENIZER,
+            "tokenizer": "data/pubchem_large_tokenizer_2048",
             "batch_size": 512,
-            "version": "1.0.6",
-            "training_shards": 128,
-            "validation_shards": 4,
-            "num_processes": 128,
+            "version": "1.0.7",
+            "training_shards": 256,
+            "validation_shards": 8,
+            "num_processes": 160,
+            "include_formula": True,  # Set to True to include molecular formulas
         }),
         seed=42
     )

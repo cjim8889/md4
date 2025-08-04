@@ -176,7 +176,8 @@ def calculate_smiles_validity(texts_list):
     """Calculate validity metrics for a batch of SMILES strings.
 
     Args:
-        texts_list: list of strings containing SMILES strings
+        texts_list: list of strings containing tokenized sequences with format:
+                   [CLS] formula [SEP] smiles [SEP] [PAD]...
 
     Returns:
         dict: Dictionary containing validity metrics:
@@ -199,19 +200,34 @@ def calculate_smiles_validity(texts_list):
     valid_count = 0
     filtered_count = 0
 
-    for smiles_str in texts_list:
+    for text_str in texts_list:
         # Convert numpy string to Python string if needed
-        if isinstance(smiles_str, np.bytes_):
-            smiles_str = smiles_str.decode("utf-8")
-        elif isinstance(smiles_str, np.str_):
-            smiles_str = str(smiles_str)
+        if isinstance(text_str, np.bytes_):
+            text_str = text_str.decode("utf-8")
+        elif isinstance(text_str, np.str_):
+            text_str = str(text_str)
 
         # Strip whitespace and handle empty strings
-        smiles_str = smiles_str.strip()
-        if not smiles_str:
+        text_str = text_str.strip()
+        if not text_str:
             continue
 
-        smiles_str = smiles_str.replace(" ", "").replace("\n", "")
+        # Extract SMILES string between the two [SEP] tokens
+        # Format: [CLS] formula [SEP] smiles [SEP] [PAD]...
+        sep_splits = text_str.split("[SEP]")
+        if len(sep_splits) < 2:
+            # No proper format with two SEP tokens, skip this sample
+            continue
+        
+        # Extract the SMILES part (between first and second [SEP])
+        smiles_str = sep_splits[1].strip()
+        
+        # Remove all whitespace from the SMILES string
+        smiles_str = smiles_str.replace(" ", "").replace("\n", "").replace("\t", "")
+        
+        # Skip empty SMILES strings
+        if not smiles_str:
+            continue
 
         try:
             mol = Chem.MolFromSmiles(smiles_str)
