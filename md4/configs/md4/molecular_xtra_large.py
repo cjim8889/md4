@@ -37,20 +37,20 @@ def get_config() -> config_dict.ConfigDict:
   config.cont_time = True
   config.fp_bits = 4096
   config.fingerprint_dim = 4096
-  config.fingerprint_mlp_layers = (2048, 512, 256, 64)  # Configurable SimpleMLP layers for fingerprint conditioning
+  config.fingerprint_mlp_layers = (2048, 512, 256, 256)  # Configurable SimpleMLP layers for fingerprint conditioning
   
 
-  config.feature_dim = 64
-  config.n_layers = 18
+  config.feature_dim = 256
+  config.n_layers = 12
   config.ch_mult = (1,)  # not used
   config.n_dit_layers = 0  # not used
   config.dit_num_heads = 12  # not used
   config.dit_hidden_size = 768  # not used
   config.dropout_rate = 0.0
-  config.multiple_of = 64
+  config.multiple_of = 256
 
-  config.num_heads = 12
-  config.n_kv_heads = 6
+  config.num_heads = 8
+  config.n_kv_heads = 4
   config.mlp_type = "swiglu"
   config.depth_scaled_init = True
   config.cond_type = "adaln_zero"
@@ -68,8 +68,8 @@ def get_config() -> config_dict.ConfigDict:
   config.num_train_steps = 1_500_000
   # Evaluates for a full epoch if num_eval_steps==-1.
   config.num_eval_steps = 1000
-  config.batch_size = 1024
-  config.num_microbatches = 4
+  config.batch_size = 512
+  config.num_microbatches = 2
   config.per_device_batch_size = -1
   # If batches should be added to evaluate the entire dataset.
   config.eval_pad_last_batch = False
