@@ -113,6 +113,7 @@ class DiscreteClassifier(nn.Module):
     ch_mult: Sequence[int] = (1,)
     feature_dim: int = 64
     num_heads: int = 12
+    n_kv_heads: int = 12
     vocab_size: int = 1000
     dropout_rate: float = 0.0
     use_attn_dropout: bool = True
@@ -121,6 +122,7 @@ class DiscreteClassifier(nn.Module):
     cond_type: str = "adaln"
     outside_embed: bool = False
     model_sharding: bool = False
+    multiple_of: int = 64
 
     @nn.compact
     def __call__(self, z, t=None, cond=None, train=False):
@@ -138,9 +140,9 @@ class DiscreteClassifier(nn.Module):
                     dim=self.feature_dim * self.num_heads,
                     n_layers=self.n_layers,
                     n_heads=self.num_heads,
-                    n_kv_heads=self.num_heads,
+                    n_kv_heads=self.n_kv_heads,
                     output_channels=self.vocab_size,
-                    multiple_of=256,
+                    multiple_of=self.multiple_of,
                     dropout_rate=self.dropout_rate,
                     depth_scaled_init=self.depth_scaled_init,
                     mlp_type=self.mlp_type,
@@ -156,9 +158,9 @@ class DiscreteClassifier(nn.Module):
                     dim=self.feature_dim * self.num_heads,
                     n_layers=self.n_layers,
                     n_heads=self.num_heads,
-                    n_kv_heads=self.num_heads,
+                    n_kv_heads=self.n_kv_heads,
                     output_channels=self.vocab_size,
-                    multiple_of=256,
+                    multiple_of=self.multiple_of,
                     dropout_rate=self.dropout_rate,
                     depth_scaled_init=self.depth_scaled_init,
                     mlp_type=self.mlp_type,

@@ -1,20 +1,18 @@
 """Utilities for creating and managing training state."""
 
-from collections.abc import Callable, Mapping, Sequence
 import copy
 import functools
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from absl import logging
-from clu import metrics
-from clu import parameter_overview
-import flax.struct
 import flax.core
+import flax.struct
 import jax
 import jax.numpy as jnp
 import ml_collections
-import numpy as np
 import optax
+from absl import logging
+from clu import metrics, parameter_overview
 from flax import traverse_util
 
 from md4.models import utils as model_utils

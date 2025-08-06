@@ -30,6 +30,7 @@ def get_model(config: ml_collections.ConfigDict):
         timesteps=config.timesteps,
         feature_dim=config.feature_dim,
         num_heads=config.num_heads,
+        n_kv_heads=config.get("n_kv_heads", config.num_heads),
         n_layers=config.n_layers,
         n_dit_layers=config.n_dit_layers,
         dit_num_heads=config.dit_num_heads,
@@ -55,6 +56,7 @@ def get_model(config: ml_collections.ConfigDict):
         atom_type_size=config.get("atom_type_size", 0),
         only_adapter=config.get("only_adapter", False),
         fingerprint_mlp_layers=config.get("fingerprint_mlp_layers", ()),
+        multiple_of=config.get("multiple_of", 256),
     )
   elif config.model_type == "genmd4":
     return genmd4.GenMD4(

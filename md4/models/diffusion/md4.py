@@ -23,11 +23,8 @@ import jax
 import jax.numpy as jnp
 import tensorflow_probability.substrates.jax as tfp
 
-from transformers import PreTrainedTokenizerFast
-from md4 import binary_search
-from md4 import utils
+from md4 import binary_search, utils
 from md4.models import backward
-
 
 tfd = tfp.distributions
 
@@ -171,6 +168,7 @@ class MD4(nn.Module):
     timesteps: int = 1000
     feature_dim: int = 128
     num_heads: int = 12
+    n_kv_heads: int = 12
     antithetic_time_sampling: bool = True
     n_layers: int = 32
     n_dit_layers: int = 0
@@ -199,6 +197,7 @@ class MD4(nn.Module):
     raw_fingerprint_dim: int = 0
     atom_type_size: int = 0
     fingerprint_mlp_layers: Sequence[int] = ()
+    multiple_of: int = 64
 
     def setup(self):
         self.noise_schedule = MaskingSchedule(self.data_shape, self.noise_schedule_type)
@@ -231,6 +230,7 @@ class MD4(nn.Module):
             ch_mult=self.ch_mult,
             feature_dim=self.feature_dim,
             num_heads=self.num_heads,
+            n_kv_heads=self.n_kv_heads,
             vocab_size=self.vocab_size,
             dropout_rate=self.dropout_rate,
             use_attn_dropout=self.use_attn_dropout,
@@ -239,6 +239,7 @@ class MD4(nn.Module):
             cond_type=self.cond_type,
             outside_embed=self.outside_embed,
             model_sharding=self.model_sharding,
+            multiple_of=self.multiple_of,
         )
 
     def forward_sample(self, x, t):

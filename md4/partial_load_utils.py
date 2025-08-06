@@ -21,8 +21,8 @@ from typing import Any, Tuple
 
 import jax
 import jax.numpy as jnp
-from flax import traverse_util
 from clu import parameter_overview
+from flax import traverse_util
 from orbax import checkpoint as orbax_checkpoint
 
 from md4.configs.md4 import molecular

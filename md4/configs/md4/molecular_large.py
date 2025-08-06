@@ -30,33 +30,34 @@ def get_config() -> config_dict.ConfigDict:
   # timesteps: int or None
   config.timesteps = 1000
   # linear, cosine, poly[exponent], e.g., poly3
-  config.noise_schedule = "linear"
+  config.noise_schedule = "cosine"
   config.outside_embed = True
   # t or none (removes time dependence)
   config.time_features = "t"
   config.cont_time = True
   config.fp_bits = 4096
   config.fingerprint_dim = 4096
-  config.fingerprint_mlp_layers = [2048, 1024, 256, 128]  # Configurable SimpleMLP layers for fingerprint conditioning
+  config.fingerprint_mlp_layers = (2048, 512, 256, 64)  # Configurable SimpleMLP layers for fingerprint conditioning
   
 
-  config.feature_dim = 128
+  config.feature_dim = 64
   config.n_layers = 12
   config.ch_mult = (1,)  # not used
   config.n_dit_layers = 0  # not used
   config.dit_num_heads = 12  # not used
   config.dit_hidden_size = 768  # not used
   config.dropout_rate = 0.0
+  config.multiple_of = 256
 
   config.num_heads = 12
-  config.mlp_type = "swiglu"
+  config.mlp_type = "glu"
   config.depth_scaled_init = True
   config.cond_type = "adaln_zero"
 
-  config.learning_rate = 3e-4
+  config.learning_rate = 2e-4
   config.learning_rate_schedule = "cosine"
   config.warmup_steps = 2000
-  config.weight_decay = 1e-08
+  config.weight_decay = 1e-06
   config.clip = 0.0
   config.b2 = 0.999
   config.num_epochs = -1
@@ -66,7 +67,7 @@ def get_config() -> config_dict.ConfigDict:
   config.num_train_steps = 1_500_000
   # Evaluates for a full epoch if num_eval_steps==-1.
   config.num_eval_steps = 1000
-  config.batch_size = 512
+  config.batch_size = 1024
   config.num_microbatches = 1
   config.per_device_batch_size = -1
   # If batches should be added to evaluate the entire dataset.
@@ -77,7 +78,7 @@ def get_config() -> config_dict.ConfigDict:
   # ancestral, mean, or topp
   config.sampler = "ancestral"
   # uniform, cosine
-  config.sampling_grid = "cosine"
+  config.sampling_grid = "uniform"
   # for topp sampler
   config.topp = 0.98
 

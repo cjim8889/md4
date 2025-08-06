@@ -65,6 +65,7 @@ def get_config() -> config_dict.ConfigDict:
   config.mlp_type = "swiglu"
   config.depth_scaled_init = True
   config.cond_type = "adaln_zero"
+  config.multiple_of = 256
 
   config.learning_rate = 1e-4
   config.learning_rate_schedule = "cosine"
