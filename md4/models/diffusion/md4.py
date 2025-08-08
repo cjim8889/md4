@@ -253,6 +253,32 @@ class MD4(nn.Module):
         return self.vocab_size * jnp.ones(
             [batch_size] + list(self.data_shape), dtype="int32"
         )
+    
+    def conditional_sample(self, tokens):
+        """
+        Given tokens shaped (..., L), find the first occurrence of token id 3
+        along the last dimension and set all subsequent positions to
+        self.vocab_size (mask token). If a sequence has no 3, it is unchanged.
+
+        Args:
+            tokens: jnp.ndarray[int], shape (..., L)
+
+        Returns:
+            jnp.ndarray[int], same shape as tokens, with positions strictly
+            after the first 3 replaced by self.vocab_size.
+        """
+        # Positions where token equals 3
+        is_stop = (tokens == 3)
+
+        # Inclusive mask that becomes True at and after the first 3
+        hit_inclusive = (jnp.cumsum(is_stop.astype(jnp.int32), axis=-1) > 0)
+
+        # We only want positions strictly after the first 3: shift right by 1
+        zeros = jnp.zeros_like(hit_inclusive[..., :1])
+        strictly_after = jnp.concatenate([zeros, hit_inclusive[..., :-1]], axis=-1)
+
+        mask_val = jnp.asarray(self.vocab_size, dtype=tokens.dtype)
+        return jnp.where(strictly_after, mask_val, tokens).astype("int32")
 
     def get_cond_embedding(self, conditioning):
         fp_logits = None

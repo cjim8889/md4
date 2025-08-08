@@ -575,7 +575,8 @@ def train_and_evaluate(
                             train_state,
                             flax_utils.replicate(sample_rng),
                             dummy_inputs,
-                            conditioning=conditioning,
+                            conditioning,
+                            False,
                         )
 
                         all_samples = jax.pmap(

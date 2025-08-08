@@ -39,7 +39,106 @@ except ImportError:
 
 # Import MD4 modules
 from md4 import rdkit_utils, sampling, utils, state_utils
-from md4.configs.md4 import molecular_finetune
+from md4.configs.md4 import molecular_finetune, molecular_xtra_large
+
+
+def smiles_to_molecular_formula(smiles_list: List[str]) -> List[str]:
+    """Convert SMILES strings to molecular formulas using RDKit.
+    
+    Args:
+        smiles_list: List of SMILES strings
+        
+    Returns:
+        List of molecular formulas (e.g., "C14H19NO2")
+    """
+    if not RDKIT_AVAILABLE:
+        raise ImportError("RDKit is required to convert SMILES to molecular formulas.")
+    
+    formulas = []
+    for smiles in smiles_list:
+        try:
+            mol = Chem.MolFromSmiles(smiles)  # type: ignore[attr-defined]
+            if mol is not None:
+                formula = Chem.rdMolDescriptors.CalcMolFormula(mol)  # type: ignore[attr-defined]
+                formulas.append(formula)
+            else:
+                # Fallback to empty formula if parsing fails
+                formulas.append("")
+        except Exception:
+            # Fallback to empty formula if any error occurs
+            formulas.append("")
+    
+    return formulas
+
+
+def extract_smiles_between_sep(decoded_text: str) -> str:
+    """Extract SMILES content between [SEP] tokens and remove spaces.
+    
+    Args:
+        decoded_text: Decoded text from tokenizer containing [CLS], [SEP], [PAD] tokens
+        
+    Returns:
+        Clean SMILES string with spaces removed, or empty string if parsing fails
+        
+    Example:
+        Input: "[CLS] C21H19 N3O2S2 [SEP] CS 1 (=O) (C 2)C1 c1ccc(N n2 nc( cc3 cs c(- c4ccccc4) c23)cc1 [SEP] [PAD] ..."
+        Output: "CS1(=O)(C2)C1c1ccc(Nn2nc(cc3csc(-c4ccccc4)c23)cc1"
+    """
+    try:
+        # Find all [SEP] tokens
+        sep_positions = []
+        sep_token = "[SEP]"
+        start = 0
+        while True:
+            pos = decoded_text.find(sep_token, start)
+            if pos == -1:
+                break
+            sep_positions.append(pos)
+            start = pos + len(sep_token)
+        
+        # We need at least 2 [SEP] tokens to extract content between them
+        if len(sep_positions) < 2:
+            return ""
+        
+        # Extract content between first and second [SEP] tokens
+        start_pos = sep_positions[0] + len(sep_token)
+        end_pos = sep_positions[1]
+        
+        smiles_content = decoded_text[start_pos:end_pos].strip()
+        
+        # Remove all spaces
+        smiles_content = smiles_content.replace(" ", "")
+        
+        return smiles_content
+        
+    except Exception:
+        # Return empty string if any parsing error occurs
+        return ""
+
+
+def tokenize_smiles_with_formulas(tokenizer, smiles_list: List[str], max_length: int) -> dict:
+    """Tokenize SMILES with corresponding molecular formulas.
+    
+    Args:
+        tokenizer: The tokenizer instance
+        smiles_list: List of SMILES strings  
+        max_length: Maximum sequence length
+        
+    Returns:
+        Dictionary with tokenized inputs
+    """
+    # Generate molecular formulas from SMILES
+    formulas = smiles_to_molecular_formula(smiles_list)
+    
+    # Tokenize with formulas as text and SMILES as text_pair
+    return tokenizer(
+        text=formulas,
+        text_pair=smiles_list,
+        padding="max_length",
+        truncation=True,
+        max_length=max_length,
+        return_tensors="np",
+    )
 
 
 class MolecularEvaluator:
@@ -130,14 +229,15 @@ class MolecularEvaluator:
 
     def _load_config(self) -> ml_collections.ConfigDict:
         """Load molecular configuration."""
-        config = molecular_finetune.get_config()
+        config = molecular_xtra_large.get_config()
         config.batch_size = self.args.batch_size
         return config
 
-    def _load_tokenizer(self) -> transformers.PreTrainedTokenizerFast:
+    def _load_tokenizer(self):
         """Load SMILES tokenizer."""
         try:
-            tokenizer = transformers.AutoTokenizer.from_pretrained(
+            tokenizer_cls = getattr(transformers, "AutoTokenizer")
+            tokenizer = tokenizer_cls.from_pretrained(
                 self.config.tokenizer or self.args.tokenizer_path
             )
             print(
@@ -164,8 +264,8 @@ class MolecularEvaluator:
 
     def _load_model_and_state(self) -> Tuple[nn.Module, state_utils.TrainState]:
         """Load model and checkpoint state."""
-        rng = utils.get_rng(self.config.seed)
-        data_shape = (self.config.max_length,)
+        rng = utils.get_rng(int(self.config.seed))  # type: ignore
+        data_shape = (int(self.config.max_length),)  # type: ignore
 
         # Create dummy schedule function (not used for inference)
         def schedule_fn(step):
@@ -174,8 +274,8 @@ class MolecularEvaluator:
         # Create model and train state
         model, _, train_state, _ = state_utils.create_train_state(
             self.config,
-            rng,
-            input_shape=(self.config.batch_size * 10,) + data_shape,
+            rng,  # type: ignore
+            input_shape=(int(self.config.batch_size) * 10,) + data_shape,  # type: ignore
             schedule_fn=schedule_fn,
         )
 
@@ -260,7 +360,7 @@ class MolecularEvaluator:
                 mol = Chem.MolFromInchi(inchi)
                 if mol is None:
                     continue
-                smiles = Chem.MolToSmiles(mol)
+                smiles = Chem.MolToSmiles(mol)  # type: ignore[attr-defined]
 
                 # Extract features
                 features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=2048)
@@ -362,7 +462,10 @@ class MolecularEvaluator:
         return folded_predicted, bit_differences
 
     def _generate_samples(
-        self, predicted_fingerprints: np.ndarray, original_fingerprints: np.ndarray
+        self,
+        predicted_fingerprints: np.ndarray,
+        original_fingerprints: np.ndarray,
+        smiles_list: Optional[List[str]] = None,
     ) -> List[List[str]]:
         """Unified generation method that handles both single and multi-device scenarios."""
         # Ensure fingerprints are 2D (batch_size, fingerprint_dim)
@@ -370,24 +473,24 @@ class MolecularEvaluator:
             predicted_fingerprints = predicted_fingerprints[None, :]
         if original_fingerprints.ndim == 1:
             original_fingerprints = original_fingerprints[None, :]
-            
+
         batch_size = predicted_fingerprints.shape[0]
 
-        # Process fingerprints and get bit differences
-        processed_fingerprints, bit_differences = self._process_fingerprints(
+        # Process fingerprints
+        processed_fingerprints, _ = self._process_fingerprints(
             predicted_fingerprints,
             original_fingerprints,
             threshold=0.5,
             mode=self.args.fingerprint_mode,
         )
 
-        # Use the selected fingerprints for generation
+        # Choose conditioning fingerprints
         if self.args.use_original_fingerprints:
             fingerprints_for_conditioning = original_fingerprints
         else:
             fingerprints_for_conditioning = processed_fingerprints
 
-        # Expand for multiple samples per input
+        # Repeat per requested samples
         expanded_fingerprints = jnp.repeat(
             jnp.array(fingerprints_for_conditioning, dtype=jnp.float32),
             self.args.num_samples,
@@ -395,94 +498,119 @@ class MolecularEvaluator:
         )
 
         total_samples = batch_size * self.args.num_samples
+
+        # Optional conditional init from SMILES
+        tokens_repeated = None
+        if getattr(self.args, "use_conditional_init", False) and smiles_list is not None:
+            # Use paired tokenization with molecular formulas and SMILES
+            enc = tokenize_smiles_with_formulas(
+                self.tokenizer, smiles_list, int(self.config.max_length)  # type: ignore
+            )
+            tokens = jnp.asarray(enc["input_ids"], dtype=jnp.int32)  # (B, L)
+            tokens_repeated = jnp.repeat(tokens, self.args.num_samples, axis=0)
+
+        # Default dummy inputs (unused when conditional init is active)
         dummy_inputs = jnp.ones((total_samples, self.config.max_length), dtype="int32")
 
-        conditioning = {
-            "fingerprint": expanded_fingerprints,
-        }
+        conditioning = {"fingerprint": expanded_fingerprints}
 
-        # Handle device distribution
+        # Device distribution
         num_devices = jax.device_count()
-        
-        # Check if we should use pmap (multi-device) or simple generation (single device)
-        use_pmap = num_devices > 1 and total_samples >= num_devices and self.replicated_train_state is not None
-        
+        samples_per_device = total_samples // num_devices
+        use_pmap = (num_devices > 1 and 
+                   total_samples >= num_devices and 
+                   samples_per_device > 0 and 
+                   self.replicated_train_state is not None)
+
+        # Force single-device mode for small batches to avoid pmap issues
+        if use_pmap and samples_per_device == 0:
+            print(f"Falling back to single-device mode: {total_samples} samples < {num_devices} devices")
+            use_pmap = False
+
         if use_pmap:
-            # Multi-device path using pmap
-            # print(f"Using pmap with {num_devices} devices for generation")
-            
-            # Adjust total_samples to be divisible by num_devices to avoid padding
-            samples_per_device = total_samples // num_devices
+            # Adjust to be divisible by num_devices
             if total_samples % num_devices != 0:
-                # Drop the remainder to avoid padding issues
                 adjusted_total_samples = samples_per_device * num_devices
-                print(f"Adjusting batch size from {total_samples} to {adjusted_total_samples} to fit {num_devices} devices")
-                
-                # Trim inputs and conditioning to the adjusted size
-                dummy_inputs = dummy_inputs[:adjusted_total_samples]
+                print(
+                    f"Adjusting batch size from {total_samples} to {adjusted_total_samples} to fit {num_devices} devices"
+                )
+                if tokens_repeated is not None:
+                    tokens_repeated = tokens_repeated[:adjusted_total_samples]
+                else:
+                    dummy_inputs = dummy_inputs[:adjusted_total_samples]
                 expanded_fingerprints = expanded_fingerprints[:adjusted_total_samples]
                 total_samples = adjusted_total_samples
-            
-            per_device_batch_size = total_samples // num_devices
+                samples_per_device = total_samples // num_devices
 
-            # Reshape for pmap
-            dummy_inputs = dummy_inputs.reshape(
-                num_devices, per_device_batch_size, self.config.max_length
-            )
-            conditioning = {
-                "fingerprint": expanded_fingerprints.reshape(
-                    num_devices, per_device_batch_size, -1
-                ),
-            }
+            per_device_batch_size = samples_per_device
 
-            # Generate samples using pmap - use pre-replicated training state
-            self.rng, sample_rng = jax.random.split(self.rng)
-            replicated_rng = flax_utils.replicate(sample_rng)
-
-            samples = sampling.generate(
-                self.model,
-                self.replicated_train_state,
-                replicated_rng,
-                dummy_inputs,
-                conditioning=conditioning,
-            )
-
-            # Collect results from all devices using all_gather
-            all_samples = jax.pmap(
-                lambda x: jax.lax.all_gather(x, "batch"), axis_name="batch"
-            )(samples)
-            samples = flax_utils.unreplicate(all_samples)
-            samples = samples.reshape(-1, self.config.max_length)
-            
-        else:
-            # Single device path using simple_generate or vmap
-            print(f"Using single device generation for {total_samples} samples")
-            
-            # For EMA params, we need to create appropriate variables
-            if self.train_state.ema_params is not None:
-                variables = {
-                    'params': self.train_state.ema_params,
-                    **self.train_state.state
-                }
+            # Safety check: ensure we have valid batch size
+            if per_device_batch_size <= 0:
+                print(f"Invalid per_device_batch_size: {per_device_batch_size}, falling back to single-device mode")
+                use_pmap = False
             else:
-                variables = {
-                    'params': self.train_state.params,
-                    **self.train_state.state
+                # Reshape inputs for pmap
+                if tokens_repeated is not None:
+                    per_device_inputs = {
+                        "smiles": tokens_repeated.reshape(
+                            num_devices, per_device_batch_size, self.config.max_length
+                        )
+                    }
+                else:
+                    per_device_inputs = dummy_inputs.reshape(
+                        num_devices, per_device_batch_size, self.config.max_length
+                    )
+                per_device_conditioning = {
+                    "fingerprint": expanded_fingerprints.reshape(
+                        num_devices, per_device_batch_size, -1
+                    )
                 }
-            
-            self.rng, sample_rng = jax.random.split(self.rng)
-            
-            # Generate initial noise
-            zt = self.model.apply(
-                variables,
-                total_samples,
-                method=self.model.prior_sample,
-                rngs={'sample': sample_rng},
-            )
-            
+
+                # RNG per device
+                self.rng, sample_rng = jax.random.split(self.rng)
+                replicated_rng = flax_utils.replicate(sample_rng)
+
+                samples = sampling.generate(
+                    self.model,
+                    self.replicated_train_state,
+                    replicated_rng,
+                    per_device_inputs,
+                    per_device_conditioning,  # conditioning as positional
+                    (tokens_repeated is not None),  # use_conditional_init as positional
+                )
+
+                # Gather results
+                all_samples = jax.pmap(
+                    lambda x: jax.lax.all_gather(x, "batch"), axis_name="batch"
+                )(samples)
+                samples = flax_utils.unreplicate(all_samples)
+                samples = samples.reshape(-1, self.config.max_length)
+
+        if not use_pmap:
+            # Single-device path
+            print(f"Using single device generation for {total_samples} samples")
+
+            # Choose params (EMA if available)
+            if self.train_state.ema_params is not None:
+                variables = {"params": self.train_state.ema_params, **self.train_state.state}
+            else:
+                variables = {"params": self.train_state.params, **self.train_state.state}
+
             self.rng, sample_rng = jax.random.split(self.rng)
 
-            # Diffusion sampling loop
+            # Initialize zt
+            if tokens_repeated is not None:
+                zt = self.model.apply(variables, tokens_repeated, method=self.model.conditional_sample)
+            else:
+                zt = self.model.apply(
+                    variables,
+                    total_samples,
+                    method=self.model.prior_sample,
+                    rngs={"sample": sample_rng},
+                )
+
+            self.rng, sample_rng = jax.random.split(self.rng)
+
             def body_fn(i, zt):
                 return self.model.apply(
                     variables,
@@ -494,21 +622,15 @@ class MolecularEvaluator:
                     method=self.model.sample_step,
                 )
 
-            z0 = jax.lax.fori_loop(
-                lower=0, upper=self.model.timesteps, body_fun=body_fn, init_val=zt
-            )
-            
-            # Decode to tokens
+            z0 = jax.lax.fori_loop(lower=0, upper=self.model.timesteps, body_fun=body_fn, init_val=zt)
+
             samples = self.model.apply(
                 variables,
                 z0,
                 conditioning=conditioning,
                 method=self.model.decode,
-                rngs={'sample': self.rng},
+                rngs={"sample": self.rng},
             )
-            
-            # samples should be tokens directly from decode method
-            # If it's a tuple, extract the first element
             if isinstance(samples, tuple):
                 samples = samples[0]
 
@@ -516,25 +638,26 @@ class MolecularEvaluator:
         actual_samples_per_input = total_samples // batch_size
         samples = samples.reshape(batch_size, actual_samples_per_input, -1)
 
-        # Convert to SMILES
+        # Convert to SMILES strings
         batch_results = []
-        for batch_idx in range(batch_size):
-            sample_list = []
+        for b in range(batch_size):
             if batch_size == 1 and actual_samples_per_input <= 10:
-                # For debug mode, decode individually and show tokens
+                # Debug-friendly printout
+                sample_list = []
                 for i in range(actual_samples_per_input):
-                    tokens = samples[batch_idx, i]
+                    tokens = samples[b, i]
                     print(f"Generated tokens: {tokens}")
-                    smiles = self.tokenizer.decode(
-                        tokens, skip_special_tokens=False, clean_up_tokenization_spaces=True
-                    )
-                    sample_list.append(smiles)
+                    decoded_text = self.tokenizer.decode(tokens, skip_special_tokens=False, clean_up_tokenization_spaces=True)
+                    print(f"Raw decoded: {decoded_text}")
+                    clean_smiles = extract_smiles_between_sep(decoded_text)
+                    print(f"Clean SMILES: {clean_smiles}")
+                    sample_list.append(clean_smiles)
             else:
-                # For batch mode, decode in batch
-                smiles = self.tokenizer.batch_decode(
-                    samples[batch_idx], skip_special_tokens=True, clean_up_tokenization_spaces=True
+                decoded_list = self.tokenizer.batch_decode(
+                    samples[b], skip_special_tokens=False, clean_up_tokenization_spaces=True
                 )
-                sample_list.extend(smiles)
+                # Process each decoded string to extract SMILES between [SEP] tokens
+                sample_list = [extract_smiles_between_sep(decoded_text) for decoded_text in decoded_list]
             batch_results.append(sample_list)
 
         return batch_results
@@ -579,7 +702,7 @@ class MolecularEvaluator:
                 mol = Chem.MolFromInchi(inchi)
                 if mol is None:
                     continue
-                smiles = Chem.MolToSmiles(mol)
+                smiles = Chem.MolToSmiles(mol)  # type: ignore[attr-defined]
 
                 # Extract features
                 features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=2048)
@@ -634,7 +757,9 @@ class MolecularEvaluator:
 
         # Generate samples using unified method
         generated_results = self._generate_samples(
-            predicted_fingerprint, original_fingerprint
+            predicted_fingerprint,
+            original_fingerprint,
+            [original_smiles] if self.args.use_conditional_init else None,
         )
         generated_smiles = generated_results[0]  # First (and only) item in batch
 
@@ -750,7 +875,9 @@ class MolecularEvaluator:
 
         # Generate samples for batch
         batch_generated = self._generate_samples(
-            batch_predicted_fingerprints, batch_original_fingerprints
+            batch_predicted_fingerprints,
+            batch_original_fingerprints,
+            list(batch_smiles) if self.args.use_conditional_init else None,
         )
 
         # Save batch results
@@ -917,6 +1044,11 @@ def parse_arguments() -> argparse.Namespace:
         choices=["or", "xor", "and", "none"],
         default="or",
         help="Mode for folding fingerprints when they are longer than 2048 bits: 'or' (default), 'xor', or 'and'",
+    )
+    parser.add_argument(
+        "--use_conditional_init",
+        action="store_true",
+        help="Initialize zt from input SMILES using model.conditional_sample (masks after first token id 3)",
     )
 
     return parser.parse_args()

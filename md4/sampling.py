@@ -28,8 +28,15 @@ def get_attr(train_state, key):
     return train_state[key]
 
 
-@functools.partial(jax.pmap, axis_name='batch', static_broadcasted_argnums=0)
-def generate(model, train_state, rng, dummy_inputs, conditioning=None):
+@functools.partial(jax.pmap, axis_name='batch', static_broadcasted_argnums=(0, 5))
+def generate(
+    model,
+    train_state,
+    rng,
+    dummy_inputs,
+    conditioning=None,
+    use_conditional_init: bool = False,
+):
   """Generate samples from the diffusion model."""
   rng = jax.random.fold_in(rng, jax.lax.axis_index('batch'))
   variables = {
@@ -37,12 +44,22 @@ def generate(model, train_state, rng, dummy_inputs, conditioning=None):
       **get_attr(train_state, 'state'),
   }
   rng, sub_rng = jax.random.split(rng)
-  zt = model.apply(
-      variables,
-      dummy_inputs.shape[0],
-      method=model.prior_sample,
-      rngs={'sample': sub_rng},
-  )
+  if use_conditional_init:
+    # Initialize zt from provided token sequences by masking after the first stop token (id=3).
+    tokens = dummy_inputs["smiles"]
+    zt = model.apply(
+        variables,
+        tokens,
+        method=model.conditional_sample,
+        rngs={'sample': sub_rng}
+    )
+  else:
+    zt = model.apply(
+        variables,
+        dummy_inputs.shape[0],
+        method=model.prior_sample,
+        rngs={'sample': sub_rng},
+    )
   rng, sub_rng = jax.random.split(rng)
 
   def body_fn(i, zt):
@@ -68,16 +85,33 @@ def generate(model, train_state, rng, dummy_inputs, conditioning=None):
   )
 
 
-def simple_generate(rng, train_state, batch_size, model, conditioning=None):
+def simple_generate(
+    rng,
+    train_state,
+    batch_size,
+    model,
+    conditioning=None,
+    dummy_inputs=None,
+    use_conditional_init: bool = False,
+):
   """Generate samples from the diffusion model."""
   variables = {'params': train_state.params, **train_state.state}
   rng, sub_rng = jax.random.split(rng)
-  zt = model.apply(
-      variables,
-      batch_size,
-      method=model.prior_sample,
-      rngs={'sample': sub_rng},
-  )
+  if use_conditional_init and dummy_inputs is not None and 'smiles' in dummy_inputs:
+    tokens = dummy_inputs['smiles']
+    zt = model.apply(
+        variables,
+        tokens,
+        method=model.conditional_sample,
+        rngs={'sample': sub_rng}
+    )
+  else:
+    zt = model.apply(
+        variables,
+        batch_size,
+        method=model.prior_sample,
+        rngs={'sample': sub_rng},
+    )
   rng, sub_rng = jax.random.split(rng)
 
   def body_fn(i, zt):
