@@ -26,7 +26,7 @@ from absl import app, flags, logging
 
 try:
     from rdkit import Chem, DataStructs
-    from rdkit.Chem import AllChem, Crippen, inchi, Draw, Lipinski, rdMolDescriptors, QED
+    from rdkit.Chem import AllChem, Crippen, inchi, Draw, Lipinski, rdMolDescriptors, QED, rdFingerprintGenerator
     # Try to import SAScore - it's not always available
     try:
         from rdkit.Contrib.SA_Score import sascorer
@@ -34,10 +34,14 @@ try:
     except ImportError:
         SASCORE_AVAILABLE = False
         logging.warning("SAScore not available. Will skip SyntheticAccessibility calculation.")
+    
+    # Create Morgan fingerprint generator once
+    MORGAN_GENERATOR = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
     RDKIT_AVAILABLE = True
 except ImportError:
     RDKIT_AVAILABLE = False
     SASCORE_AVAILABLE = False
+    MORGAN_GENERATOR = None
     logging.warning("RDKit not available. Analysis will be limited.")
 
 FLAGS = flags.FLAGS
@@ -225,11 +229,12 @@ def prepare_molecular_data(df: pl.DataFrame, overlapping_prefixes: Set[str]) -> 
     
     def calculate_tanimoto(smiles1: str, smiles2: str) -> float:
         mol1, mol2 = mol_cache.get(smiles1), mol_cache.get(smiles2)
-        if not (mol1 and mol2):
+        if not (mol1 and mol2) or not MORGAN_GENERATOR:
             return 0.0
         try:
-            fp1 = AllChem.GetMorganFingerprintAsBitVect(mol1, 2, nBits=1024)
-            fp2 = AllChem.GetMorganFingerprintAsBitVect(mol2, 2, nBits=1024)
+            # Use the global MorganGenerator with 2048 fpSize
+            fp1 = MORGAN_GENERATOR.GetFingerprint(mol1)
+            fp2 = MORGAN_GENERATOR.GetFingerprint(mol2)
             return DataStructs.TanimotoSimilarity(fp1, fp2)
         except Exception:
             return 0.0
