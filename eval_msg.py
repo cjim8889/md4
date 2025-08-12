@@ -16,7 +16,10 @@ Each eval_id will have num_samples rows in the output, one for each generated mo
 """
 
 import argparse
+import importlib.util
 import os
+import sys
+from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
 import flax.linen as nn
@@ -39,7 +42,58 @@ except ImportError:
 
 # Import MD4 modules
 from md4 import rdkit_utils, sampling, utils, state_utils
-from md4.configs.md4 import molecular_finetune, molecular_xtra_large
+
+
+def load_config_from_path(config_path: str) -> ml_collections.ConfigDict:
+    """Load configuration from a given path.
+    
+    Args:
+        config_path: Path to the config file. Can be either:
+                    - Module path like "md4.configs.md4.molecular_xtra_large" 
+                    - File path like "/path/to/config.py"
+                    - Relative path like "md4/configs/md4/molecular_xtra_large.py"
+        
+    Returns:
+        Configuration object
+    """
+    print(f"Loading config from: {config_path}")
+    
+    # Handle different path formats
+    if config_path.startswith("md4/") and config_path.endswith(".py"):
+        # Relative path from md4 package - convert to module path
+        # e.g., "md4/configs/md4/molecular_xtra_large.py" -> "md4.configs.md4.molecular_xtra_large"
+        module_path = config_path.replace("/", ".")
+        if module_path.endswith(".py"):
+            module_path = module_path[:-3]  # Remove .py extension
+        
+        # Import as module
+        try:
+            module = importlib.import_module(module_path)
+            return module.get_config()
+        except ImportError as e:
+            raise ImportError(f"Could not import config module {module_path}") from e
+    elif "." in config_path and not config_path.startswith("/") and not config_path.endswith(".py"):
+        # Direct module path like "md4.configs.md4.molecular_xtra_large"
+        try:
+            module = importlib.import_module(config_path)
+            return module.get_config()
+        except ImportError as e:
+            raise ImportError(f"Could not import config module {config_path}") from e
+    else:
+        # Absolute file path
+        config_file = Path(config_path)
+        if not config_file.exists():
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+        
+        # Load module from file path
+        spec = importlib.util.spec_from_file_location("config_module", config_file)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not load config from {config_path}")
+        
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["config_module"] = module
+        spec.loader.exec_module(module)
+        return module.get_config()
 
 
 def smiles_to_molecular_formula(smiles_list: List[str]) -> List[str]:
@@ -229,7 +283,9 @@ class MolecularEvaluator:
 
     def _load_config(self) -> ml_collections.ConfigDict:
         """Load molecular configuration."""
-        config = molecular_xtra_large.get_config()
+        # Use config path from args if provided, otherwise default to molecular_xtra_large
+        config_path = getattr(self.args, 'config_path', 'md4.configs.md4.molecular_xtra_large')
+        config = load_config_from_path(config_path)
         config.batch_size = self.args.batch_size
         return config
 
@@ -999,6 +1055,11 @@ def parse_arguments() -> argparse.Namespace:
         "--tokenizer_path",
         default="data/smiles_tokenizer",
         help="Path to SMILES tokenizer",
+    )
+    parser.add_argument(
+        "--config_path",
+        default="md4.configs.md4.molecular_xtra_large",
+        help="Path to model configuration. Can be module path (md4.configs.md4.molecular_xtra_large) or file path",
     )
 
     # Output arguments

@@ -23,9 +23,9 @@ _SMILES_TOKENIZER = "data/pubchem_large_tokenizer"
 def preprocess_or_load_msg_finetune(
         data_dir, 
         tokenizer: "transformers.PreTrainedTokenizerFast",
-        version="1.0.0",
-        max_length=160,
-        num_workers=None
+        version="1.1.0",
+        max_length=128,
+        fp_bits=4096,
     ):
     """Load and preprocess MSG finetune dataset with INCHI to SMILES conversion.
     
@@ -37,15 +37,12 @@ def preprocess_or_load_msg_finetune(
         num_workers: Number of worker processes for parallel processing
     """
     # Import heavy modules only when needed
-    import multiprocessing as mp
     import os
 
     import numpy as np
     import polars as pl
     import tensorflow_datasets as tfds
     
-    fp_bits = 4096  # MSG dataset uses 4096-bit fingerprints
-
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
 
@@ -70,8 +67,6 @@ def preprocess_or_load_msg_finetune(
         print(f"Test data: {len(test_data)} samples")
         print(f"Sample train data: {train_data[:2][1]}")
 
-        from tqdm import tqdm
-
         features = tfds.features.FeaturesDict(
             {
                 "smiles": tfds.features.Tensor(
@@ -81,7 +76,7 @@ def preprocess_or_load_msg_finetune(
                     shape=(fp_bits,), dtype=np.float32  # MSG fingerprints are float32
                 ),
                 "true_fingerprint": tfds.features.Tensor(
-                    shape=(2048,), dtype=np.float32  # True fingerprint for loss calculation
+                    shape=(fp_bits,), dtype=np.float32  # True fingerprint for loss calculation
                 ),
             }
         )
@@ -92,15 +87,33 @@ def preprocess_or_load_msg_finetune(
         # Process as single shards since dataset is smaller
         print("Processing training data...")
         valid_training_counts = []
-        for args in tqdm([(0, 1, train_data, "train", tfds_data_dir, features, tokenizer, max_length)], desc="Processing train"):
-            count = process_and_write_msg_tfrecord(args)
-            valid_training_counts.append(count)
+        count = process_and_write_msg_tfrecord(
+            shard_index=0,
+            total_shards=1,
+            data_tuples=train_data,
+            split="train",
+            output_dir=str(tfds_data_dir),
+            features=features,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            fp_bits=fp_bits
+        )
+        valid_training_counts.append(count)
 
         print("Processing validation data...")
         valid_validation_counts = []
-        for args in tqdm([(0, 1, test_data, "validation", tfds_data_dir, features, tokenizer, max_length)], desc="Processing validation"):
-            count = process_and_write_msg_tfrecord(args)
-            valid_validation_counts.append(count)
+        count = process_and_write_msg_tfrecord(
+            shard_index=0,
+            total_shards=1,
+            data_tuples=test_data,
+            split="validation",
+            output_dir=str(tfds_data_dir),
+            features=features,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            fp_bits=fp_bits
+        )
+        valid_validation_counts.append(count)
 
         tfds.folder_dataset.write_metadata(
             data_dir=str(tfds_data_dir),
@@ -126,6 +139,7 @@ def create_msg_finetune_datasets(config: config_dict.ConfigDict, seed: int):
     max_length = config.get("max_length", 160)
     tokenizer_path = config.get("tokenizer", _SMILES_TOKENIZER)  
     batch_size = config.get("batch_size", 512)  
+    fp_bits = config.get("fp_bits", 4096)  # Default to 4096 bits for MSG dataset
 
     tokenizer = transformers.PreTrainedTokenizerFast.from_pretrained(tokenizer_path)
 
@@ -133,9 +147,9 @@ def create_msg_finetune_datasets(config: config_dict.ConfigDict, seed: int):
     pubchem_builder = preprocess_or_load_msg_finetune(
         data_dir=config.get("data_dir", "data/msg_finetune"),
         tokenizer=tokenizer,
-        version="1.0.1",
+        version="1.1.0",
         max_length=max_length,
-        num_workers=config.get("num_workers", 4)
+        fp_bits=fp_bits
     )
 
     # Load SMILES tokenizer
@@ -182,12 +196,11 @@ if __name__ == "__main__":
             "fp_radius": 2,
             "fp_bits": 4096,
             "max_length": 128,
-            "tokenizer": _SMILES_TOKENIZER,
+            "tokenizer": "data/pubchem_large_tokenizer_2048",
             "batch_size": 512,
-            "version": "1.0.0",
+            "version": "1.1.0",
             "training_shards": 1,
             "validation_shards": 1,
-            "num_processes": 4,
         }),
         seed=42
     )

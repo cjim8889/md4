@@ -95,19 +95,20 @@ class FingerprintAdapter(nn.Module):
             The adapted fingerprint.
         """
 
-        x = jnp.where(
-            x < 0.5,
-            0,
-            1
-        )
-        x = jnp.logical_or(
-            x[:, :self.fingerprint_dim],
-            x[:, self.fingerprint_dim:],
-        )
+        if self.raw_fingerprint_dim != self.fingerprint_dim:
+            x = jnp.where(
+                x < 0.5,
+                0,
+                1
+            )
+            x = jnp.logical_or(
+                x[:, :self.fingerprint_dim],
+                x[:, self.fingerprint_dim:],
+            )
  
         for i in range(self.layers - 1):
             x = nn.Dense(
-                features=self.raw_fingerprint_dim // 2,
+                features=self.raw_fingerprint_dim,
                 name=f"fingerprint_adapter_dense_{i}"
             )(x)
             x = nn.relu(x)
@@ -123,8 +124,6 @@ class FingerprintAdapter(nn.Module):
             0.0,
             1.0
         )
-
-        # jax.debug.print("FingerprintAdapter: {x}, {output}, {sum}", x=x, output=output, sum=jnp.sum(output, axis=1))
 
         return output.astype("float32"), logits  # Ensure output is float32 for compatibility
 
@@ -205,7 +204,7 @@ class MD4(nn.Module):
         if self.classes > 0:
             self.cond_embeddings = nn.Embed(self.classes, self.feature_dim)
         if self.fingerprint_dim > 0:
-            if self.fingerprint_adapter and self.raw_fingerprint_dim != self.fingerprint_dim:
+            if self.fingerprint_adapter:
                 self.fp_adapter = FingerprintAdapter(
                     raw_fingerprint_dim=self.raw_fingerprint_dim,
                     fingerprint_dim=self.fingerprint_dim
@@ -285,7 +284,7 @@ class MD4(nn.Module):
         if conditioning is not None:
             if isinstance(conditioning, dict):
                 _cond = conditioning["fingerprint"]
-                if self.fingerprint_adapter and self.raw_fingerprint_dim != self.fingerprint_dim:
+                if self.fingerprint_adapter:
                     # Convert raw fingerprint to the desired dimension
                     if conditioning["fingerprint"].shape[1] != self.raw_fingerprint_dim:
                         # Print stack trace for debugging

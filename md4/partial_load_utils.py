@@ -20,12 +20,8 @@ import logging
 from typing import Any, Tuple
 
 import jax
-import jax.numpy as jnp
 from clu import parameter_overview
-from flax import traverse_util
 from orbax import checkpoint as orbax_checkpoint
-
-from md4.configs.md4 import molecular
 
 
 def should_use_partial_loading(config) -> bool:
@@ -40,18 +36,59 @@ def should_use_partial_loading(config) -> bool:
     return (
         hasattr(config, "old_config")
         and config.old_config is not None
-        and "molecular.py" in str(config.old_config)
         and config.get("partial_load", False)
     )
 
 
-def get_old_config():
+def get_old_config(config):
     """Get the old molecular configuration.
-
+    
+    Args:
+        config: Current configuration that contains old_config path
+        
     Returns:
         Configuration object for the old molecular model
     """
-    return molecular.get_config()
+    import importlib.util
+    import sys
+    from pathlib import Path
+    
+    if not hasattr(config, "old_config") or config.old_config is None:
+        raise ValueError("Config must have 'old_config' attribute specifying the old config path")
+    
+    old_config_path = config.old_config
+    logging.info(f"Loading old config from: {old_config_path}")
+    
+    # Handle different path formats
+    if old_config_path.startswith("md4/"):
+        # Relative path from md4 package - convert to module path
+        # e.g., "md4/configs/md4/molecular.py" -> "md4.configs.md4.molecular"
+        module_path = old_config_path.replace("/", ".")
+        if module_path.endswith(".py"):
+            module_path = module_path[:-3]  # Remove .py extension
+        
+        # Import as module
+        try:
+            module = importlib.import_module(module_path)
+            return module.get_config()
+        except ImportError as e:
+            logging.error(f"Failed to import {module_path}: {e}")
+            raise ImportError(f"Could not import old config module {module_path}") from e
+    else:
+        # Absolute file path
+        config_file = Path(old_config_path)
+        if not config_file.exists():
+            raise FileNotFoundError(f"Old config file not found: {old_config_path}")
+        
+        # Load module from file path
+        spec = importlib.util.spec_from_file_location("old_config", config_file)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not load config from {old_config_path}")
+        
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["old_config"] = module
+        spec.loader.exec_module(module)
+        return module.get_config()
 
 
 def partial_load_checkpoint(
@@ -88,7 +125,7 @@ def partial_load_checkpoint(
 
     try:
         # Get the old config
-        old_config = get_old_config()
+        old_config = get_old_config(config)
 
         # Create old model and train state for loading the checkpoint
         old_rng = jax.random.PRNGKey(88)  # Use a fixed seed for reproducibility
@@ -106,7 +143,7 @@ def partial_load_checkpoint(
 
         # Load checkpoint into old train state
         old_checkpointed_state = checkpoint_manager.restore(
-            checkpoint_manager.latest_step(),
+            config.get("old_checkpoint_steps", checkpoint_manager.latest_step()),
             items=old_checkpointed_state,
         )
 

@@ -4,6 +4,7 @@ This module contains only the essential imports and functions needed
 for multiprocessing workers to avoid loading heavy dependencies.
 """
 
+from typing import List, Tuple, Any
 import numpy as np
 from multiprocessing import shared_memory
 
@@ -149,22 +150,41 @@ def process_and_write_shard_tfrecord(args):
     print(f"Shard {shard_index} processed: {written_count} entries written to {shard_filename}")
     return written_count
 
-def process_and_write_msg_tfrecord(args):
+def process_and_write_msg_tfrecord(
+    shard_index: int,
+    total_shards: int,
+    data_tuples: List[Tuple[str, Any]],
+    split: str,
+    output_dir: str,
+    features: Any,
+    tokenizer: Any,
+    max_length: int,
+    fp_bits: int = 2048
+) -> int:
     """Process MSG finetune data (INCHI + fingerprints) and write to TFRecord.
     
     Args:
-        args: Tuple of (shard_index, total_shards, data_tuples, split, output_dir, features, tokenizer, max_length)
+        shard_index: Index of the current shard being processed
+        total_shards: Total number of shards
+        data_tuples: List of (inchi, fingerprint) tuples to process
+        split: Dataset split name ('train', 'validation', etc.)
+        output_dir: Directory to write the TFRecord files
+        features: TensorFlow features specification for serialization
+        tokenizer: Tokenizer for converting SMILES to tokens
+        max_length: Maximum sequence length for tokenized SMILES
+        fp_bits: Size of the Morgan fingerprint (default: 2048)
+        
+    Returns:
+        Number of successfully written entries
     """
-    shard_index, total_shards, data_tuples, split, output_dir, features, tokenizer, max_length = args[:8]
-
     import tensorflow as tf
     from rdkit.Chem import MolFromInchi, MolToSmiles, rdFingerprintGenerator
     import os
 
     shard_filename = os.path.join(output_dir, f"msg_finetune-{split}.tfrecord-{shard_index:05d}-of-{total_shards:05d}")
     
-    # Create Morgan fingerprint generator (modern approach)
-    mfpgen = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+    # Create Morgan fingerprint generator with configurable fp_bits (modern approach)
+    mfpgen = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=fp_bits)
     
     written_count = 0
     skipped_count = 0
