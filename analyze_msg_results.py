@@ -2,14 +2,17 @@
 """Analysis script for MSG evaluation results - refactored for efficiency and clarity.
 
 Usage:
-    # Full analysis
-    python analyze_msg_results.py --results_file=./results/msg_eval_results.csv
+    # Full analysis - automatically detects results files in output_dir
+    python analyze_msg_results.py --output_dir=./results/
     
     # Debug mode (only 10 samples)
-    python analyze_msg_results.py --results_file=./results/msg_eval_results.csv --debug
+    python analyze_msg_results.py --output_dir=./results/ --debug
     
     # From intermediate batch files
-    python analyze_msg_results.py --intermediate_dir=./results/intermediate/
+    python analyze_msg_results.py --output_dir=./results/ --intermediate_dir=intermediate/
+    
+    # Explicit results file (legacy mode)
+    python analyze_msg_results.py --output_dir=./results/ --results_file=msg_eval_results.csv
 """
 
 import os
@@ -38,9 +41,9 @@ except ImportError:
     logging.warning("RDKit not available. Analysis will be limited.")
 
 FLAGS = flags.FLAGS
-flags.DEFINE_string("results_file", "./results/msg_eval_results.csv", "Path to evaluation results (CSV or parquet)")
-flags.DEFINE_string("intermediate_dir", "", "Directory containing intermediate batch CSV files (alternative to results_file)")
-flags.DEFINE_string("output_dir", "./results/analysis/", "Directory to save analysis results")
+flags.DEFINE_string("output_dir", "./results/", "Directory containing results files and where analysis will be saved")
+flags.DEFINE_string("results_file", "", "Path to specific evaluation results file (CSV or parquet) - if empty, auto-detects in output_dir")
+flags.DEFINE_string("intermediate_dir", "", "Subdirectory name containing intermediate batch CSV files (relative to output_dir)")
 flags.DEFINE_string("overlapping_prefixes_file", "", "Path to CSV file containing overlapping InChI key prefixes to filter out")
 flags.DEFINE_bool("plot_figures", True, "Whether to generate plots")
 flags.DEFINE_bool("molecular_grid", True, "Whether to generate molecular structure grid")
@@ -71,17 +74,63 @@ def load_overlapping_prefixes(file_path: str) -> Set[str]:
         return set()
 
 
-def load_and_combine_data(results_file: str = "", intermediate_dir: str = "") -> pl.DataFrame:
-    """Load data from either results file or intermediate directory."""
+def auto_detect_results_file(output_dir: str) -> str:
+    """Automatically detect the main results file in the output directory."""
+    if not os.path.exists(output_dir):
+        raise FileNotFoundError(f"Output directory does not exist: {output_dir}")
+    
+    # Common result file patterns to look for (in order of preference)
+    patterns = [
+        "msg_eval_results.csv",
+        "msg_eval_results.parquet", 
+        "*_results.csv",
+        "*_results.parquet",
+        "results.csv",
+        "results.parquet"
+    ]
+    
+    import glob
+    
+    for pattern in patterns:
+        matches = glob.glob(os.path.join(output_dir, pattern))
+        if matches:
+            # If multiple matches, prefer the most recently modified
+            most_recent = max(matches, key=os.path.getmtime)
+            logging.info(f"Auto-detected results file: {most_recent}")
+            return most_recent
+    
+    raise FileNotFoundError(f"No results file found in {output_dir}. Looked for patterns: {patterns}")
+
+
+def load_and_combine_data(output_dir: str, results_file: str = "", intermediate_dir: str = "") -> pl.DataFrame:
+    """Load data from results file or intermediate directory within output_dir."""
     if intermediate_dir:
-        batch_files = sorted([f for f in os.listdir(intermediate_dir) 
+        # intermediate_dir is relative to output_dir
+        full_intermediate_dir = os.path.join(output_dir, intermediate_dir)
+        if not os.path.exists(full_intermediate_dir):
+            raise FileNotFoundError(f"Intermediate directory does not exist: {full_intermediate_dir}")
+            
+        batch_files = sorted([f for f in os.listdir(full_intermediate_dir) 
                             if f.startswith("batch_") and f.endswith(".csv")])
         if not batch_files:
-            raise FileNotFoundError(f"No batch files found in {intermediate_dir}")
+            raise FileNotFoundError(f"No batch files found in {full_intermediate_dir}")
         
-        logging.info(f"Loading {len(batch_files)} batch files")
-        dfs = [pl.read_csv(os.path.join(intermediate_dir, f)) for f in batch_files]
+        logging.info(f"Loading {len(batch_files)} batch files from {full_intermediate_dir}")
+        dfs = [pl.read_csv(os.path.join(full_intermediate_dir, f)) for f in batch_files]
         return pl.concat(dfs)
+    
+    # Use explicit results_file if provided, otherwise auto-detect
+    if results_file:
+        # If results_file is not an absolute path, make it relative to output_dir
+        if not os.path.isabs(results_file):
+            results_file = os.path.join(output_dir, results_file)
+    else:
+        results_file = auto_detect_results_file(output_dir)
+    
+    if not os.path.exists(results_file):
+        raise FileNotFoundError(f"Results file does not exist: {results_file}")
+    
+    logging.info(f"Loading results from: {results_file}")
     
     if results_file.endswith('.parquet'):
         return pl.read_parquet(results_file)
@@ -739,11 +788,17 @@ def main(argv):
     
     mode_info = "DEBUG MODE (10 samples)" if FLAGS.debug else "FULL ANALYSIS"
     logging.info(f"Starting MSG analysis - {mode_info}...")
+    
+    # Ensure output directory exists
     os.makedirs(FLAGS.output_dir, exist_ok=True)
+    
+    # Create analysis subdirectory
+    analysis_dir = os.path.join(FLAGS.output_dir, "analysis")
+    os.makedirs(analysis_dir, exist_ok=True)
     
     # Load and prepare data
     overlapping_prefixes = load_overlapping_prefixes(FLAGS.overlapping_prefixes_file)
-    df = load_and_combine_data(FLAGS.results_file, FLAGS.intermediate_dir)
+    df = load_and_combine_data(FLAGS.output_dir, FLAGS.results_file, FLAGS.intermediate_dir)
     
     # Debug mode: limit to first 10 samples
     if FLAGS.debug:
@@ -776,17 +831,17 @@ def main(argv):
     if results.properties:
         logging.info(f"Properties calculated for {len(results.properties)} metrics")
     
-    # Generate outputs
+    # Generate outputs in analysis subdirectory
     if FLAGS.plot_figures:
-        create_summary_plot(results, FLAGS.output_dir)
+        create_summary_plot(results, analysis_dir)
     
     if FLAGS.molecular_grid:
-        create_molecular_grid(df, FLAGS.output_dir)
+        create_molecular_grid(df, analysis_dir)
     
-    generate_report(results, FLAGS.output_dir)
+    generate_report(results, analysis_dir)
     
     mode_suffix = " (DEBUG MODE - limited dataset)" if FLAGS.debug else ""
-    logging.info(f"Analysis complete{mode_suffix}. Results saved to {FLAGS.output_dir}")
+    logging.info(f"Analysis complete{mode_suffix}. Results saved to {analysis_dir}")
 
 
 if __name__ == "__main__":

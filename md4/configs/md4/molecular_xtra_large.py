@@ -55,7 +55,7 @@ def get_config() -> config_dict.ConfigDict:
   config.depth_scaled_init = True
   config.cond_type = "adaln_zero"
 
-  config.learning_rate = 2e-4
+  config.learning_rate = 3e-4
   config.learning_rate_schedule = "cosine"
   config.warmup_steps = 2000
   config.weight_decay = 0.0
@@ -65,7 +65,7 @@ def get_config() -> config_dict.ConfigDict:
   config.ema_rate = 0.9999
   # If num_train_steps==-1 then the number of training steps is calculated from
   # num_epochs.
-  config.num_train_steps = 1_500_000
+  config.num_train_steps = 3_500_000
   # Evaluates for a full epoch if num_eval_steps==-1.
   config.num_eval_steps = 1000
   config.batch_size = 512

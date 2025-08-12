@@ -346,7 +346,7 @@ class MolecularEvaluator:
             print(
                 "WARNING: No predicted_fingerprint column found, using zero fingerprints"
             )
-            fingerprints_list = [np.zeros(2048) for _ in range(len(inchi_list))]
+            fingerprints_list = [np.zeros(self.args.fp_bits) for _ in range(len(inchi_list))]
 
         print(f"Converting {len(inchi_list)} InChI to SMILES...")
 
@@ -363,7 +363,7 @@ class MolecularEvaluator:
                 smiles = Chem.MolToSmiles(mol)  # type: ignore[attr-defined]
 
                 # Extract features
-                features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=2048)
+                features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=self.args.fp_bits)
                 if features is None:
                     continue
 
@@ -371,10 +371,10 @@ class MolecularEvaluator:
                 predicted_fingerprint = (
                     np.array(fingerprints_list[i], dtype=np.float32)
                     if i < len(fingerprints_list)
-                    else np.zeros(2048, dtype=np.float32)
+                    else np.zeros(self.args.fp_bits, dtype=np.float32)
                 )
                 original_fingerprint = (
-                    features if isinstance(features, np.ndarray) else np.zeros(2048)
+                    features if isinstance(features, np.ndarray) else np.zeros(self.args.fp_bits)
                 )
 
                 processed_count += 1
@@ -436,9 +436,9 @@ class MolecularEvaluator:
             original_fingerprints = original_fingerprints[None, :]
 
         # Fold the predicted fingerprints (original should already be folded/processed)
-        if binary_predicted.shape[1] > 2048:
-            first_half = binary_predicted[:, :2048]
-            second_half = binary_predicted[:, 2048:]
+        if binary_predicted.shape[1] > self.args.fp_bits:
+            first_half = binary_predicted[:, :self.args.fp_bits]
+            second_half = binary_predicted[:, self.args.fp_bits:]
 
             # Apply the specified folding mode
             if mode == "or":
@@ -689,7 +689,7 @@ class MolecularEvaluator:
             print(
                 "WARNING: No predicted_fingerprint column found, using zero fingerprints"
             )
-            fingerprints_list = [np.zeros(2048) for _ in range(len(inchi_list))]
+            fingerprints_list = [np.zeros(self.args.fp_bits) for _ in range(len(inchi_list))]
 
         print(
             f"Searching for first valid molecule from {len(inchi_list)} InChI entries..."
@@ -705,7 +705,7 @@ class MolecularEvaluator:
                 smiles = Chem.MolToSmiles(mol)  # type: ignore[attr-defined]
 
                 # Extract features
-                features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=2048)
+                features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=self.args.fp_bits)
                 if features is None:
                     continue
 
@@ -1040,10 +1040,16 @@ def parse_arguments() -> argparse.Namespace:
         help="Use original RDKit fingerprints instead of predicted fingerprints for generation",
     )
     parser.add_argument(
+        "--fp_bits",
+        type=int,
+        default=2048,
+        help="Number of bits for fingerprint generation (default: 2048)",
+    )
+    parser.add_argument(
         "--fingerprint_mode",
         choices=["or", "xor", "and", "none"],
         default="or",
-        help="Mode for folding fingerprints when they are longer than 2048 bits: 'or' (default), 'xor', or 'and'",
+        help="Mode for folding fingerprints when they are longer than fp_bits: 'or' (default), 'xor', or 'and'",
     )
     parser.add_argument(
         "--use_conditional_init",
