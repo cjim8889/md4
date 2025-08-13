@@ -44,6 +44,13 @@ except ImportError:
     MORGAN_GENERATOR = None
     logging.warning("RDKit not available. Analysis will be limited.")
 
+try:
+    from sklearn.metrics import r2_score
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    logging.warning("sklearn not available. Will skip R² score calculation.")
+
 FLAGS = flags.FLAGS
 flags.DEFINE_string("output_dir", "./results/", "Directory containing results files and where analysis will be saved")
 flags.DEFINE_string("results_file", "", "Path to specific evaluation results file (CSV or parquet) - if empty, auto-detects in output_dir")
@@ -511,12 +518,55 @@ def analyze_properties(df: pl.DataFrame) -> Dict:
             logging.info("=========================\n")
         
         if eval_id_maes:  # Only calculate if we have valid eval_ids
+            # Calculate R² score if sklearn is available and we have enough data points
+            r2 = None
+            if SKLEARN_AVAILABLE and len(all_original_values) >= 2:
+                # For R², we need to match original values to generated values properly
+                # Get per-eval_id averages for proper comparison
+                original_for_r2 = []
+                generated_for_r2 = []
+                
+                # Re-iterate through grouped data to get matched pairs
+                grouped = df.group_by("sample_id")
+                for group_data in grouped:
+                    sample_id, group_df = group_data
+                    
+                    # Get original value for this eval_id
+                    original_prop_value = None
+                    generated_prop_values = []
+                    
+                    for row in group_df.iter_rows(named=True):
+                        if original_prop_value is None:
+                            orig_props = row.get("original_props", {})
+                            if orig_props and prop in orig_props and orig_props[prop] is not None:
+                                original_prop_value = orig_props[prop]
+                        
+                        gen_props = row.get("generated_props", {})
+                        if (gen_props and prop in gen_props and gen_props[prop] is not None and
+                            np.isfinite(gen_props[prop])):
+                            generated_prop_values.append(gen_props[prop])
+                    
+                    # Add matched pair if we have both original and generated values
+                    if (original_prop_value is not None and len(generated_prop_values) > 0 and
+                        np.isfinite(original_prop_value)):
+                        original_for_r2.append(original_prop_value)
+                        generated_for_r2.append(np.mean(generated_prop_values))
+                
+                # Calculate R² score
+                if len(original_for_r2) >= 2:
+                    try:
+                        r2 = r2_score(original_for_r2, generated_for_r2)
+                    except Exception as e:
+                        logging.warning(f"R² calculation failed for {prop}: {e}")
+                        r2 = None
+            
             results[prop] = {
                 "original_mean": np.mean(all_original_values),
                 "original_std": np.std(all_original_values),
                 "generated_mean": np.mean(all_generated_values),
                 "generated_std": np.std(all_generated_values),
                 "mae": np.mean(eval_id_maes),  # Average of per-eval_id MAEs
+                "r2_score": r2,  # R² score (None if unavailable)
                 "num_valid_eval_ids": len(eval_id_maes),
                 "num_unique_originals": len(all_original_values),
                 "num_total_generated": len(all_generated_values),
@@ -738,6 +788,8 @@ def generate_report(results: AnalysisResults, output_dir: str):
             f.write(f"  Original: {stats['original_mean']:.3f} ± {stats['original_std']:.3f} (n={stats['num_unique_originals']})\n")
             f.write(f"  Generated: {stats['generated_mean']:.3f} ± {stats['generated_std']:.3f} (n={stats['num_total_generated']})\n")
             f.write(f"  MAE: {stats['mae']:.3f} (averaged over {stats['num_valid_eval_ids']} eval_ids)\n")
+            if stats.get('r2_score') is not None:
+                f.write(f"  R² Score: {stats['r2_score']:.3f}\n")
             f.write(f"  Valid eval_ids: {stats['num_valid_eval_ids']}\n")
             
             # Benchmark comparison
@@ -835,6 +887,11 @@ def main(argv):
     logging.info(f"Avg similarity: {results.similarity.get('avg_similarity_per_molecule', 0.0):.3f}")
     if results.properties:
         logging.info(f"Properties calculated for {len(results.properties)} metrics")
+        # Show R² scores for key properties
+        for prop in ['AtomicLogP', 'PolarSurfaceArea', 'QED']:
+            if prop in results.properties and results.properties[prop].get('r2_score') is not None:
+                r2 = results.properties[prop]['r2_score']
+                logging.info(f"  {prop} R²: {r2:.3f}")
     
     # Generate outputs in analysis subdirectory
     if FLAGS.plot_figures:

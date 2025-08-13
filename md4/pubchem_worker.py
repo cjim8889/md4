@@ -122,23 +122,26 @@ def process_and_write_shard_tfrecord(args):
                     except (ValueError, TypeError):
                         # Skip entries with conversion errors
                         continue
-
-                try:
-                    smiles = tokenizer.encode(
-                        text=text,
-                        text_pair=text_pair,
-                        add_special_tokens=True,
-                        padding="max_length",
-                        truncation=True,
-                        max_length=max_length,
-                        return_tensors="np",
-                    ).reshape(-1).astype(np.int32)
-                except Exception as e:
-                    # Skip entries that cause tokenization errors
-                    print(f"Tokenization error for shard {shard_index}, entry {i}: {e}")
-                    print(f"  Text: {repr(text)}")
-                    print(f"  Text_pair: {repr(text_pair)}")
-                    continue
+                    
+                if tokenizer is not None:
+                    try:
+                        smiles = tokenizer.encode(
+                            text=text,
+                            text_pair=text_pair,
+                            add_special_tokens=True,
+                            padding="max_length",
+                            truncation=True,
+                            max_length=max_length,
+                            return_tensors="np",
+                        ).reshape(-1).astype(np.int32)
+                    except Exception as e:
+                        # Skip entries that cause tokenization errors
+                        print(f"Tokenization error for shard {shard_index}, entry {i}: {e}")
+                        print(f"  Text: {repr(text)}")
+                        print(f"  Text_pair: {repr(text_pair)}")
+                        continue
+                else:
+                    smiles = f"{text}[SEP]{text_pair}"
 
                 serialised = features.serialize_example({
                     "smiles": smiles,

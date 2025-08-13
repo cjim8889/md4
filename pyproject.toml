@@ -25,6 +25,8 @@ dependencies = [
     "tfds-nightly>=4.9.9.dev202507250045",
     "tf-keras-nightly>=2.16.0.dev2024021410",
     "tokenizers==0.21.4",
+    "sentencepiece>=0.2.1",
+    "tensorflow-text-nightly>=2.20.0.dev20250619",
 ]
 
 
