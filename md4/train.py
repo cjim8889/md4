@@ -36,7 +36,6 @@ from orbax import checkpoint as orbax_checkpoint
 
 from md4 import (
     input_pipeline,
-    input_pipeline_v2,
     partial_load_utils,
     rdkit_utils,
     sampling,
@@ -456,12 +455,7 @@ def train_and_evaluate(
         jax.random.randint(data_seed, [], minval=0, maxval=np.iinfo(np.int32).max)
     )
     # The input pipeline runs on each process and loads data for local TPUs.
-    create_datasets = (
-        input_pipeline_v2.create_datasets
-        if config.get("use_v2_input_pipeline", None)
-        else input_pipeline.create_datasets
-    )
-    train_loader, eval_loaders, dataset_info = create_datasets(config, data_seed)
+    train_loader, eval_loaders, dataset_info = input_pipeline.create_datasets(config, data_seed)
     train_iter = (
         iter(train_loader)
         if config.dataset not in ["pubchem_large", "msg_finetune"]
