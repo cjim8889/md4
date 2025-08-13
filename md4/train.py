@@ -1,20 +1,3 @@
-# Copyright 2025 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
-
-"""Methods for training MD4/GenMD4 on text/image datasets."""
-
 import functools
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -32,9 +15,9 @@ from absl import logging
 from clu import metric_writers, metrics, periodic_actions
 from etils import epath
 from jax.experimental import checkify
-from orbax import checkpoint as orbax_checkpoint
 
 from md4 import (
+    checkpoint_utils,
     input_pipeline,
     partial_load_utils,
     rdkit_utils,
@@ -44,7 +27,9 @@ from md4 import (
 )
 
 
-def merge_batch_stats(replicated_state: state_utils.TrainState) -> state_utils.TrainState:
+def merge_batch_stats(
+    replicated_state: state_utils.TrainState,
+) -> state_utils.TrainState:
     """Merge model batch stats."""
     if jax.tree.leaves(replicated_state.state):
         cross_replica_mean = jax.pmap(lambda x: jax.lax.pmean(x, "batch"), "batch")
@@ -55,37 +40,9 @@ def merge_batch_stats(replicated_state: state_utils.TrainState) -> state_utils.T
         return replicated_state
 
 
-def _get_checkpoint_manager(
-    config: ml_collections.ConfigDict, workdir: epath.PathLike, create: bool = True
-) -> orbax_checkpoint.CheckpointManager:
-    """Loads the orbax checkpoint manager for train state and data iterator."""
-    # The keys in this dict should match the keys in `checkpointed_state`.
-    checkpointers = dict(
-        train_state=orbax_checkpoint.PyTreeCheckpointer(),
-        train_iter=orbax_checkpoint.Checkpointer(
-            grain.PyGrainCheckpointHandler()
-        ),  # pytype:disable=wrong-arg-types
-    )
-    checkpoint_dir = epath.Path(workdir) / "checkpoints"
-    # keep_period = (
-    #     config.checkpoint_keep_period if config.checkpoint_keep_period > 0 else None
-    # )
-    return orbax_checkpoint.CheckpointManager(
-        checkpoint_dir,
-        checkpointers=checkpointers,
-        options=orbax_checkpoint.CheckpointManagerOptions(
-            create=create,
-            # preservation_policy=orbax_checkpoint.checkpoint_managers.LatestN(n=20),
-            best_fn=lambda x: x["validation_loss"]
-            if "validation_loss" in x
-            else x["loss"],
-            best_mode="min",
-            max_to_keep=20,
-        ),
-    )
-
-
-def cosine_decay(lr: Any, current_step: Any, total_steps: Any) -> Any:  # pytype: disable=invalid-annotation
+def cosine_decay(
+    lr: Any, current_step: Any, total_steps: Any
+) -> Any:  # pytype: disable=invalid-annotation
     """Cosine decay that accepts Python scalars or JAX arrays."""
     current_step = jnp.asarray(current_step, dtype=jnp.float32)
     total_steps = jnp.maximum(1.0, jnp.asarray(total_steps, dtype=jnp.float32))
@@ -175,7 +132,7 @@ def get_learning_rate(
         pos_in_cycle = jnp.mod(effective_step, cycle_length)
 
         # Optionally decay the peak LR each cycle.
-        peak_lr = base_learning_rate * (decay_factor ** cycle_index)
+        peak_lr = base_learning_rate * (decay_factor**cycle_index)
 
         # Cosine within the cycle from peak_lr down to min_lr.
         cosine_ratio = pos_in_cycle / cycle_length
@@ -183,7 +140,9 @@ def get_learning_rate(
     else:
         raise NotImplementedError(f"Unknown schedule type: {schedule_type}")
 
-    return jnp.asarray(lr * warmup, dtype=jnp.float32)  # pytype: disable=bad-return-type  # jax-types
+    return jnp.asarray(
+        lr * warmup, dtype=jnp.float32
+    )  # pytype: disable=bad-return-type  # jax-types
 
 
 def loss_fn(params, state, rng, model, batch, train=False):
@@ -455,12 +414,14 @@ def train_and_evaluate(
         jax.random.randint(data_seed, [], minval=0, maxval=np.iinfo(np.int32).max)
     )
     # The input pipeline runs on each process and loads data for local TPUs.
-    train_loader, eval_loaders, dataset_info = input_pipeline.create_datasets(config, data_seed)
-    train_iter = (
-        iter(train_loader)
-        if config.dataset not in ["pubchem_large", "msg_finetune"]
-        else train_loader
+    train_loader, eval_loaders, dataset_info = input_pipeline.create_datasets(
+        config, data_seed
     )
+
+    # Determine if we need to create an iterator based on loader type
+    # Grain loaders are DataLoader instances and need iter(), while TF iterators are already iterators
+    is_grain_loader = isinstance(train_loader, grain.DataLoader)
+    train_iter = iter(train_loader) if is_grain_loader else train_loader
 
     # Initialize model.
     rng, model_rng = jax.random.split(rng)
@@ -484,14 +445,10 @@ def train_and_evaluate(
         )
 
     # Set up checkpointing of the model and the input pipeline.
-    # Create checkpoint manager for saving (new checkpoints)
-    save_checkpoint_manager = _get_checkpoint_manager(config, workdir, create=True)
-
-    # Create checkpoint manager for loading (old checkpoints if olddir is provided)
-    if olddir is not None:
-        load_checkpoint_manager = _get_checkpoint_manager(config, olddir, create=False)
-    else:
-        load_checkpoint_manager = save_checkpoint_manager
+    # Get both save and load checkpoint managers
+    save_checkpoint_manager, load_checkpoint_manager = checkpoint_utils.get_checkpoint_managers(
+        config, workdir, olddir, is_grain_loader=is_grain_loader
+    )
 
     # Retrieve data from previous checkpoints if possible.
     if load_checkpoint_manager.latest_step() is not None:
@@ -501,9 +458,7 @@ def train_and_evaluate(
                 train_state, _ = partial_load_utils.partial_load_checkpoint(
                     config=config,
                     train_state=train_state,
-                    train_iter=train_iter
-                    if config.dataset not in ["pubchem_large", "msg_finetune"]
-                    else None,
+                    train_iter=train_iter if is_grain_loader else None,
                     checkpoint_manager=load_checkpoint_manager,
                     create_train_state_fn=state_utils.create_train_state,
                     schedule_fn=schedule_fn,
@@ -517,9 +472,7 @@ def train_and_evaluate(
             # Standard checkpoint loading
             train_state, _ = partial_load_utils.standard_checkpoint_loading(
                 train_state=train_state,
-                train_iter=train_iter
-                if config.dataset not in ["pubchem_large", "msg_finetune"]
-                else None,
+                train_iter=train_iter if is_grain_loader else None,
                 checkpoint_manager=load_checkpoint_manager,
             )
 
@@ -627,7 +580,9 @@ def train_and_evaluate(
                             if "smiles" not in dummy_batch
                             else dummy_batch["smiles"]
                         )
-                        conditioning = state_utils.get_conditioning_from_batch(dummy_batch)
+                        conditioning = state_utils.get_conditioning_from_batch(
+                            dummy_batch
+                        )
 
                         samples = sampling.generate(
                             model,
@@ -678,30 +633,24 @@ def train_and_evaluate(
             if step % config.checkpoint_every_steps == 0 or is_last_step:
                 with report_progress.timed("checkpoint"):
                     train_state = merge_batch_stats(train_state)
-                    if config.dataset in ["pubchem_large", "msg_finetune"]:
-                        save_checkpoint_manager.save(
-                            step,
-                            items=dict(
-                                train_state=jax.tree_util.tree_map(
-                                    np.array, flax_utils.unreplicate(train_state)
-                                ),
-                            ),
-                            metrics=jax.tree_util.tree_map(
-                                lambda x: x.item(), eval_metrics_cpu
-                            ),
-                        )
-                    else:
-                        save_checkpoint_manager.save(
-                            step,
-                            items=dict(
-                                train_state=jax.tree_util.tree_map(
-                                    np.array, flax_utils.unreplicate(train_state)
-                                ),
-                                train_iter=train_iter,
-                            ),
-                            metrics=jax.tree_util.tree_map(
-                                lambda x: x.item(), eval_metrics_cpu
-                            ),
-                        )
+
+                    # Prepare checkpoint items
+                    checkpoint_items = dict(
+                        train_state=jax.tree_util.tree_map(
+                            np.array, flax_utils.unreplicate(train_state)
+                        ),
+                    )
+
+                    # Only include train_iter for grain loaders
+                    if is_grain_loader:
+                        checkpoint_items["train_iter"] = train_iter
+
+                    save_checkpoint_manager.save(
+                        step,
+                        items=checkpoint_items,
+                        metrics=jax.tree_util.tree_map(
+                            lambda x: x.item(), eval_metrics_cpu
+                        ),
+                    )
 
     logging.info("Finishing training at step %d", num_train_steps)
