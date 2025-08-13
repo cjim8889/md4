@@ -615,7 +615,7 @@ def train_and_evaluate(
 
                                 # Calculate SMILES validity for pubchem_large dataset
                                 if (
-                                    config.dataset in ["pubchem_large", "msg_finetune"]
+                                    config.dataset in ["pubchem_large", "msg_finetune", "pubchem_large_text"]
                                     and texts is not None
                                 ):
                                     validity_metrics = (
