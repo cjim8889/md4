@@ -37,7 +37,7 @@ try:
 except ImportError:
     pass
 try:
-    from md4 import input_pipeline_pubchem, input_pipeline_pubchem_large, input_pipeline_msg_finetune
+    from md4 import input_pipeline_pubchem, input_pipeline_pubchem_large, input_pipeline_msg_finetune, input_pipeline_pubchem_large_text
 except ImportError as e:
     print("input_pipeline_pubchem not found", e)
 FlatFeatures = dict[str, Any]
@@ -361,6 +361,10 @@ def create_datasets(
         info.update(pubchem_info)
     elif config.dataset == "pubchem_large":
         train_dataset, eval_dataset, pubchem_info = input_pipeline_pubchem_large.create_pubchem_datasets(config, seed)
+        info.update(pubchem_info)
+        return train_dataset, eval_dataset, info
+    elif config.dataset == "pubchem_large_text":
+        train_dataset, eval_dataset, pubchem_info = input_pipeline_pubchem_large_text.create_pubchem_datasets(config, seed)
         info.update(pubchem_info)
         return train_dataset, eval_dataset, info
     elif config.dataset == "msg_finetune":

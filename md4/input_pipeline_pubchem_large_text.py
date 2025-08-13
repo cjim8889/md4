@@ -67,7 +67,7 @@ class SentencePieceTokenizer:
                 return self.sp_tokenizer.detokenize(t_no_padding).numpy()
         else:
             # For lists or other sequences
-            if hasattr(t, '__len__') and len(t) > 0 and hasattr(t[0], '__len__'):
+            if hasattr(t, "__len__") and len(t) > 0 and hasattr(t[0], "__len__"):
                 # Handle nested sequences (batch of sequences)
                 results = []
                 for seq in t:

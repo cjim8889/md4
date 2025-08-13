@@ -7,6 +7,7 @@ import numpy as np
 from rdkit import Chem, RDLogger
 from rdkit.Chem import Descriptors
 from rdkit.Chem import rdFingerprintGenerator
+from rdkit.Chem import rdMolDescriptors
 
 # Set random seed and suppress RDKit warnings
 random.seed(42)
@@ -172,20 +173,41 @@ def process_smiles_with_shared_memory(smi, i, fp_radius=2, fp_bits=2048):
     return i, None
 
 
-def calculate_smiles_validity(texts_list):
-    """Calculate validity metrics for a batch of SMILES strings.
+def get_molecular_formula(mol):
+    """Get molecular formula from RDKit molecule object.
+    
+    Args:
+        mol: RDKit molecule object
+        
+    Returns:
+        str: Molecular formula (e.g., 'C6H10N2')
+    """
+    if mol is None:
+        return None
+        
+    try:
+        return rdMolDescriptors.CalcMolFormula(mol)
+    except Exception:
+        return None
+
+
+def calculate_formula_smiles_validity(texts_list):
+    """Calculate validity and matching metrics for formula-SMILES pairs.
 
     Args:
-        texts_list: list of strings containing tokenized sequences with format:
-                   [CLS] formula [SEP] smiles [SEP] [PAD]...
+        texts_list: list of strings containing sequences in one of these formats:
+                   - [CLS] formula [SEP] smiles [SEP] [PAD]...
+                   - formula[SEP]smiles
 
     Returns:
-        dict: Dictionary containing validity metrics:
+        dict: Dictionary containing validity and matching metrics:
             - validity_rate: float, fraction of valid SMILES
             - valid_count: int, number of valid SMILES
-            - total_count: int, total number of SMILES
+            - total_count: int, total number of samples
             - filtered_count: int, number of SMILES that pass filtering
             - filtered_rate: float, fraction of SMILES that pass filtering
+            - formula_match_count: int, number of samples where formula matches SMILES
+            - formula_match_rate: float, fraction of samples where formula matches SMILES
     """
     if not texts_list:
         return {
@@ -194,11 +216,14 @@ def calculate_smiles_validity(texts_list):
             "total_count": 0,
             "filtered_count": 0,
             "filtered_rate": 0.0,
+            "formula_match_count": 0,
+            "formula_match_rate": 0.0,
         }
 
     total_count = len(texts_list)
     valid_count = 0
     filtered_count = 0
+    formula_match_count = 0
 
     for text_str in texts_list:
         # Convert numpy string to Python string if needed
@@ -212,36 +237,59 @@ def calculate_smiles_validity(texts_list):
         if not text_str:
             continue
 
-        # Extract SMILES string between the two [SEP] tokens
-        # Format: [CLS] formula [SEP] smiles [SEP] [PAD]...
-        sep_splits = text_str.split("[SEP]")
-        if len(sep_splits) < 2:
-            # No proper format with two SEP tokens, skip this sample
-            continue
-        
-        # Extract the SMILES part (between first and second [SEP])
-        smiles_str = sep_splits[1].strip()
+        formula_str = None
+        smiles_str = None
+
+        # Handle different formats
+        if "[CLS]" in text_str:
+            # Format: [CLS] formula [SEP] smiles [SEP] [PAD]...
+            sep_splits = text_str.split("[SEP]")
+            if len(sep_splits) < 2:
+                continue
+            
+            # Extract formula (between [CLS] and first [SEP])
+            formula_part = sep_splits[0].replace("[CLS]", "").strip()
+            formula_str = formula_part
+            
+            # Extract SMILES (between first and second [SEP])
+            smiles_str = sep_splits[1].strip()
+        else:
+            # Format: formula[SEP]smiles
+            sep_splits = text_str.split("[SEP]")
+            if len(sep_splits) < 2:
+                continue
+                
+            formula_str = sep_splits[0].strip()
+            smiles_str = sep_splits[1].strip()
         
         # Remove all whitespace from the SMILES string
         smiles_str = smiles_str.replace(" ", "").replace("\n", "").replace("\t", "")
         
-        # Skip empty SMILES strings
-        if not smiles_str:
+        # Skip empty SMILES or formula strings
+        if not smiles_str or not formula_str:
             continue
 
         try:
             mol = Chem.MolFromSmiles(smiles_str)
             if mol is not None:
                 valid_count += 1
-                # Also check if it passes our molecule filtering
+                
+                # Check if it passes our molecule filtering
                 if filter_molecule(mol):
                     filtered_count += 1
+                
+                # Check if formula matches SMILES
+                calculated_formula = get_molecular_formula(mol)
+                if calculated_formula and calculated_formula == formula_str:
+                    formula_match_count += 1
+                    
         except Exception:
             # Any exception during parsing means invalid SMILES
             pass
 
     validity_rate = valid_count / total_count if total_count > 0 else 0.0
     filtered_rate = filtered_count / total_count if total_count > 0 else 0.0
+    formula_match_rate = formula_match_count / total_count if total_count > 0 else 0.0
 
     return {
         "validity_rate": validity_rate,
@@ -249,4 +297,10 @@ def calculate_smiles_validity(texts_list):
         "total_count": total_count,
         "filtered_count": filtered_count,
         "filtered_rate": filtered_rate,
+        "formula_match_count": formula_match_count,
+        "formula_match_rate": formula_match_rate,
     }
+
+
+# Backward compatibility alias
+calculate_smiles_validity = calculate_formula_smiles_validity
