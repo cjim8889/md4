@@ -59,23 +59,27 @@ class ModelArgs:
     embed_input: bool = False
     n_embed_classes: int = 1024
     causal: bool = False
+    dtype: jnp.dtype = jnp.float32
+    param_dtype: jnp.dtype = jnp.float32
 
 
 class RMSNorm(nn.Module):
     dim: int
     eps: float
+    dtype: jnp.dtype = jnp.float32
+    param_dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         self.scale = self.param(
-            "scale", lambda key, shape: jnp.ones(shape), (self.dim,)
+            "scale", lambda key, shape: jnp.ones(shape, dtype=self.param_dtype), (self.dim,)
         )
 
     def _norm(self, x):
         return x * jax.lax.rsqrt(jnp.square(x).mean(-1, keepdims=True) + self.eps)
 
     def __call__(self, x):
-        output = self._norm(x)
-        return output * self.scale
+        output = self._norm(x.astype(self.dtype))
+        return (output * self.scale.astype(self.dtype)).astype(self.dtype)
 
 
 def precompute_freqs_cis(dim, end, theta: float = 10000.0):
@@ -160,16 +164,18 @@ class Attention(nn.Module):
     dropout_rate: float = 0.0
     causal: bool = False
     qkv_bias: bool = False
+    dtype: jnp.dtype = jnp.float32
+    param_dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         self._n_kv_heads = self.n_heads if self.n_kv_heads is None else self.n_kv_heads
         assert self.n_heads % self._n_kv_heads == 0
         self.n_rep = self.n_heads // self._n_kv_heads
         self.head_dim = self.dim // self.n_heads
-        self.wq = nn.Dense(self.n_heads * self.head_dim, use_bias=self.qkv_bias)
-        self.wk = nn.Dense(self._n_kv_heads * self.head_dim, use_bias=self.qkv_bias)
-        self.wv = nn.Dense(self._n_kv_heads * self.head_dim, use_bias=self.qkv_bias)
-        self.wo = nn.Dense(self.dim, use_bias=False)
+        self.wq = nn.Dense(self.n_heads * self.head_dim, use_bias=self.qkv_bias, dtype=self.dtype, param_dtype=self.param_dtype)
+        self.wk = nn.Dense(self._n_kv_heads * self.head_dim, use_bias=self.qkv_bias, dtype=self.dtype, param_dtype=self.param_dtype)
+        self.wv = nn.Dense(self._n_kv_heads * self.head_dim, use_bias=self.qkv_bias, dtype=self.dtype, param_dtype=self.param_dtype)
+        self.wo = nn.Dense(self.dim, use_bias=False, dtype=self.dtype, param_dtype=self.param_dtype)
         if self.dropout_rate > 0.0:
             self.attn_dropout = nn.Dropout(self.dropout_rate)
             self.resid_dropout = Dropout1d(self.dropout_rate)
@@ -231,6 +237,8 @@ class FeedForward(nn.Module):
     hidden_dim: int | None = None
     w_init_scale: float = 1.0
     mlp_type: str = "swiglu"
+    dtype: jnp.dtype = jnp.float32
+    param_dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         multiple_of = self.multiple_of
@@ -242,9 +250,9 @@ class FeedForward(nn.Module):
         w_init = nn.initializers.variance_scaling(
             self.w_init_scale, "fan_in", "truncated_normal"
         )
-        self.w1 = nn.Dense(hidden_dim, use_bias=False, kernel_init=w_init)
-        self.w2 = nn.Dense(self.dim, use_bias=False, kernel_init=w_init)
-        self.w3 = nn.Dense(hidden_dim, use_bias=False, kernel_init=w_init)
+        self.w1 = nn.Dense(hidden_dim, use_bias=False, kernel_init=w_init, dtype=self.dtype, param_dtype=self.param_dtype)
+        self.w2 = nn.Dense(self.dim, use_bias=False, kernel_init=w_init, dtype=self.dtype, param_dtype=self.param_dtype)
+        self.w3 = nn.Dense(hidden_dim, use_bias=False, kernel_init=w_init, dtype=self.dtype, param_dtype=self.param_dtype)
         # self.dropout = nn.Dropout(self.dropout_rate)
         if self.dropout_rate > 0.0:
             self.dropout = Dropout1d(self.dropout_rate)
@@ -271,6 +279,8 @@ class TransformerBlock(nn.Module):
             n_kv_heads=args.n_kv_heads,
             dropout_rate=args.dropout_rate,
             causal=args.causal,
+            dtype=args.dtype,
+            param_dtype=args.param_dtype,
         )
 
         if args.depth_scaled_init:
@@ -285,6 +295,8 @@ class TransformerBlock(nn.Module):
             hidden_dim=args.hidden_dim,
             w_init_scale=w_init_scale,
             mlp_type=args.mlp_type,
+            dtype=args.dtype,
+            param_dtype=args.param_dtype,
         )
 
     @nn.compact
@@ -296,7 +308,7 @@ class TransformerBlock(nn.Module):
                     [
                         # nn.swish,
                         activation,
-                        nn.Dense(6 * self.args.dim, use_bias=True),
+                        nn.Dense(6 * self.args.dim, use_bias=True, dtype=self.args.dtype, param_dtype=self.args.param_dtype),
                     ]
                 )
             elif self.args.cond_type == "adaln_zero":
@@ -309,6 +321,8 @@ class TransformerBlock(nn.Module):
                             use_bias=True,
                             kernel_init=nn.initializers.zeros,
                             bias_init=nn.initializers.zeros,
+                            dtype=self.args.dtype,
+                            param_dtype=self.args.param_dtype,
                         ),
                     ]
                 )
@@ -318,10 +332,10 @@ class TransformerBlock(nn.Module):
                 jnp.split(ln(cond)[:, None, :], 6, axis=-1)
             )
             attention_norm = nn.LayerNorm(
-                epsilon=self.args.norm_eps, use_bias=False, use_scale=False
+                epsilon=self.args.norm_eps, use_bias=False, use_scale=False, dtype=self.args.dtype, param_dtype=self.args.param_dtype
             )
             ffn_norm = nn.LayerNorm(
-                epsilon=self.args.norm_eps, use_bias=False, use_scale=False
+                epsilon=self.args.norm_eps, use_bias=False, use_scale=False, dtype=self.args.dtype, param_dtype=self.args.param_dtype
             )
             h = x + gate_att * self.attention(
                 attention_norm(x) * (scale_att + 1.0) + shift_att,
@@ -333,8 +347,8 @@ class TransformerBlock(nn.Module):
                 ffn_norm(h) * (scale_mlp + 1.0) + shift_mlp, train=train
             )
         else:
-            attention_norm = RMSNorm(self.args.dim, eps=self.args.norm_eps)
-            ffn_norm = RMSNorm(self.args.dim, eps=self.args.norm_eps)
+            attention_norm = RMSNorm(self.args.dim, eps=self.args.norm_eps, dtype=self.args.dtype, param_dtype=self.args.param_dtype)
+            ffn_norm = RMSNorm(self.args.dim, eps=self.args.norm_eps, dtype=self.args.dtype, param_dtype=self.args.param_dtype)
             h = x + self.attention(attention_norm(x), freqs_cos, freqs_sin, train=train)
             out = h + self.feed_forward(ffn_norm(h), train=train)
 
@@ -351,11 +365,11 @@ class Transformer(nn.Module):
             output_channels = args.output_channels
 
         if args.embed_input:
-            h = nn.Embed(args.n_embed_classes, args.dim)(x)
+            h = nn.Embed(args.n_embed_classes, args.dim, dtype=args.dtype, param_dtype=args.param_dtype)(x)
             if args.dropout_rate > 0.0:
                 h = nn.Dropout(args.dropout_rate, deterministic=not train)(h)
         else:
-            h = nn.Dense(args.dim)(x)
+            h = nn.Dense(args.dim, dtype=args.dtype, param_dtype=args.param_dtype)(x)
 
         seqlen = x.shape[1]
         freqs_cos, freqs_sin = precompute_freqs_cis(args.dim // args.n_heads, seqlen)
@@ -370,7 +384,7 @@ class Transformer(nn.Module):
 
         if cond is not None:
             output_norm = nn.LayerNorm(
-                epsilon=args.norm_eps, use_bias=False, use_scale=False
+                epsilon=args.norm_eps, use_bias=False, use_scale=False, dtype=args.dtype, param_dtype=args.param_dtype
             )
             activation = activation_map[args.mlp_type]
             if args.cond_type == "adaln":
@@ -378,7 +392,7 @@ class Transformer(nn.Module):
                     [
                         # nn.swish,
                         activation,
-                        nn.Dense(2 * args.dim, use_bias=True),
+                        nn.Dense(2 * args.dim, use_bias=True, dtype=args.dtype, param_dtype=args.param_dtype),
                     ]
                 )
             elif args.cond_type == "adaln_zero":
@@ -391,6 +405,8 @@ class Transformer(nn.Module):
                             use_bias=True,
                             kernel_init=nn.initializers.zeros,
                             bias_init=nn.initializers.zeros,
+                            dtype=args.dtype,
+                            param_dtype=args.param_dtype,
                         ),
                     ]
                 )
@@ -398,14 +414,16 @@ class Transformer(nn.Module):
                 raise NotImplementedError()
             shift_out, scale_out = jnp.split(ln(cond)[:, None, :], 2, axis=-1)
             logits = nn.Dense(
-                output_channels, use_bias=False, kernel_init=nn.initializers.zeros
+                output_channels, use_bias=False, kernel_init=nn.initializers.zeros, dtype=args.dtype, param_dtype=args.param_dtype
             )(output_norm(h) * (scale_out + 1) + shift_out)
         else:
-            h = RMSNorm(args.dim, args.norm_eps)(h)
+            h = RMSNorm(args.dim, args.norm_eps, dtype=args.dtype, param_dtype=args.param_dtype)(h)
             logits = nn.Dense(
                 features=output_channels,
                 use_bias=False,
                 kernel_init=nn.initializers.zeros,
+                dtype=args.dtype,
+                param_dtype=args.param_dtype,
             )(h)
 
         return logits

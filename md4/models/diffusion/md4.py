@@ -161,6 +161,8 @@ class MD4(nn.Module):
             outside_embed=self.outside_embed,
             model_sharding=self.model_sharding,
             multiple_of=self.multiple_of,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
         )
 
     def forward_sample(self, x, t):
