@@ -29,7 +29,7 @@ def process_individual_smiles_pubchem(task):
         index if successful, -1 if failed
     """
     # Import rdkit_utils here to avoid loading it in main process
-    from md4 import rdkit_utils
+    from . import rdkit_utils
     
     smiles, index = task  # unpack the tuple
     return rdkit_utils.process_smiles_with_shared_memory(smiles, index)
@@ -43,7 +43,7 @@ def process_and_write_shard(args):
     shard_index, total_shards, shard, split, output_dir, features, fp_bits = args[:7]
 
     from array_record.python import array_record_module as array_record
-    from md4.rdkit_utils import process_smiles
+    from .rdkit_utils import process_smiles
     import os
 
     shard_filename = os.path.join(output_dir, f"pubchem_large-{split}.array_record-{shard_index:05d}-of-{total_shards:05d}") # args[4] = num_total_chunks
@@ -75,7 +75,7 @@ def process_and_write_shard_tfrecord(args):
     formula_shard = args[10] if len(args) > 10 else None
 
     import tensorflow as tf
-    from md4.rdkit_utils import process_smiles
+    from .rdkit_utils import process_smiles
     import os
 
     shard_filename = os.path.join(output_dir, f"pubchem_large-{split}.tfrecord-{shard_index:05d}-of-{total_shards:05d}") # args[4] = num_total_chunks
