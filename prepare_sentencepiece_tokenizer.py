@@ -156,6 +156,9 @@ def _train_sentencepiece(
             "--pad_piece=[PAD]",
             "--train_extremely_large_corpus=true",
             "--shuffle_input_sentence=true",
+            "--max_sentencepiece_length=32",
+            "--split_by_unicode_script=false",
+            "--split_by_number=false",
         ]
     )
     
