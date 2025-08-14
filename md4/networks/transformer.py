@@ -82,13 +82,15 @@ class RMSNorm(nn.Module):
         return (output * self.scale.astype(self.dtype)).astype(self.dtype)
 
 
-def precompute_freqs_cis(dim, end, theta: float = 10000.0):
-    freqs = 1.0 / (theta ** (jnp.arange(0, dim, 2)[: (dim // 2)] / dim))
-    t = jnp.arange(end)
+def precompute_freqs_cis(dim, end, theta: float = 10000.0, dtype=jnp.float32):
+    # Compute everything in fp32 for numerical stability
+    freqs = 1.0 / (theta ** (jnp.arange(0, dim, 2, dtype=jnp.float32)[: (dim // 2)] / dim))
+    t = jnp.arange(end, dtype=jnp.float32)
     freqs = jnp.outer(t, freqs)
     freqs_cos = jnp.cos(freqs)
     freqs_sin = jnp.sin(freqs)
-    return freqs_cos, freqs_sin
+    # Convert to target dtype at the end
+    return freqs_cos.astype(dtype), freqs_sin.astype(dtype)
 
 
 def reshape_for_broadcast(freqs_cis, x):
@@ -204,12 +206,14 @@ class Attention(nn.Module):
         xk_transposed = xk.swapaxes(2, 3)
         scores = jnp.matmul(xq, xk_transposed) / math.sqrt(self.head_dim)
         if self.causal:
-            mask = jnp.full((1, 1, seqlen, seqlen), -jnp.inf)
+            mask = jnp.full((1, 1, seqlen, seqlen), -jnp.inf, dtype=jnp.float32)
             mask = jnp.triu(mask, k=1)
             scores = (
                 scores + mask[:, :, :seqlen, :seqlen]
             )  # (bs, n_heads, seqlen, seqlen)
-        scores = nn.softmax(scores, axis=-1)
+        # Force softmax computation in fp32 for numerical stability
+        scores_fp32 = scores.astype(jnp.float32)
+        scores = nn.softmax(scores_fp32, axis=-1).astype(self.dtype)
         if self.dropout_rate > 0.0:
             scores = self.attn_dropout(scores, deterministic=not train)
         output = jnp.matmul(scores, xv)  # (bs, n_heads, seqlen, head_dim)
@@ -372,7 +376,7 @@ class Transformer(nn.Module):
             h = nn.Dense(args.dim, dtype=args.dtype, param_dtype=args.param_dtype)(x)
 
         seqlen = x.shape[1]
-        freqs_cos, freqs_sin = precompute_freqs_cis(args.dim // args.n_heads, seqlen)
+        freqs_cos, freqs_sin = precompute_freqs_cis(args.dim // args.n_heads, seqlen, dtype=args.dtype)
 
         freqs_cos = freqs_cos[:seqlen]
         freqs_sin = freqs_sin[:seqlen]
