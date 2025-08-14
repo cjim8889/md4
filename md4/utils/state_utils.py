@@ -33,10 +33,14 @@ class TrainState:
     state: Any
 
 
-def get_conditioning_from_batch(batch):
+def get_conditioning_from_batch(batch, dtype=jnp.float32):
     """Extract conditioning information from batch data.
     
     Handles all combinations of fingerprint, true_fingerprint, and atom_types.
+    
+    Args:
+        batch: Batch data dictionary
+        dtype: Data type to use for floating point conditioning data
     """
     if "label" in batch:
         return batch["label"].astype("int32")
@@ -46,10 +50,10 @@ def get_conditioning_from_batch(batch):
     
     # Handle fingerprint (prioritize true_fingerprint if available)
     if "true_fingerprint" in batch:
-        conditioning["true_fingerprint"] = batch["true_fingerprint"].astype("float32")
+        conditioning["true_fingerprint"] = batch["true_fingerprint"].astype(dtype)
     
     if "fingerprint" in batch:
-        conditioning["fingerprint"] = batch["fingerprint"].astype("float32")
+        conditioning["fingerprint"] = batch["fingerprint"].astype(dtype)
     
     # Handle atom_types
     if "atom_types" in batch:
@@ -59,10 +63,15 @@ def get_conditioning_from_batch(batch):
     return conditioning if conditioning else None
 
 
-def get_dummy_conditioning(config, input_shape):
+def get_dummy_conditioning(config, input_shape, dtype=jnp.float32):
     """Create dummy conditioning for model initialization.
     
     Handles all combinations based on config settings.
+    
+    Args:
+        config: Configuration dict
+        input_shape: Input shape tuple
+        dtype: Data type to use for floating point conditioning data
     """
     if config.classes > 0:
         return jnp.zeros(input_shape[0], dtype="int32")
@@ -77,7 +86,7 @@ def get_dummy_conditioning(config, input_shape):
             else config.fingerprint_dim
         )
         conditioning["fingerprint"] = jnp.zeros(
-            (input_shape[0], fingerprint_dim), dtype="float32"
+            (input_shape[0], fingerprint_dim), dtype=dtype
         )
     
     # Handle atom types
@@ -88,7 +97,7 @@ def get_dummy_conditioning(config, input_shape):
     
     if config.get("raw_fingerprint_dim", 0) > 0 and config.raw_fingerprint_dim != config.fingerprint_dim:
         conditioning["true_fingerprint"] = jnp.zeros(
-            (input_shape[0], config.fingerprint_dim), dtype="float32"
+            (input_shape[0], config.fingerprint_dim), dtype=dtype
         )
     
     # Return None if no conditioning information is available
@@ -206,7 +215,7 @@ def create_train_state(
     """
     model = model_utils.get_model(config)
 
-    conditioning = get_dummy_conditioning(config, input_shape)
+    conditioning = get_dummy_conditioning(config, input_shape, dtype=getattr(config, 'dtype', jnp.float32))
     rng, sample_rng, init_rng = jax.random.split(rng, 3)
     dummy_input = jnp.ones(input_shape, dtype="int32")
 

@@ -159,7 +159,9 @@ def loss_fn(params, state, rng, model, batch, train=False):
     else:
         raise ValueError("Unsupported targets/tasks.")
 
-    conditioning = state_utils.get_conditioning_from_batch(batch)
+    # Get model dtype for proper mixed precision handling
+    model_dtype = getattr(model, 'dtype', jnp.float32)
+    conditioning = state_utils.get_conditioning_from_batch(batch, dtype=model_dtype)
 
     new_state = {}
     if train:
@@ -590,8 +592,10 @@ def train_and_evaluate(
                             if "smiles" not in dummy_batch
                             else dummy_batch["smiles"]
                         )
+                        # Get model dtype for proper mixed precision handling
+                        model_dtype = getattr(model, 'dtype', jnp.float32)
                         conditioning = state_utils.get_conditioning_from_batch(
-                            dummy_batch
+                            dummy_batch, dtype=model_dtype
                         )
 
                         samples = sampling.generate(

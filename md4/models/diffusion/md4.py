@@ -230,6 +230,9 @@ class MD4(nn.Module):
                     else:
                         raise ValueError("Atom conditioning has invalid shape")
 
+                    # Ensure consistent dtypes for concatenation
+                    _cond = _cond.astype(self.dtype)
+                    atom_conditioning = atom_conditioning.astype(self.dtype)
                     _cond = jnp.concat([_cond, atom_conditioning], axis=-1)
 
                 return self.cond_embeddings(_cond), fp_logits
@@ -292,7 +295,7 @@ class MD4(nn.Module):
     
     def fp_bce_loss(self, logits, labels):
         """Binary Cross Entropy loss."""
-        labels = jnp.astype(labels, logits.dtype)
+        labels = labels.astype(self.dtype)
         log_p = jax.nn.log_sigmoid(logits)
         # log(1 - sigmoid(x)) = log_sigmoid(-x), the latter more numerically stable
         log_not_p = jax.nn.log_sigmoid(-logits)
@@ -310,7 +313,7 @@ class MD4(nn.Module):
             alpha: Weighting factor for positive class
             gamma: Focusing parameter
         """
-        labels = labels.astype(logits.dtype)
+        labels = labels.astype(self.dtype)
         probas = jax.nn.sigmoid(logits)
         
         # Calculate focal weights
@@ -320,7 +323,8 @@ class MD4(nn.Module):
         # Calculate cross entropy
         ce = self.fp_bce_loss(logits, labels)
         
-        # Apply focal loss formula
+        # Apply focal loss formula  
+        alpha = jnp.asarray(alpha, dtype=self.dtype)
         loss = alpha * focal_weight * ce
         return loss
     
@@ -337,7 +341,7 @@ class MD4(nn.Module):
         neg_cross_ent = one_hot_x * log_p
         neg_cross_ent = jnp.where(one_hot_x, neg_cross_ent, 0.0)
         neg_cross_ent = jnp.sum(neg_cross_ent, axis=-1)
-        mask = (zt == self.vocab_size).astype(self.dtype)
+        mask = jnp.asarray(zt == self.vocab_size, dtype=self.dtype)
 
         remaining_axis = list(range(x.ndim)[1:])
         # masked_neg_cross_ent: [bs]

@@ -355,7 +355,7 @@ if __name__ == "__main__":
                 "fp_radius": 2,
                 "fp_bits": 4096,
                 "max_length": 128,
-                "tokenizer": "data/sentencepiece_tokenizer.model",
+                "tokenizer": "data/sentencepiece_tokenizer_4096_bpe_latest.model",
                 "batch_size": 512,
                 "version": "1.0.0",
                 "training_shards": 128,
