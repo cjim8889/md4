@@ -7,6 +7,10 @@ def get_config() -> config_dict.ConfigDict:
 
   config = config_dict.ConfigDict()
 
+  # wandb configs
+  config.enable_wandb = True
+  config.wandb_project = "md4"
+
   # dataset configs
   config.vocab_size = 4096
   config.dataset = "pubchem_large_text"
@@ -30,7 +34,7 @@ def get_config() -> config_dict.ConfigDict:
   # timesteps: int or None
   config.timesteps = 1000
   # linear, cosine, poly[exponent], e.g., poly3
-  config.noise_schedule = "poly5"
+  config.noise_schedule = "poly3"
   config.outside_embed = True
   # t or none (removes time dependence)
   config.time_features = "t"

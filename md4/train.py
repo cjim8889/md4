@@ -20,7 +20,7 @@ from md4 import (
     input_pipeline,
     sampling,
 )
-from md4.utils import checkpoint_utils, partial_load_utils, rdkit_utils, state_utils, utils
+from md4.utils import checkpoint_utils, partial_load_utils, rdkit_utils, state_utils, utils, wandb_writer
 
 
 def merge_batch_stats(
@@ -388,6 +388,18 @@ def train_and_evaluate(
     writer = metric_writers.create_default_writer(
         workdir, just_logging=jax.process_index() > 0
     )
+    
+    # Add wandb writer to the multi-writer if we're on the main process
+    if jax.process_index() == 0 and hasattr(writer, '_writers') and config.get('enable_wandb', False):
+        wandb_w = wandb_writer.WandBWriter(
+            project=config.get('wandb_project', 'md4'),
+            **config.get('wandb_kwargs', {})
+        )
+        writer._writers = tuple(
+            [wandb_w] + list(writer._writers)
+        )
+        logging.info("Added WandB writer to metric writers.")
+    
     # Learning rate schedule.
     assert config.batch_size % jax.device_count() == 0
     per_device_batch_size = config.batch_size // jax.device_count()

@@ -1219,6 +1219,7 @@ dependencies = [
     { name = "torch", version = "2.7.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
     { name = "torch", version = "2.7.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
     { name = "transformers" },
+    { name = "wandb" },
     { name = "xprof" },
 ]
 
@@ -1246,6 +1247,7 @@ requires-dist = [
     { name = "tokenizers", specifier = "==0.21.4" },
     { name = "torch", specifier = "==2.7.1", index = "https://download.pytorch.org/whl/cpu" },
     { name = "transformers", specifier = "==4.51.2" },
+    { name = "wandb", specifier = ">=0.21.0" },
     { name = "xprof", specifier = ">=2.20.5" },
 ]
 

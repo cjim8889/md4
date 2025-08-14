@@ -28,6 +28,7 @@ dependencies = [
     "tensorflow-datasets>=4.9.9",
     "tf-keras>=2.19.0",
     "xprof>=2.20.5",
+    "wandb>=0.21.0",
 ]
 
 
