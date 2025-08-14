@@ -19,7 +19,7 @@ import tensorflow_datasets as tfds
 import transformers
 from ml_collections import config_dict
 
-from md4.pubchem_worker import process_and_write_shard_tfrecord
+from md4.utils.pubchem_worker import process_and_write_shard_tfrecord
 
 # Heavy imports are now imported conditionally within functions to reduce memory usage
 
