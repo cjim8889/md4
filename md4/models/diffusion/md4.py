@@ -23,8 +23,10 @@ import jax
 import jax.numpy as jnp
 import tensorflow_probability.substrates.jax as tfp
 
-from md4 import binary_search, utils
+from md4 import binary_search
 from md4.models import backward
+from md4.networks.adapters import FingerprintAdapter, SimpleMLP
+from md4.utils import utils
 
 tfd = tfp.distributions
 
@@ -70,94 +72,6 @@ class MaskingSchedule(nn.Module):
 
     def dgamma_times_alpha(self, t):
         return self.dalpha(t) / (1.0 - self.alpha(t))
-    
-class FingerprintAdapter(nn.Module):
-    """
-    A module that adapts a raw fingerprint to a desired dimension.
-
-    Attributes:
-        raw_fingerprint_dim: The dimension of the raw fingerprint.
-        fingerprint_dim: The desired dimension of the fingerprint.
-    """
-    raw_fingerprint_dim: int = 4096
-    fingerprint_dim: int = 2048
-    layers: int = 2
-
-    @nn.compact
-    def __call__(self, x):
-        """
-        Defines the forward pass of the module.
-
-        Args:
-            x: The input data (raw fingerprint).
-
-        Returns:
-            The adapted fingerprint.
-        """
-
-        if self.raw_fingerprint_dim != self.fingerprint_dim:
-            x = jnp.where(
-                x < 0.5,
-                0,
-                1
-            )
-            x = jnp.logical_or(
-                x[:, :self.fingerprint_dim],
-                x[:, self.fingerprint_dim:],
-            )
- 
-        for i in range(self.layers - 1):
-            x = nn.Dense(
-                features=self.raw_fingerprint_dim,
-                name=f"fingerprint_adapter_dense_{i}"
-            )(x)
-            x = nn.relu(x)
-
-        x = nn.Dense(
-            features=self.fingerprint_dim,
-            name="fingerprint_adapter_out"
-        )(x)
-        logits = x
-
-        output = jnp.where(
-            nn.sigmoid(logits) < 0.5,
-            0.0,
-            1.0
-        )
-
-        return output.astype("float32"), logits  # Ensure output is float32 for compatibility
-
-class SimpleMLP(nn.Module):
-    """
-    A simple 3-layer Multi-Layer Perceptron (MLP).
-
-    Attributes:
-        features: A sequence of integers, where each integer is the number of
-                  neurons in a layer. The length of the sequence determines
-                  the number of layers.
-    """
-    features: Sequence[int]
-
-    @nn.compact
-    def __call__(self, x):
-        """
-        Defines the forward pass of the model.
-
-        Args:
-            x: The input data.
-
-        Returns:
-            The output of the model.
-        """
-        # The first two layers will have a ReLU activation function.
-        for i, feat in enumerate(self.features[:-1]):
-            x = nn.Dense(features=feat, name=f"cond_dense_{i}")(x)
-            x = nn.swish(x)
-        
-        # The final layer is the output layer and typically doesn't have an
-        # activation function applied here (it might be applied in the loss function).
-        x = nn.Dense(features=self.features[-1], name="cond_dense_out")(x)
-        return x
 
 class MD4(nn.Module):
     """Simplified masked discrete diffusion model."""
@@ -197,17 +111,21 @@ class MD4(nn.Module):
     atom_type_size: int = 0
     fingerprint_mlp_layers: Sequence[int] = ()
     multiple_of: int = 64
+    dtype: jnp.dtype = jnp.float32
+    param_dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         self.noise_schedule = MaskingSchedule(self.data_shape, self.noise_schedule_type)
 
         if self.classes > 0:
-            self.cond_embeddings = nn.Embed(self.classes, self.feature_dim)
+            self.cond_embeddings = nn.Embed(self.classes, self.feature_dim, dtype=self.dtype, param_dtype=self.param_dtype)
         if self.fingerprint_dim > 0:
             if self.fingerprint_adapter:
                 self.fp_adapter = FingerprintAdapter(
                     raw_fingerprint_dim=self.raw_fingerprint_dim,
-                    fingerprint_dim=self.fingerprint_dim
+                    fingerprint_dim=self.fingerprint_dim,
+                    dtype=self.dtype,
+                    param_dtype=self.param_dtype,
                 )
 
             # Use configurable layers if provided, otherwise use default
@@ -216,10 +134,14 @@ class MD4(nn.Module):
             else:
                 mlp_features = [self.fingerprint_dim // 2, self.feature_dim * 2, self.feature_dim, self.feature_dim]
             
-            self.cond_embeddings = SimpleMLP(features=mlp_features)
+            self.cond_embeddings = SimpleMLP(
+                features=mlp_features,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+            )
         if self.atom_type_size > 0:
-            self.atom_embeddings = nn.Embed(self.atom_type_size, self.feature_dim)
-            self.atom_embeddings_agg = nn.Dense(features=self.feature_dim, name="atom_embeddings_agg")
+            self.atom_embeddings = nn.Embed(self.atom_type_size, self.feature_dim, dtype=self.dtype, param_dtype=self.param_dtype)
+            self.atom_embeddings_agg = nn.Dense(features=self.feature_dim, name="atom_embeddings_agg", dtype=self.dtype, param_dtype=self.param_dtype)
 
         self.classifier = backward.DiscreteClassifier(
             n_layers=self.n_layers,
@@ -277,7 +199,7 @@ class MD4(nn.Module):
         strictly_after = jnp.concatenate([zeros, hit_inclusive[..., :-1]], axis=-1)
 
         mask_val = jnp.asarray(self.vocab_size, dtype=tokens.dtype)
-        return jnp.where(strictly_after, mask_val, tokens).astype("int32")
+        return jnp.where(strictly_after, mask_val, tokens).astype(jnp.int32)
 
     def get_cond_embedding(self, conditioning):
         fp_logits = None
@@ -350,7 +272,7 @@ class MD4(nn.Module):
         )
         n_indep_axes = probs.ndim - 2
         dist = tfd.Independent(tfd.Categorical(probs=probs), n_indep_axes)
-        return dist.mode().astype("int32")
+        return dist.mode().astype(jnp.int32)
 
     def recon_loss(self):
         """The reconstruction loss measures the gap in the first step."""
@@ -400,25 +322,6 @@ class MD4(nn.Module):
         loss = alpha * focal_weight * ce
         return loss
     
-    def bracket_loss(self, logits): 
-        # 2. Probability mass for open / close brackets
-        open_idx  = jnp.array([6,])
-        close_idx = jnp.array([7,])
-
-        open_p  = logits[:, open_idx].sum(-1)             # [L]
-        close_p = logits[:, close_idx].sum(-1)            # [L]
-
-        # 3. Running expected counts
-        open_cum  = jnp.cumsum(open_p,  axis=0)          # [L]
-        close_cum = jnp.cumsum(close_p, axis=0)          # [L]
-
-        # 4. Penalties (same formula as PyTorch version)
-        negative_balance = jnp.maximum(close_cum - open_cum, 0.0).mean()          # scalar
-        final_imbalance  = jnp.abs(open_cum[-1] - close_cum[-1])               # scalar
-        running_imb      = jnp.abs(open_cum - close_cum).mean()                   # scalar
-
-        return negative_balance + final_imbalance + running_imb
-
     def diffusion_loss(self, t, x, cond=None, train=False):
         if not self.cont_time:
             # discretize time steps
@@ -427,13 +330,12 @@ class MD4(nn.Module):
         # sample z_t
         zt = self.forward_sample(x, t)
         logits, _ = self.predict_x(zt, t, cond=cond, train=train)
-        # loss_bracket = self.bracket_loss(logits)[0]
         log_p = jax.nn.log_softmax(logits, axis=-1)
         one_hot_x = jax.nn.one_hot(x, self.vocab_size)
         neg_cross_ent = one_hot_x * log_p
         neg_cross_ent = jnp.where(one_hot_x, neg_cross_ent, 0.0)
         neg_cross_ent = jnp.sum(neg_cross_ent, axis=-1)
-        mask = (zt == self.vocab_size).astype("float32")
+        mask = (zt == self.vocab_size).astype(self.dtype)
 
         remaining_axis = list(range(x.ndim)[1:])
         # masked_neg_cross_ent: [bs]
