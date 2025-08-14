@@ -17,14 +17,10 @@ from etils import epath
 from jax.experimental import checkify
 
 from md4 import (
-    checkpoint_utils,
     input_pipeline,
-    rdkit_utils,
     sampling,
-    state_utils,
-    utils,
 )
-from md4.utils import partial_load_utils
+from md4.utils import checkpoint_utils, partial_load_utils, rdkit_utils, state_utils, utils
 
 
 def merge_batch_stats(
@@ -446,8 +442,10 @@ def train_and_evaluate(
 
     # Set up checkpointing of the model and the input pipeline.
     # Get both save and load checkpoint managers
-    save_checkpoint_manager, load_checkpoint_manager = checkpoint_utils.get_checkpoint_managers(
-        config, workdir, olddir, is_grain_loader=is_grain_loader
+    save_checkpoint_manager, load_checkpoint_manager = (
+        checkpoint_utils.get_checkpoint_managers(
+            config, workdir, olddir, is_grain_loader=is_grain_loader
+        )
     )
 
     # Retrieve data from previous checkpoints if possible.
@@ -615,7 +613,12 @@ def train_and_evaluate(
 
                                 # Calculate SMILES validity for pubchem_large dataset
                                 if (
-                                    config.dataset in ["pubchem_large", "msg_finetune", "pubchem_large_text"]
+                                    config.dataset
+                                    in [
+                                        "pubchem_large",
+                                        "msg_finetune",
+                                        "pubchem_large_text",
+                                    ]
                                     and texts is not None
                                 ):
                                     validity_metrics = (
