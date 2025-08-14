@@ -30,7 +30,7 @@ def get_config() -> config_dict.ConfigDict:
   # timesteps: int or None
   config.timesteps = 1000
   # linear, cosine, poly[exponent], e.g., poly3
-  config.noise_schedule = "linear"
+  config.noise_schedule = "poly5"
   config.outside_embed = True
   # t or none (removes time dependence)
   config.time_features = "t"
@@ -51,7 +51,7 @@ def get_config() -> config_dict.ConfigDict:
 
   config.num_heads = 8
   config.n_kv_heads = 4
-  config.mlp_type = "geglu"
+  config.mlp_type = "glu"
   config.depth_scaled_init = True
   config.cond_type = "adaln_zero"
 
@@ -79,7 +79,7 @@ def get_config() -> config_dict.ConfigDict:
   # ancestral, mean, or topp
   config.sampler = "topp"
   # uniform, cosine
-  config.sampling_grid = "cosine"
+  config.sampling_grid = "uniform"
   # for topp sampler
   config.topp = 0.98
 
