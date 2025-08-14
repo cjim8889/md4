@@ -19,12 +19,12 @@ from jax.experimental import checkify
 from md4 import (
     checkpoint_utils,
     input_pipeline,
-    partial_load_utils,
     rdkit_utils,
     sampling,
     state_utils,
     utils,
 )
+from md4.utils import partial_load_utils
 
 
 def merge_batch_stats(
