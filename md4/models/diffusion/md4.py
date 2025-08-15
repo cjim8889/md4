@@ -118,7 +118,7 @@ class MD4(nn.Module):
         self.noise_schedule = MaskingSchedule(self.data_shape, self.noise_schedule_type)
 
         if self.classes > 0:
-            self.cond_embeddings = nn.Embed(self.classes, self.feature_dim, dtype=self.dtype, param_dtype=self.param_dtype)
+            self.cond_embeddings = nn.Embed(self.classes, self.feature_dim, dtype=jnp.float32, param_dtype=self.param_dtype)
         if self.fingerprint_dim > 0:
             if self.fingerprint_adapter:
                 self.fp_adapter = FingerprintAdapter(
@@ -140,7 +140,7 @@ class MD4(nn.Module):
                 param_dtype=self.param_dtype,
             )
         if self.atom_type_size > 0:
-            self.atom_embeddings = nn.Embed(self.atom_type_size, self.feature_dim, dtype=self.dtype, param_dtype=self.param_dtype)
+            self.atom_embeddings = nn.Embed(self.atom_type_size, self.feature_dim, dtype=jnp.float32, param_dtype=self.param_dtype)
             self.atom_embeddings_agg = nn.Dense(features=self.feature_dim, name="atom_embeddings_agg", dtype=self.dtype, param_dtype=self.param_dtype)
 
         self.classifier = backward.DiscreteClassifier(
@@ -407,8 +407,7 @@ class MD4(nn.Module):
             t = jax.random.uniform(rng1, shape=[bs])
 
         loss_diff, _ = self.diffusion_loss(t, x, cond=cond_embedding, train=train)
-        # Ensure loss aggregation is numerically stable
-        loss_diff = jnp.nan_to_num(loss_diff, nan=0.0).mean()
+        loss_diff = loss_diff.mean()
 
         if self.only_adapter:
             loss = loss_fp

@@ -369,7 +369,7 @@ class Transformer(nn.Module):
             output_channels = args.output_channels
 
         if args.embed_input:
-            h = nn.Embed(args.n_embed_classes, args.dim, dtype=args.dtype, param_dtype=args.param_dtype)(x)
+            h = nn.Embed(args.n_embed_classes, args.dim, dtype=jnp.float32, param_dtype=args.param_dtype)(x)
             if args.dropout_rate > 0.0:
                 h = nn.Dropout(args.dropout_rate, deterministic=not train)(h)
         else:
