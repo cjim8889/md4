@@ -40,7 +40,7 @@ def get_config() -> config_dict.ConfigDict:
     # timesteps: int or None
     config.timesteps = 1000
     # linear, cosine, poly[exponent], e.g., poly3
-    config.noise_schedule = "cosine"
+    config.noise_schedule = "poly3"
     config.outside_embed = True
     # t or none (removes time dependence)
     config.time_features = "t"
@@ -73,7 +73,7 @@ def get_config() -> config_dict.ConfigDict:
     config.learning_rate_schedule = "cosine"
     config.warmup_steps = 2000
     config.weight_decay = 1e-4
-    config.clip = 0.0
+    config.clip = 1.0
     config.b2 = 0.999
     config.num_epochs = -1
     config.ema_rate = 0.9999
