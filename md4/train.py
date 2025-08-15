@@ -625,7 +625,7 @@ def train_and_evaluate(
                                     skip_special_tokens=False,
                                     clean_up_tokenization_spaces=True,
                                 )
-                                writer.write_texts(step, {"samples": texts})
+                                # writer.write_texts(step, {"samples": texts})
 
                                 # Calculate SMILES validity for pubchem_large dataset
                                 if (
