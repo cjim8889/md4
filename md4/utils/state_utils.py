@@ -197,7 +197,7 @@ def create_train_state(
     rng: jnp.ndarray,
     input_shape: Sequence[int] | Mapping[str, Sequence[int]],
     schedule_fn: Callable[[Any], Any],
-) -> tuple[Any, optax.GradientTransformation, TrainState, Any]:
+) -> tuple[Any, optax.GradientTransformation, TrainState, metrics.Collection]:
     """Create and initialize the model with optional parameter freezing.
     
     This function replaces both create_train_state and create_frozen_train_state
