@@ -367,7 +367,7 @@ class MD4(nn.Module):
                         * masked_neg_cross_ent)
 
         # loss_diff: [bs]
-        return loss_diff.astype(self.dtype), 0.0
+        return loss_diff.astype(jnp.float32)
 
     @nn.compact
     def __call__(self, x, cond=None, train=False):
@@ -406,8 +406,7 @@ class MD4(nn.Module):
         else:
             t = jax.random.uniform(rng1, shape=[bs])
 
-        loss_diff, _ = self.diffusion_loss(t, x, cond=cond_embedding, train=train)
-        loss_diff = loss_diff.mean()
+        loss_diff = self.diffusion_loss(t, x, cond=cond_embedding, train=train).mean()
 
         if self.only_adapter:
             loss = loss_fp
