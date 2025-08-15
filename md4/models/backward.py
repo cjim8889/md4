@@ -93,11 +93,11 @@ class DiscreteClassifier(nn.Module):
             # z: [bs, seq_len] or [bs, h, w, c]
             assert jnp.isscalar(t) or t.ndim == 0 or t.ndim == 1
             t = t * jnp.ones(z.shape[0])  # ensure t is a vector
-            cond = CondEmbedding(self.feature_dim, dtype=jnp.float32, param_dtype=self.param_dtype)(t * 1000, cond=cond)
+            cond = CondEmbedding(self.feature_dim, dtype=self.dtype, param_dtype=self.param_dtype)(t * 1000, cond=cond)
 
         if z.ndim == 2:
             if self.outside_embed:
-                z = nn.Embed(self.vocab_size + 1, self.feature_dim, dtype=jnp.float32, param_dtype=self.param_dtype)(z)
+                z = nn.Embed(self.vocab_size + 1, self.feature_dim, dtype=self.dtype, param_dtype=self.param_dtype)(z)
             if self.model_sharding:
                 args = sharded_transformer.ModelArgs(
                     dim=self.feature_dim * self.num_heads,

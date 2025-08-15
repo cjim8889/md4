@@ -118,7 +118,7 @@ class MD4(nn.Module):
         self.noise_schedule = MaskingSchedule(self.data_shape, self.noise_schedule_type)
 
         if self.classes > 0:
-            self.cond_embeddings = nn.Embed(self.classes, self.feature_dim, dtype=jnp.float32, param_dtype=self.param_dtype)
+            self.cond_embeddings = nn.Embed(self.classes, self.feature_dim, dtype=self.dtype, param_dtype=self.param_dtype)
         if self.fingerprint_dim > 0:
             if self.fingerprint_adapter:
                 self.fp_adapter = FingerprintAdapter(
@@ -140,7 +140,7 @@ class MD4(nn.Module):
                 param_dtype=self.param_dtype,
             )
         if self.atom_type_size > 0:
-            self.atom_embeddings = nn.Embed(self.atom_type_size, self.feature_dim, dtype=jnp.float32, param_dtype=self.param_dtype)
+            self.atom_embeddings = nn.Embed(self.atom_type_size, self.feature_dim, dtype=self.dtype, param_dtype=self.param_dtype)
             self.atom_embeddings_agg = nn.Dense(features=self.feature_dim, name="atom_embeddings_agg", dtype=self.dtype, param_dtype=self.param_dtype)
 
         self.classifier = backward.DiscreteClassifier(
@@ -221,7 +221,7 @@ class MD4(nn.Module):
                 if "atom_types" in conditioning:
                     atom_conditioning = self.atom_embeddings(conditioning["atom_types"])
                     atom_conditioning = jax.vmap(self.atom_embeddings_agg)(atom_conditioning)
-                    atom_conditioning = nn.swish(atom_conditioning.astype(jnp.float32)).astype(self.dtype)
+                    atom_conditioning = nn.swish(atom_conditioning.astype(self.dtype))
 
                     if atom_conditioning.ndim == 2:
                         atom_conditioning = jnp.sum(atom_conditioning, axis=0)
