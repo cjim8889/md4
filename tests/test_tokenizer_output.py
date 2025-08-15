@@ -84,7 +84,7 @@ def get_real_dataset_examples(n_samples=10):
 def test_tokenizer():
     # Load the trained tokenizer
     sp = spm.SentencePieceProcessor()
-    sp.Load('data/sentencepiece_tokenizer_unigram_2048.model')
+    sp.Load('data/sentencepiece_tokenizer_unigram_2048_bpe.model')
 
     print("SentencePiece tokenizer loaded successfully.")
     print(f"Vocab size: {sp.vocab_size()}")
