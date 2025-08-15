@@ -14,7 +14,7 @@ from datasets import load_dataset
 from ml_collections import config_dict
 from tqdm import tqdm
 
-from md4 import rdkit_utils
+from md4.utils import rdkit_utils
 
 FlatFeatures = dict[str, Any]
 

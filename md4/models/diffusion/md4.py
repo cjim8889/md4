@@ -24,9 +24,9 @@ import jax.numpy as jnp
 import tensorflow_probability.substrates.jax as tfp
 
 from md4 import binary_search
-from md4 import utils
 from md4.models import backward
-
+from md4.networks.adapters import FingerprintAdapter, SimpleMLP
+from md4.utils import utils
 
 tfd = tfp.distributions
 
@@ -73,37 +73,6 @@ class MaskingSchedule(nn.Module):
     def dgamma_times_alpha(self, t):
         return self.dalpha(t) / (1.0 - self.alpha(t))
 
-class SimpleMLP(nn.Module):
-    """
-    A simple 3-layer Multi-Layer Perceptron (MLP).
-
-    Attributes:
-        features: A sequence of integers, where each integer is the number of
-                  neurons in a layer. The length of the sequence determines
-                  the number of layers.
-    """
-    features: Sequence[int]
-
-    @nn.compact
-    def __call__(self, x):
-        """
-        Defines the forward pass of the model.
-
-        Args:
-            x: The input data.
-
-        Returns:
-            The output of the model.
-        """
-        # The first two layers will have a ReLU activation function.
-        for i, feat in enumerate(self.features[:-1]):
-            x = nn.Dense(features=feat, name=f"cond_dense_{i}")(x)
-            x = nn.swish(x)
-        # The final layer is the output layer and typically doesn't have an
-        # activation function applied here (it might be applied in the loss function).
-        x = nn.Dense(features=self.features[-1], name="cond_dense_out")(x)
-        return x
-
 class MD4(nn.Module):
     """Simplified masked discrete diffusion model."""
 
@@ -112,6 +81,7 @@ class MD4(nn.Module):
     timesteps: int = 1000
     feature_dim: int = 128
     num_heads: int = 12
+    n_kv_heads: int = 12
     antithetic_time_sampling: bool = True
     n_layers: int = 32
     n_dit_layers: int = 0
@@ -135,14 +105,43 @@ class MD4(nn.Module):
     topp: float = 0.98
     model_sharding: bool = False
     fingerprint_dim: int = 0
+    fingerprint_adapter: bool = False
+    only_adapter: bool = False
+    raw_fingerprint_dim: int = 0
+    atom_type_size: int = 0
+    fingerprint_mlp_layers: Sequence[int] = ()
+    multiple_of: int = 64
+    dtype: jnp.dtype = jnp.float32
+    param_dtype: jnp.dtype = jnp.float32
 
     def setup(self):
         self.noise_schedule = MaskingSchedule(self.data_shape, self.noise_schedule_type)
 
         if self.classes > 0:
-            self.cond_embeddings = nn.Embed(self.classes, self.feature_dim)
+            self.cond_embeddings = nn.Embed(self.classes, self.feature_dim, dtype=self.dtype, param_dtype=self.param_dtype)
         if self.fingerprint_dim > 0:
-            self.cond_embeddings = SimpleMLP(features=[self.fingerprint_dim // 2, self.feature_dim * 2, self.feature_dim * 2, self.feature_dim])
+            if self.fingerprint_adapter:
+                self.fp_adapter = FingerprintAdapter(
+                    raw_fingerprint_dim=self.raw_fingerprint_dim,
+                    fingerprint_dim=self.fingerprint_dim,
+                    dtype=self.dtype,
+                    param_dtype=self.param_dtype,
+                )
+
+            # Use configurable layers if provided, otherwise use default
+            if self.fingerprint_mlp_layers:
+                mlp_features = list(self.fingerprint_mlp_layers)
+            else:
+                mlp_features = [self.fingerprint_dim // 2, self.feature_dim * 2, self.feature_dim, self.feature_dim]
+            
+            self.cond_embeddings = SimpleMLP(
+                features=mlp_features,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+            )
+        if self.atom_type_size > 0:
+            self.atom_embeddings = nn.Embed(self.atom_type_size, self.feature_dim, dtype=self.dtype, param_dtype=self.param_dtype)
+            self.atom_embeddings_agg = nn.Dense(features=self.feature_dim, name="atom_embeddings_agg", dtype=self.dtype, param_dtype=self.param_dtype)
 
         self.classifier = backward.DiscreteClassifier(
             n_layers=self.n_layers,
@@ -152,6 +151,7 @@ class MD4(nn.Module):
             ch_mult=self.ch_mult,
             feature_dim=self.feature_dim,
             num_heads=self.num_heads,
+            n_kv_heads=self.n_kv_heads,
             vocab_size=self.vocab_size,
             dropout_rate=self.dropout_rate,
             use_attn_dropout=self.use_attn_dropout,
@@ -160,6 +160,9 @@ class MD4(nn.Module):
             cond_type=self.cond_type,
             outside_embed=self.outside_embed,
             model_sharding=self.model_sharding,
+            multiple_of=self.multiple_of,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
         )
 
     def forward_sample(self, x, t):
@@ -173,11 +176,69 @@ class MD4(nn.Module):
         return self.vocab_size * jnp.ones(
             [batch_size] + list(self.data_shape), dtype="int32"
         )
+    
+    def conditional_sample(self, tokens):
+        """
+        Given tokens shaped (..., L), find the first occurrence of token id 3
+        along the last dimension and set all subsequent positions to
+        self.vocab_size (mask token). If a sequence has no 3, it is unchanged.
+
+        Args:
+            tokens: jnp.ndarray[int], shape (..., L)
+
+        Returns:
+            jnp.ndarray[int], same shape as tokens, with positions strictly
+            after the first 3 replaced by self.vocab_size.
+        """
+        # Positions where token equals 3
+        is_stop = (tokens == 3)
+
+        # Inclusive mask that becomes True at and after the first 3
+        hit_inclusive = (jnp.cumsum(is_stop.astype(jnp.int32), axis=-1) > 0)
+
+        # We only want positions strictly after the first 3: shift right by 1
+        zeros = jnp.zeros_like(hit_inclusive[..., :1])
+        strictly_after = jnp.concatenate([zeros, hit_inclusive[..., :-1]], axis=-1)
+
+        mask_val = jnp.asarray(self.vocab_size, dtype=tokens.dtype)
+        return jnp.where(strictly_after, mask_val, tokens).astype(jnp.int32)
 
     def get_cond_embedding(self, conditioning):
+        fp_logits = None
         if conditioning is not None:
-            return self.cond_embeddings(conditioning)
-        return None
+            if isinstance(conditioning, dict):
+                _cond = conditioning["fingerprint"]
+                if self.fingerprint_adapter:
+                    # Convert raw fingerprint to the desired dimension
+                    if conditioning["fingerprint"].shape[1] != self.raw_fingerprint_dim:
+                        # Print stack trace for debugging
+                        raise ValueError(
+                            f"Expected fingerprint shape {self.raw_fingerprint_dim}, got {conditioning['fingerprint'].shape[1]}"
+                        )
+                    # _cond = nn.sigmoid(self.cond_conversion(conditioning["fingerprint"]))
+                    _cond, fp_logits = self.fp_adapter(conditioning["fingerprint"])
+
+                if "atom_types" in conditioning:
+                    atom_conditioning = self.atom_embeddings(conditioning["atom_types"])
+                    atom_conditioning = jax.vmap(self.atom_embeddings_agg)(atom_conditioning)
+                    atom_conditioning = nn.swish(atom_conditioning.astype(jnp.float32)).astype(self.dtype)
+
+                    if atom_conditioning.ndim == 2:
+                        atom_conditioning = jnp.sum(atom_conditioning, axis=0)
+                    elif atom_conditioning.ndim == 3:
+                        atom_conditioning = jnp.sum(atom_conditioning, axis=1)
+                    else:
+                        raise ValueError("Atom conditioning has invalid shape")
+
+                    # Ensure consistent dtypes for concatenation
+                    _cond = _cond.astype(self.dtype)
+                    atom_conditioning = atom_conditioning.astype(self.dtype)
+                    _cond = jnp.concat([_cond, atom_conditioning], axis=-1)
+
+                return self.cond_embeddings(_cond), fp_logits
+
+            return self.cond_embeddings(conditioning), fp_logits
+        return None, fp_logits
 
     def predict_x(self, zt, t, cond=None, train=False):
         t = None if self.time_features == "none" else t
@@ -186,7 +247,7 @@ class MD4(nn.Module):
     def visualize_classifier(self, x, t, conditioning=None):
         # if it's image, x: [bs, h, w, c]
         # if it's text, x: [bs, seq_len]
-        cond = self.get_cond_embedding(conditioning)
+        cond, _ = self.get_cond_embedding(conditioning)
         # t: []
         # if it's image, zt: [bs, h, w, c]
         # if it's text, zt: [bs, seq_len]
@@ -207,7 +268,7 @@ class MD4(nn.Module):
         masked = z0 == self.vocab_size
         z0_cliped = jnp.where(masked, jnp.zeros_like(z0), z0)
         masked = masked[..., None]
-        cond = self.get_cond_embedding(conditioning)
+        cond, _ = self.get_cond_embedding(conditioning)
         logits, _ = self.predict_x(z0, jnp.array(0.0), cond=cond)
         probs = jnp.where(
             masked,
@@ -216,7 +277,7 @@ class MD4(nn.Module):
         )
         n_indep_axes = probs.ndim - 2
         dist = tfd.Independent(tfd.Categorical(probs=probs), n_indep_axes)
-        return dist.mode().astype("int32")
+        return dist.mode().astype(jnp.int32)
 
     def recon_loss(self):
         """The reconstruction loss measures the gap in the first step."""
@@ -231,7 +292,42 @@ class MD4(nn.Module):
     def latent_loss(self):
         # negligible
         return jnp.array(0.0)
-
+    
+    def fp_bce_loss(self, logits, labels):
+        """Binary Cross Entropy loss."""
+        labels = labels.astype(self.dtype)
+        log_p = jax.nn.log_sigmoid(logits)
+        # log(1 - sigmoid(x)) = log_sigmoid(-x), the latter more numerically stable
+        log_not_p = jax.nn.log_sigmoid(-logits)
+        return -labels * log_p - (1.0 - labels) * log_not_p
+    
+    def fp_focal_loss(self, logits, labels, alpha=1.5, gamma=2.0):
+        """
+        Focal loss implementation.
+        
+        L(y, p̂) = -α y (1 - p̂)^γ log(p̂) - (1 - y) p̂^γ log(1 - p̂)
+        
+        Args:
+            logits: Model predictions (before sigmoid)
+            labels: Ground truth binary labels
+            alpha: Weighting factor for positive class
+            gamma: Focusing parameter
+        """
+        labels = labels.astype(self.dtype)
+        probas = jax.nn.sigmoid(logits.astype(jnp.float32))
+        
+        # Calculate focal weights
+        pt = labels * probas + (1.0 - labels) * (1.0 - probas)
+        focal_weight = jnp.power(1.0 - pt, gamma)
+        
+        # Calculate cross entropy
+        ce = self.fp_bce_loss(logits, labels)
+        
+        # Apply focal loss formula  
+        alpha = jnp.asarray(alpha, dtype=self.dtype)
+        loss = alpha * focal_weight * ce
+        return loss
+    
     def diffusion_loss(self, t, x, cond=None, train=False):
         if not self.cont_time:
             # discretize time steps
@@ -240,12 +336,13 @@ class MD4(nn.Module):
         # sample z_t
         zt = self.forward_sample(x, t)
         logits, _ = self.predict_x(zt, t, cond=cond, train=train)
+        logits = logits.astype(jnp.float32)
         log_p = jax.nn.log_softmax(logits, axis=-1)
         one_hot_x = jax.nn.one_hot(x, self.vocab_size)
         neg_cross_ent = one_hot_x * log_p
         neg_cross_ent = jnp.where(one_hot_x, neg_cross_ent, 0.0)
         neg_cross_ent = jnp.sum(neg_cross_ent, axis=-1)
-        mask = (zt == self.vocab_size).astype("float32")
+        mask = jnp.asarray(zt == self.vocab_size, dtype=self.dtype)
 
         remaining_axis = list(range(x.ndim)[1:])
         # masked_neg_cross_ent: [bs]
@@ -267,12 +364,28 @@ class MD4(nn.Module):
             loss_diff = self.noise_schedule.dgamma_times_alpha(t) * masked_neg_cross_ent
 
         # loss_diff: [bs]
-        return loss_diff
+        return loss_diff, 0.0
 
     @nn.compact
     def __call__(self, x, cond=None, train=False):
         bs = x.shape[0]
-        cond = self.get_cond_embedding(cond)
+        cond_embedding, fp_logits = self.get_cond_embedding(cond)
+
+        # 0. FINGERPRINT ADAPTER LOSS: []
+        loss_fp = jnp.array(0.0)
+        avg_bit_diff = jnp.array(0.0)
+        
+        if (self.fingerprint_adapter and fp_logits is not None and 
+            cond is not None and isinstance(cond, dict) and "true_fingerprint" in cond):
+            # Binary cross entropy loss between logits and true fingerprint
+            true_fp = cond["true_fingerprint"]
+            loss_fp = jnp.mean(self.fp_focal_loss(fp_logits, true_fp))
+            
+            # Calculate average bit differences between true_fp and predicted fingerprint
+            # Convert logits to binary predictions
+            pred_fp = jnp.where(nn.sigmoid(fp_logits.astype(jnp.float32)) < 0.5, 0.0, 1.0)
+            bit_diff = jnp.abs(true_fp - pred_fp)
+            avg_bit_diff = jnp.mean(jnp.sum(bit_diff, axis=-1))
 
         # 1. RECONSTRUCTION LOSS: []
         # add noise and reconstruct
@@ -290,14 +403,21 @@ class MD4(nn.Module):
         else:
             t = jax.random.uniform(rng1, shape=[bs])
 
-        loss_diff = self.diffusion_loss(t, x, cond=cond, train=train).mean()
-        loss = loss_diff + loss_prior + loss_recon
+        loss_diff, _ = self.diffusion_loss(t, x, cond=cond_embedding, train=train)
+        loss_diff = loss_diff.mean()
+
+        if self.only_adapter:
+            loss = loss_fp
+        else:
+            loss = loss_diff + loss_prior + loss_recon + loss_fp
 
         model_stats = {
             "loss": loss,
             "loss_diff": loss_diff,
             "loss_prior": loss_prior,
             "loss_recon": loss_recon,
+            "loss_fp": loss_fp,
+            "avg_bit_diff": avg_bit_diff,
         }
         model_stats = utils.loss2bpt(model_stats, self.data_shape)
         return model_stats
@@ -313,7 +433,7 @@ class MD4(nn.Module):
     def ancestral_sample_step(self, rng, i, timesteps, zt, conditioning=None):
         rng_body = jax.random.fold_in(rng, i)
         s, t = self.get_sampling_grid(i, timesteps)
-        cond = self.get_cond_embedding(conditioning)
+        cond, _ = self.get_cond_embedding(conditioning)
 
         alpha_t = self.noise_schedule.alpha(t)
         alpha_s = self.noise_schedule.alpha(s)
@@ -335,7 +455,7 @@ class MD4(nn.Module):
     def topp_sample_step(self, rng, i, timesteps, zt, conditioning=None, topp=0.98):
         rng_body = jax.random.fold_in(rng, i)
         s, t = self.get_sampling_grid(i, timesteps)
-        cond = self.get_cond_embedding(conditioning)
+        cond, _ = self.get_cond_embedding(conditioning)
 
         alpha_t = self.noise_schedule.alpha(t)
         alpha_s = self.noise_schedule.alpha(s)
@@ -362,7 +482,7 @@ class MD4(nn.Module):
         # https://arxiv.org/abs/2406.04329.
         rng_body = jax.random.fold_in(rng, i)
         s, t = self.get_sampling_grid(i, timesteps)
-        cond = self.get_cond_embedding(conditioning)
+        cond, _ = self.get_cond_embedding(conditioning)
 
         alpha_t = self.noise_schedule.alpha(t)
         alpha_s = self.noise_schedule.alpha(s)

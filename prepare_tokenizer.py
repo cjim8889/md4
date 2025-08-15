@@ -6,27 +6,14 @@ Includes special tokens for padding, masking, and end of sentence.
 
 import os
 import argparse
-from typing import List, Iterator
-import pandas as pd
+from typing import List, Optional
+import datasets
 from transformers import PreTrainedTokenizerFast
 from tokenizers import Tokenizer
 from tokenizers.models import BPE
-from tokenizers.pre_tokenizers import Whitespace, Sequence, Split
+from tokenizers.pre_tokenizers import Sequence, Split
 from tokenizers.trainers import BpeTrainer
 from tokenizers.processors import TemplateProcessing
-
-
-def load_smiles_from_csv(csv_files: List[str]) -> Iterator[str]:
-    """Load SMILES strings from CSV files."""
-    for csv_file in csv_files:
-        print(f"Loading SMILES from {csv_file}...")
-        df = pd.read_parquet(csv_file)
-        if 'smiles' in df.columns:
-            for smiles in df['smiles'].to_list():
-                if smiles and isinstance(smiles, str):
-                    yield smiles
-        else:
-            print(f"Warning: 'smiles' column not found in {csv_file}")
 
 
 def create_smiles_pre_tokenizer():
@@ -34,23 +21,24 @@ def create_smiles_pre_tokenizer():
     # SMILES use specific characters - we'll split on common atom/bond boundaries
     # This helps the tokenizer learn meaningful chemical substructures
     return Sequence([
-        Split(pattern=r'(\[|\]|\(|\)|=|#|@|\+|\-|%|\d+)', behavior="isolated"),
-        Whitespace()
+        Split(pattern=r'(\[[^\]]+]|Br?|Cl?|N|O|S|P|F|I|b|c|n|o|s|p|\(|\)|\.|=|#|-|\+|\\|\/|:|~|@|\?|>>?|\*|\$|\%[0-9]{2}|[0-9])', behavior="isolated"),
     ])
 
 
 def train_smiles_tokenizer(
-    csv_files: List[str],
-    vocab_size: int = 1000,
+    dataset_name: str = "jablonkagroup/pubchem-smiles-molecular-formula",
+    vocab_size: Optional[int] = None,
+    min_frequency: int = 2000,
     output_dir: str = "data",
-    tokenizer_name: str = "smiles_tokenizer"
+    tokenizer_name: str = "pubchem_large_tokenizer"
 ) -> PreTrainedTokenizerFast:
     """
-    Train a BPE tokenizer on SMILES strings with special tokens.
+    Train a BPE tokenizer on SMILES strings and molecular formulas with special tokens.
     
     Args:
-        csv_files: List of CSV files containing SMILES strings
+        dataset_name: HuggingFace dataset name containing SMILES strings and molecular formulas
         vocab_size: Target vocabulary size
+        min_frequency: Minimum frequency for tokens
         output_dir: Directory to save the tokenizer
         tokenizer_name: Name for the tokenizer files
         
@@ -72,36 +60,47 @@ def train_smiles_tokenizer(
     # Set up pre-tokenizer for SMILES
     tokenizer.pre_tokenizer = create_smiles_pre_tokenizer()
     
-    # Optional: normalize to lowercase (uncomment if needed)
-    # tokenizer.normalizer = Lowercase()
-    
     # Set up trainer
-    trainer = BpeTrainer(
-        vocab_size=vocab_size,
-        special_tokens=special_tokens,
-        min_frequency=2,
-        show_progress=True
-    )
+    if vocab_size is not None:
+        trainer = BpeTrainer(
+            vocab_size=vocab_size,
+            special_tokens=special_tokens,
+            min_frequency=min_frequency,
+            show_progress=True
+        )
+    else:
+        trainer = BpeTrainer(
+            special_tokens=special_tokens,
+            min_frequency=min_frequency,
+            show_progress=True
+        )
     
-    # Collect SMILES strings for training
-    print("Collecting SMILES strings for tokenizer training...")
-    smiles_texts = list(load_smiles_from_csv(csv_files))
+    # Load dataset
+    print(f"Loading dataset: {dataset_name}")
+    ds = datasets.load_dataset(dataset_name, split="train")
+    print(f"Dataset loaded with {len(ds)} examples")
     
-    if not smiles_texts:
-        raise ValueError("No SMILES strings found in the provided CSV files!")
-    
-    print(f"Found {len(smiles_texts)} SMILES strings for training")
-    print("Sample SMILES:")
-    for i, smiles in enumerate(smiles_texts[:5]):
-        print(f"  {i+1}: {smiles}")
+    # Create iterator that yields both SMILES and molecular formulas
+    def text_iterator():
+        for example in ds:
+            # Always yield SMILES if available
+            if "smiles" in example and example["smiles"]:
+                yield example["smiles"]
+            
+            # Yield molecular formula only if it exists and is not empty/None
+            if "molecular_formula" in example and example["molecular_formula"]:
+                molecular_formula = example["molecular_formula"].strip()
+                if molecular_formula and molecular_formula.lower() not in ["none", "null", ""]:
+                    yield molecular_formula
     
     # Train the tokenizer
-    print(f"Training tokenizer with vocab_size={vocab_size}...")
-    tokenizer.train_from_iterator(smiles_texts, trainer=trainer)
+    print(f"Training tokenizer with vocab_size={vocab_size}, min_frequency={min_frequency}...")
+    print("Training on both SMILES and molecular formulas...")
+    tokenizer.train_from_iterator(text_iterator(), trainer=trainer)
     
     # Add post-processor to add special tokens
     tokenizer.post_processor = TemplateProcessing(
-        single="[CLS] $A [SEP]",
+        single="[CLS] $A [SEP] $B [SEP]",
         special_tokens=[
             ("[CLS]", tokenizer.token_to_id("[CLS]")),
             ("[SEP]", tokenizer.token_to_id("[SEP]")),
@@ -128,17 +127,17 @@ def train_smiles_tokenizer(
     return fast_tokenizer
 
 
-def test_tokenizer(tokenizer: PreTrainedTokenizerFast, test_smiles: List[str]):
-    """Test the trained tokenizer on sample SMILES strings."""
+def test_tokenizer(tokenizer: PreTrainedTokenizerFast, test_texts: List[str]):
+    """Test the trained tokenizer on sample SMILES strings and molecular formulas."""
     print("\n" + "="*50)
     print("TESTING TOKENIZER")
     print("="*50)
     
-    for i, smiles in enumerate(test_smiles[:3]):
-        print(f"\nTest {i+1}: {smiles}")
+    for i, text in enumerate(test_texts[:6]):  # Show more examples since we have both types
+        print(f"\nTest {i+1}: {text}")
         
         # Tokenize
-        encoded = tokenizer(smiles, return_tensors="np", padding=True, truncation=True)
+        encoded = tokenizer(text, return_tensors="np", padding=True, truncation=True)
         tokens = encoded['input_ids'][0].tolist()
         
         print(f"  Tokens: {tokens}")
@@ -148,35 +147,47 @@ def test_tokenizer(tokenizer: PreTrainedTokenizerFast, test_smiles: List[str]):
         # Decode back
         decoded = tokenizer.decode(tokens, skip_special_tokens=True)
         print(f"  Decoded: {decoded}")
-        print(f"  Match original: {decoded.replace(' ', '') == smiles.replace(' ', '')}")
+        print(f"  Match original: {decoded.replace(' ', '') == text.replace(' ', '')}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train a SMILES tokenizer")
-    parser.add_argument("--data-dir", default="data", help="Directory containing CSV files")
-    parser.add_argument("--vocab-size", type=int, default=1000, help="Vocabulary size")
+    parser.add_argument("--dataset-name", default="jablonkagroup/pubchem-smiles-molecular-formula", 
+                       help="HuggingFace dataset name")
+    parser.add_argument("--vocab-size", type=int, default=2048, help="Vocabulary size")
+    parser.add_argument("--min-frequency", type=int, default=4000, help="Minimum frequency for tokens")
     parser.add_argument("--output-dir", default="data", help="Output directory for tokenizer")
-    parser.add_argument("--tokenizer-name", default="smiles_tokenizer", help="Name for the tokenizer")
+    parser.add_argument("--tokenizer-name", default="pubchem_large_tokenizer_2048", help="Name for the tokenizer")
     
     args = parser.parse_args()
     
-    # CSV files to process
-    splits = {'train': 'data/train-00000-of-00001-e9b227f8c7259c8b.parquet', 'validation': 'data/validation-00000-of-00001-9368b7243ba1bff8.parquet'}
-    hf_prefix = "hf://datasets/sagawa/pubchem-10m-canonicalized/"
-    csv_files = [hf_prefix + splits["train"], hf_prefix + splits["validation"]]
-    
     # Train tokenizer
     tokenizer = train_smiles_tokenizer(
-        csv_files=csv_files,
+        dataset_name=args.dataset_name,
         vocab_size=args.vocab_size,
+        min_frequency=args.min_frequency,
         output_dir=args.output_dir,
         tokenizer_name=args.tokenizer_name
     )
     
-    # Test with sample SMILES
-    test_smiles = list(load_smiles_from_csv([csv_files[0]]))[:5]  # Get first 5 from train
-    if test_smiles:
-        test_tokenizer(tokenizer, test_smiles)
+    # Load dataset for testing
+    print("Loading test samples...")
+    ds = datasets.load_dataset(args.dataset_name, split="train")
+    test_examples = ds[:5]  # Get first 5 examples for testing
+    
+    # Test with both SMILES and molecular formulas
+    test_texts = []
+    for example in test_examples:
+        if "smiles" in example and example["smiles"]:
+            test_texts.append(example["smiles"])
+        
+        if "molecular_formula" in example and example["molecular_formula"]:
+            molecular_formula = example["molecular_formula"].strip()
+            if molecular_formula and molecular_formula.lower() not in ["none", "null", ""]:
+                test_texts.append(molecular_formula)
+    
+    if test_texts:
+        test_tokenizer(tokenizer, test_texts)
     
     print(f"\nTokenizer training complete!")
     print(f"To use the tokenizer:")

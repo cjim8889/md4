@@ -1,66 +1,31 @@
-# Copyright 2025 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
-
-"""Methods for training MD4/GenMD4 on text/image datasets."""
-
-from collections.abc import Callable, Mapping, Sequence
-import copy
 import functools
+from collections.abc import Callable, Mapping
 from typing import Any
 
-from absl import logging
-from clu import metric_writers
-from clu import metrics
-from clu import parameter_overview
-from clu import periodic_actions
-from etils import epath
 import flax
 import flax.jax_utils as flax_utils
 import flax.linen as nn
 import grain.python as grain
 import jax
-from jax.experimental import checkify
 import jax.numpy as jnp
 import ml_collections
 import numpy as np
 import optax
-from orbax import checkpoint as orbax_checkpoint
+from absl import logging
+from clu import metric_writers, metrics, periodic_actions
+from etils import epath
+from jax.experimental import checkify
 
-from md4 import input_pipeline
-from md4 import input_pipeline_v2
-from md4 import sampling
-from md4 import utils
-from md4.models import utils as model_utils
-
-
-@flax.struct.dataclass
-class TrainState:
-    """State of the model and the training.
-
-    This includes parameters, statistics and optimizer.
-    """
-
-    rng: jnp.ndarray
-    step: int
-    params: Any
-    ema_params: Any
-    opt_state: optax.OptState
-    state: Any
+from md4 import (
+    input_pipeline,
+    sampling,
+)
+from md4.utils import checkpoint_utils, partial_load_utils, rdkit_utils, state_utils, utils, wandb_writer
 
 
-def merge_batch_stats(replicated_state: TrainState) -> TrainState:
+def merge_batch_stats(
+    replicated_state: state_utils.TrainState,
+) -> state_utils.TrainState:
     """Merge model batch stats."""
     if jax.tree.leaves(replicated_state.state):
         cross_replica_mean = jax.pmap(lambda x: jax.lax.pmean(x, "batch"), "batch")
@@ -71,110 +36,13 @@ def merge_batch_stats(replicated_state: TrainState) -> TrainState:
         return replicated_state
 
 
-def _get_checkpoint_manager(
-    config: ml_collections.ConfigDict, workdir: epath.PathLike
-) -> orbax_checkpoint.CheckpointManager:
-    """Loads the orbax checkpoint manager for train state and data iterator."""
-    # The keys in this dict should match the keys in `checkpointed_state`.
-    checkpointers = dict(
-        train_state=orbax_checkpoint.PyTreeCheckpointer(),
-        train_iter=orbax_checkpoint.Checkpointer(
-            grain.PyGrainCheckpointHandler()
-        ),  # pytype:disable=wrong-arg-types
-    )
-    checkpoint_dir = epath.Path(workdir) / "checkpoints"
-    # keep_period = (
-    #     config.checkpoint_keep_period if config.checkpoint_keep_period > 0 else None
-    # )
-    return orbax_checkpoint.CheckpointManager(
-        checkpoint_dir,
-        checkpointers=checkpointers,
-        options=orbax_checkpoint.CheckpointManagerOptions(
-            create=True,
-            # preservation_policy=orbax_checkpoint.checkpoint_managers.BestN(
-            #     n=10, get_metric_fn=lambda x: x["validation_loss"]
-            # )
-            best_fn=lambda x: x["validation_loss"] if "validation_loss" in x else x["loss"],
-            max_to_keep=20,
-        ),
-    )
-
-
-def create_train_state(
-    config: ml_collections.ConfigDict,
-    rng: jnp.ndarray,
-    input_shape: Sequence[int] | Mapping[str, Sequence[int]],
-    schedule_fn: Callable[[Any], Any],
-) -> tuple[nn.Module, optax.GradientTransformation, TrainState, Any]:
-    """Create and initialize the model."""
-    model = model_utils.get_model(config)
-
-    if config.classes > 0:
-        conditioning = jnp.zeros(input_shape[0], dtype="int32")
-    elif config.fingerprint_dim > 0:
-        conditioning = jnp.zeros(
-            (input_shape[0], config.fingerprint_dim), dtype="int32"
-        )
-    else:
-        conditioning = None
-    rng, sample_rng, init_rng = jax.random.split(rng, 3)
-    dummy_input = jnp.ones(input_shape, dtype="int32")
-
-    output, variables = model.init_with_output(
-        {"sample": sample_rng, "params": init_rng},
-        dummy_input,
-        cond=conditioning,
-        train=False,
-    )
-    metric_keys = sorted(list(output.keys()) + ["learning_rate"])
-    logging.info("metric_keys: %s", metric_keys)
-    metrics_class = create_metrics_class_from_keys(metric_keys)
-    state, params = flax.core.pop(variables, "params")
-    del variables
-    parameter_overview.log_parameter_overview(
-        state, msg="############# state #############"
-    )
-    parameter_overview.log_parameter_overview(
-        params, msg="############# params #############"
-    )
-
-    optimizer = optax.chain(
-        optax.clip(config.clip) if config.clip > 0.0 else optax.identity(),
-        optax.adamw(
-            schedule_fn,
-            b1=0.9,
-            b2=config.b2,
-            weight_decay=config.weight_decay,
-        ),
-    )
-    return (
-        model,
-        optimizer,
-        TrainState(
-            step=0,
-            rng=rng,
-            params=params,
-            ema_params=copy.deepcopy(params) if config.ema_rate > 0.0 else None,
-            opt_state=optimizer.init(params),
-            state=state,
-        ),
-        metrics_class,
-    )
-
-
-def create_metrics_class_from_keys(metric_keys):
-    """Create train/eval metrics collection from dictionary."""
-    average_keys = []
-    stats = dict(
-        (k, metrics.Average.from_output(k))
-        if (k in average_keys) or ("loss" in k)
-        else (k, metrics.LastValue.from_output(k))
-        for k in metric_keys
-    )
-    return metrics.Collection.create(**stats)
-
-
-def cosine_decay(lr: float, current_step: float, total_steps: float) -> float:
+def cosine_decay(
+    lr: Any, current_step: Any, total_steps: Any
+) -> Any:  # pytype: disable=invalid-annotation
+    """Cosine decay that accepts Python scalars or JAX arrays."""
+    current_step = jnp.asarray(current_step, dtype=jnp.float32)
+    total_steps = jnp.maximum(1.0, jnp.asarray(total_steps, dtype=jnp.float32))
+    lr = jnp.asarray(lr, dtype=jnp.float32)
     ratio = jnp.maximum(0.0, current_step / total_steps)
     mult = 0.5 * (1.0 + jnp.cos(jnp.pi * ratio))
     return mult * lr  # pytype: disable=bad-return-type  # jax-types
@@ -187,24 +55,90 @@ def get_learning_rate(
     num_steps: int,
     warmup_steps: int | None = None,
     schedule_type: str = "cosine",
-) -> float:
-    """Cosine learning rate schedule."""
+) -> Any:  # pytype: disable=invalid-annotation
+    """Learning rate schedule helper.
+
+    Supports:
+      - "cosine": single cosine decay with (optional) warmup.
+      - "constant": constant LR after warmup.
+      - "cyclic_cosine": cosine annealing with warm restarts (cyclic cosine).
+
+    The cyclic variant optionally allows inline parameter overrides encoded in
+    the schedule_type string, e.g.:
+        "cyclic_cosine;cycle_length=1000;min_lr=1e-5"
+    Parameters (all optional) for cyclic_cosine:
+        cycle_length:   Number of steps per cycle (default: num_steps // 10, >=1).
+        min_lr:         Minimum LR at the end of each cycle (default: 0.0).
+        decay_factor:   Multiplicative factor applied to base LR after each cycle
+                        restart (default: 1.0, i.e., no decay of peaks).
+    Warmup (if warmup_steps provided) is applied only to the very beginning of
+    training (first warmup_steps) scaling the scheduled LR linearly.
+    """
     logging.info(
-        "get_learning_rate(step=%s, base_learning_rate=%s, num_steps=%s",
+        "get_learning_rate(step=%s, base_learning_rate=%s, num_steps=%s, schedule_type=%s)",
         step,
         base_learning_rate,
         num_steps,
+        schedule_type,
     )
-    warmup = jnp.minimum(1.0, step / warmup_steps)
-    if schedule_type == "cosine":
-        lr = cosine_decay(
-            base_learning_rate, step - warmup_steps, num_steps - warmup_steps
-        )
-    elif schedule_type == "constant":
-        lr = base_learning_rate
+
+    # Handle warmup (gracefully if warmup_steps is None or 0).
+    if warmup_steps is None or warmup_steps <= 0:
+        warmup = 1.0
+        effective_step = step
+        effective_total = num_steps
     else:
-        raise NotImplementedError()
-    return lr * warmup  # pytype: disable=bad-return-type  # jax-types
+        warmup = jnp.minimum(1.0, step / warmup_steps)
+        effective_step = jnp.maximum(0, step - warmup_steps)
+        effective_total = jnp.maximum(1, num_steps - warmup_steps)
+
+    # Allow parameter overrides for cyclic cosine via semi-colon separated kv pairs.
+    schedule_base = schedule_type.split(";")[0]
+    extra_params = schedule_type.split(";")[1:]
+    parsed: dict[str, str] = {}
+    for kv in extra_params:
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            parsed[k.strip()] = v.strip()
+
+    if schedule_base == "cosine":
+        lr = cosine_decay(base_learning_rate, effective_step, effective_total)
+    elif schedule_base == "constant":
+        lr = base_learning_rate
+    elif schedule_base == "cyclic_cosine":
+        # Derive cycle_length (at least 1) and other params.
+        default_cycle = max(1, num_steps // 10)
+        try:
+            cycle_length = int(parsed.get("cycle_length", default_cycle))
+        except ValueError:  # Fall back to default if parsing fails.
+            cycle_length = default_cycle
+        cycle_length = max(1, cycle_length)
+
+        try:
+            min_lr = float(parsed.get("min_lr", 0.0))
+        except ValueError:
+            min_lr = 0.0
+        try:
+            decay_factor = float(parsed.get("decay_factor", 1.0))
+        except ValueError:
+            decay_factor = 1.0
+
+        # Position within current cycle (after warmup region).
+        cycle_index = jnp.floor_divide(effective_step, cycle_length)
+        pos_in_cycle = jnp.mod(effective_step, cycle_length)
+
+        # Optionally decay the peak LR each cycle.
+        peak_lr = base_learning_rate * (decay_factor**cycle_index)
+
+        # Cosine within the cycle from peak_lr down to min_lr.
+        cosine_ratio = pos_in_cycle / cycle_length
+        lr = min_lr + 0.5 * (peak_lr - min_lr) * (1.0 + jnp.cos(jnp.pi * cosine_ratio))
+    else:
+        raise NotImplementedError(f"Unknown schedule type: {schedule_type}")
+
+    return jnp.asarray(
+        lr * warmup, dtype=jnp.float32
+    )  # pytype: disable=bad-return-type  # jax-types
 
 
 def loss_fn(params, state, rng, model, batch, train=False):
@@ -225,12 +159,8 @@ def loss_fn(params, state, rng, model, batch, train=False):
     else:
         raise ValueError("Unsupported targets/tasks.")
 
-    if "label" in batch:
-        conditioning = batch["label"].astype("int32")
-    elif "fingerprint" in batch:
-        conditioning = batch["fingerprint"].astype("int32")
-    else:
-        conditioning = None
+    # Get model dtype for proper mixed precision handling
+    conditioning = state_utils.get_conditioning_from_batch(batch, dtype=jnp.float32)
 
     new_state = {}
     if train:
@@ -261,13 +191,13 @@ def merge_metrics(a_tree, b_tree):
 def train_step(
     model: nn.Module,
     optimizer: optax.GradientTransformation,
-    train_state: TrainState,
+    train_state: state_utils.TrainState,
     batch: Mapping[str, jnp.ndarray],
     learning_rate_fn: Callable[[int], float],
     train_metrics_class: Any,
     ema_rate: float = 0.0,
     num_microbatches: int | None = None,
-) -> tuple[TrainState, metrics.Collection]:
+) -> tuple[state_utils.TrainState, metrics.Collection]:
     """Perform a single training step."""
     logging.info("train_step(batch=%s)", batch)
     rng, new_rng = jax.random.split(train_state.rng)
@@ -389,7 +319,7 @@ def train_step(
 def eval_step(
     model: nn.Module,
     rng: jnp.ndarray,
-    train_state: TrainState,
+    train_state: state_utils.TrainState,
     batch: Mapping[str, jnp.ndarray],
     eval_metrics_class: Any,
     ema_rate: float = 0.0,
@@ -408,7 +338,7 @@ def eval_step(
 def evaluate(
     p_eval_step: Any,
     rng: jnp.ndarray,
-    train_state: TrainState,
+    train_state: state_utils.TrainState,
     eval_loader: grain.DataLoader,
     num_eval_steps: int = -1,
 ):
@@ -437,13 +367,19 @@ def evaluate(
     return eval_metrics
 
 
-def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLike):
+def train_and_evaluate(
+    config: ml_collections.ConfigDict,
+    workdir: epath.PathLike,
+    olddir: epath.PathLike | None = None,
+):
     """Runs a training and evaluation loop.
 
     Args:
       config: Configuration to use.
       workdir: Working directory for checkpoints and TF summaries. If this
         contains checkpoint training will be resumed from the latest checkpoint.
+      olddir: Optional directory to load old checkpoints from for partial loading.
+        If provided, checkpoints will be loaded from olddir but saved to workdir.
     """
     workdir = epath.Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -453,6 +389,18 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
     writer = metric_writers.create_default_writer(
         workdir, just_logging=jax.process_index() > 0
     )
+    
+    # Add wandb writer to the multi-writer if we're on the main process
+    if jax.process_index() == 0 and hasattr(writer, '_writers') and config.get('enable_wandb', False):
+        wandb_w = wandb_writer.WandBWriter(
+            project=config.get('wandb_project', 'md4'),
+            **config.get('wandb_kwargs', {})
+        )
+        writer._writers = tuple(
+            [wandb_w] + list(writer._writers)
+        )
+        logging.info("Added WandB writer to metric writers.")
+    
     # Learning rate schedule.
     assert config.batch_size % jax.device_count() == 0
     per_device_batch_size = config.batch_size // jax.device_count()
@@ -475,36 +423,71 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
         jax.random.randint(data_seed, [], minval=0, maxval=np.iinfo(np.int32).max)
     )
     # The input pipeline runs on each process and loads data for local TPUs.
-    create_datasets = (
-        input_pipeline_v2.create_datasets
-        if config.get("use_v2_input_pipeline", None)
-        else input_pipeline.create_datasets
+    train_loader, eval_loaders, dataset_info = input_pipeline.create_datasets(
+        config, data_seed
     )
-    train_loader, eval_loaders, dataset_info = create_datasets(config, data_seed)
-    train_iter = iter(train_loader)
+
+    # Determine if we need to create an iterator based on loader type
+    # Grain loaders are DataLoader instances and need iter(), while TF iterators are already iterators
+    is_grain_loader = isinstance(train_loader, grain.DataLoader)
+    train_iter = iter(train_loader) if is_grain_loader else train_loader
 
     # Initialize model.
     rng, model_rng = jax.random.split(rng)
     data_shape = input_pipeline.get_data_shape(config)
-    model, optimizer, train_state, metrics_class = create_train_state(  # pylint: disable=invalid-name
-        config,
-        model_rng,
-        input_shape=(per_device_batch_size,) + data_shape,
-        schedule_fn=schedule_fn,
-    )
+
+    if config.get("frozen", False):
+        logging.info("Creating frozen train state.")
+        model, optimizer, train_state, metrics_class = state_utils.create_train_state(  # pylint: disable=invalid-name
+            config,
+            model_rng,
+            input_shape=(per_device_batch_size,) + data_shape,
+            schedule_fn=schedule_fn,
+        )
+    else:
+        logging.info("Creating train state.")
+        model, optimizer, train_state, metrics_class = state_utils.create_train_state(
+            config,
+            model_rng,
+            input_shape=(per_device_batch_size,) + data_shape,
+            schedule_fn=schedule_fn,
+        )
 
     # Set up checkpointing of the model and the input pipeline.
-    checkpoint_manager = _get_checkpoint_manager(config, workdir)
+    # Get both save and load checkpoint managers
+    save_checkpoint_manager, load_checkpoint_manager = (
+        checkpoint_utils.get_checkpoint_managers(
+            config, workdir, olddir, is_grain_loader=is_grain_loader
+        )
+    )
 
     # Retrieve data from previous checkpoints if possible.
-    checkpointed_state = dict(train_state=train_state, train_iter=train_iter)
-    print(f"Checkpoint state: {checkpointed_state.keys()}")
-    if checkpoint_manager.latest_step() is not None:
-        checkpointed_state = checkpoint_manager.restore(
-            checkpoint_manager.latest_step(), items=checkpointed_state
-        )
-    train_state = checkpointed_state["train_state"]
-    train_iter = checkpointed_state["train_iter"]
+    if load_checkpoint_manager.latest_step() is not None:
+        # Check if we should use partial loading
+        if partial_load_utils.should_use_partial_loading(config):
+            try:
+                train_state, _ = partial_load_utils.partial_load_checkpoint(
+                    config=config,
+                    train_state=train_state,
+                    train_iter=train_iter if is_grain_loader else None,
+                    checkpoint_manager=load_checkpoint_manager,
+                    create_train_state_fn=state_utils.create_train_state,
+                    schedule_fn=schedule_fn,
+                    per_device_batch_size=per_device_batch_size,
+                    data_shape=data_shape,
+                )
+            except Exception as e:
+                logging.error(f"Partial loading failed: {e}")
+                raise
+        else:
+            # Standard checkpoint loading
+            train_state, _ = partial_load_utils.standard_checkpoint_loading(
+                train_state=train_state,
+                train_iter=train_iter if is_grain_loader else None,
+                checkpoint_manager=load_checkpoint_manager,
+            )
+
+    logging.info("Batch Size: %s", config.batch_size)
 
     # Distribute training.
     train_state = flax_utils.replicate(train_state)
@@ -546,7 +529,6 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
     # Unreplicating from TPU is costly, so we only do it once at the start.
     initial_step = int(flax.jax_utils.unreplicate(train_state.step))
     eval_metrics_cpu = None
-
     with metric_writers.ensure_flushes(writer):
         # Steps are in interval [1, num_train_steps], not [0, num_train_steps - 1].
         for step in range(initial_step + 1, num_train_steps + 1):
@@ -611,19 +593,19 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                             if "smiles" not in dummy_batch
                             else dummy_batch["smiles"]
                         )
-                        if "label" in dummy_batch:
-                            conditioning = dummy_batch["label"].astype("int32")
-                        elif "fingerprint" in dummy_batch:
-                            conditioning = dummy_batch["fingerprint"].astype("int32")
-                        else:
-                            conditioning = None
+                        # Get model dtype for proper mixed precision handling
+                        model_dtype = getattr(model, 'dtype', jnp.float32)
+                        conditioning = state_utils.get_conditioning_from_batch(
+                            dummy_batch, dtype=model_dtype
+                        )
 
                         samples = sampling.generate(
                             model,
                             train_state,
                             flax_utils.replicate(sample_rng),
                             dummy_inputs,
-                            conditioning=conditioning,
+                            conditioning,
+                            False,
                         )
 
                         all_samples = jax.pmap(
@@ -637,19 +619,57 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: epath.PathLik
                             del all_samples, sample_grid
                         elif config.task_type == "text":
                             tokenizer = dataset_info["tokenizer"]
-                            texts = utils.detokenize_texts(all_samples, tokenizer)
-                            writer.write_texts(step, {"samples": texts})
+                            texts = None
+                            try:
+                                texts = tokenizer.batch_decode(
+                                    all_samples,
+                                    skip_special_tokens=False,
+                                    clean_up_tokenization_spaces=True,
+                                )
+                                # writer.write_texts(step, {"samples": texts})
+
+                                # Calculate SMILES validity for pubchem_large dataset
+                                if (
+                                    config.dataset
+                                    in [
+                                        "pubchem_large",
+                                        "msg_finetune",
+                                        "pubchem_large_text",
+                                    ]
+                                    and texts is not None
+                                ):
+                                    validity_metrics = (
+                                        rdkit_utils.calculate_smiles_validity(texts)
+                                    )
+                                    # Write validity metrics to the writer
+                                    validity_scalars = {
+                                        f"sample_{k}": v
+                                        for k, v in validity_metrics.items()
+                                    }
+                                    writer.write_scalars(step, validity_scalars)
+                            except Exception as e:
+                                logging.error("Error decoding texts: %s", e)
 
             if step % config.checkpoint_every_steps == 0 or is_last_step:
                 with report_progress.timed("checkpoint"):
                     train_state = merge_batch_stats(train_state)
-                    checkpoint_manager.save(
+
+                    # Prepare checkpoint items
+                    checkpoint_items = dict(
+                        train_state=jax.tree_util.tree_map(
+                            np.array, flax_utils.unreplicate(train_state)
+                        ),
+                    )
+
+                    # Only include train_iter for grain loaders
+                    if is_grain_loader:
+                        checkpoint_items["train_iter"] = train_iter
+
+                    save_checkpoint_manager.save(
                         step,
-                        items=dict(
-                            train_state=jax.tree_util.tree_map(
-                                np.array, flax_utils.unreplicate(train_state)
-                            ),
-                            train_iter=train_iter,
+                        items=checkpoint_items,
+                        metrics=jax.tree_util.tree_map(
+                            lambda x: x.item(), eval_metrics_cpu
                         ),
                         metrics=eval_metrics_cpu
                     )

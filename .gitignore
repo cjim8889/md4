@@ -30,6 +30,25 @@ data/
 *.sh
 final_test/
 
+results/
 *.parquet
 
-results/
+cache/
+
+profile/
+profilenew/
+*.zip
+
+expt/
+large_expt/
+
+finetune_*/
+*expt/
+*expt*/
+
+finetune_*/
+
+
+*results*/
+
+wandb/

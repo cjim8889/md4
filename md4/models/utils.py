@@ -15,64 +15,73 @@
 
 """Model utils."""
 
+import jax.numpy as jnp
 import ml_collections
 
-from md4.models.diffusion import genmd4
-from md4.models.diffusion import md4
+from md4.models.diffusion import genmd4, md4
 
 
 def get_model(config: ml_collections.ConfigDict):
-  """Get model instances."""
-  if config.model_type == "md4":
-    return md4.MD4(
-        config.data_shape,
-        cont_time=config.cont_time,
-        timesteps=config.timesteps,
-        feature_dim=config.feature_dim,
-        num_heads=config.num_heads,
-        n_layers=config.n_layers,
-        n_dit_layers=config.n_dit_layers,
-        dit_num_heads=config.dit_num_heads,
-        dit_hidden_size=config.dit_hidden_size,
-        ch_mult=config.ch_mult,
-        vocab_size=config.vocab_size,
-        noise_schedule_type=config.noise_schedule,
-        dropout_rate=config.dropout_rate,
-        use_attn_dropout=config.get("use_attn_dropout", True),
-        mlp_type=config.mlp_type,
-        depth_scaled_init=config.depth_scaled_init,
-        cond_type=config.cond_type,
-        outside_embed=config.outside_embed,
-        time_features=config.time_features,
-        classes=config.classes,
-        sampler=config.sampler,
-        sampling_grid=config.sampling_grid,
-        topp=config.topp,
-        model_sharding=config.get("model_sharding", False),
-        fingerprint_dim=config.get("fingerprint_dim", 0),
-    )
-  elif config.model_type == "genmd4":
-    return genmd4.GenMD4(
-        config.data_shape,
-        cont_time=config.cont_time,
-        timesteps=config.timesteps,
-        feature_dim=config.feature_dim,
-        num_heads=config.num_heads,
-        n_layers=config.n_layers,
-        n_dit_layers=config.n_dit_layers,
-        dit_num_heads=config.dit_num_heads,
-        dit_hidden_size=config.dit_hidden_size,
-        ch_mult=config.ch_mult,
-        vocab_size=config.vocab_size,
-        noise_schedule_type=config.noise_schedule,
-        power_init=config.power_init,
-        dropout_rate=config.dropout_rate,
-        use_attn_dropout=config.get("use_attn_dropout", True),
-        mlp_type=config.mlp_type,
-        depth_scaled_init=config.depth_scaled_init,
-        cond_type=config.cond_type,
-        outside_embed=config.outside_embed,
-        time_features=config.time_features,
-    )
-  else:
-    raise NotImplementedError()
+    """Get model instances."""
+    if config.model_type == "md4":
+        return md4.MD4(
+            config.data_shape,
+            cont_time=config.cont_time,
+            timesteps=config.timesteps,
+            feature_dim=config.feature_dim,
+            num_heads=config.num_heads,
+            n_kv_heads=config.get("n_kv_heads", config.num_heads),
+            n_layers=config.n_layers,
+            n_dit_layers=config.n_dit_layers,
+            dit_num_heads=config.dit_num_heads,
+            dit_hidden_size=config.dit_hidden_size,
+            ch_mult=config.ch_mult,
+            vocab_size=config.vocab_size,
+            noise_schedule_type=config.noise_schedule,
+            dropout_rate=config.dropout_rate,
+            use_attn_dropout=config.get("use_attn_dropout", True),
+            mlp_type=config.mlp_type,
+            depth_scaled_init=config.depth_scaled_init,
+            cond_type=config.cond_type,
+            outside_embed=config.outside_embed,
+            time_features=config.time_features,
+            classes=config.classes,
+            sampler=config.sampler,
+            sampling_grid=config.sampling_grid,
+            topp=config.topp,
+            model_sharding=config.get("model_sharding", False),
+            fingerprint_dim=config.get("fingerprint_dim", 0),
+            raw_fingerprint_dim=config.get("raw_fingerprint_dim", 0),
+            fingerprint_adapter=config.get("fingerprint_adapter", False),
+            atom_type_size=config.get("atom_type_size", 0),
+            only_adapter=config.get("only_adapter", False),
+            fingerprint_mlp_layers=config.get("fingerprint_mlp_layers", ()),
+            multiple_of=config.get("multiple_of", 256),
+            dtype=config.get("dtype", jnp.float32),
+            param_dtype=config.get("param_dtype", jnp.float32),
+        )
+    elif config.model_type == "genmd4":
+        return genmd4.GenMD4(
+            config.data_shape,
+            cont_time=config.cont_time,
+            timesteps=config.timesteps,
+            feature_dim=config.feature_dim,
+            num_heads=config.num_heads,
+            n_layers=config.n_layers,
+            n_dit_layers=config.n_dit_layers,
+            dit_num_heads=config.dit_num_heads,
+            dit_hidden_size=config.dit_hidden_size,
+            ch_mult=config.ch_mult,
+            vocab_size=config.vocab_size,
+            noise_schedule_type=config.noise_schedule,
+            power_init=config.power_init,
+            dropout_rate=config.dropout_rate,
+            use_attn_dropout=config.get("use_attn_dropout", True),
+            mlp_type=config.mlp_type,
+            depth_scaled_init=config.depth_scaled_init,
+            cond_type=config.cond_type,
+            outside_embed=config.outside_embed,
+            time_features=config.time_features,
+        )
+    else:
+        raise NotImplementedError()
