@@ -98,8 +98,8 @@ def get_config() -> config_dict.ConfigDict:
     config.topp = 0.98
 
     config.log_loss_every_steps = 1000
-    config.eval_every_steps = 20000
-    config.checkpoint_every_steps = 20000
+    config.eval_every_steps = 10000
+    config.checkpoint_every_steps = 10000
     config.checkpoint_keep_period = 200000
 
     # Single integer or tuple. If None will use (XManager ID, work unit).
