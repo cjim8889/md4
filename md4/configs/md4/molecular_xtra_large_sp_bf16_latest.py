@@ -40,7 +40,7 @@ def get_config() -> config_dict.ConfigDict:
     # timesteps: int or None
     config.timesteps = 1000
     # linear, cosine, poly[exponent], e.g., poly3
-    config.noise_schedule = "linear"
+    config.noise_schedule = "cosine"
     config.outside_embed = True
     # t or none (removes time dependence)
     config.time_features = "t"
@@ -65,14 +65,14 @@ def get_config() -> config_dict.ConfigDict:
 
     config.num_heads = 8
     config.n_kv_heads = 4
-    config.mlp_type = "glu"
+    config.mlp_type = "swiglu"
     config.depth_scaled_init = True
     config.cond_type = "adaln_zero"
 
     config.learning_rate = 3e-4
     config.learning_rate_schedule = "cosine"
     config.warmup_steps = 2000
-    config.weight_decay = 0.0
+    config.weight_decay = 1e-4
     config.clip = 0.0
     config.b2 = 0.999
     config.num_epochs = -1

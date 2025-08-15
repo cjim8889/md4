@@ -265,7 +265,7 @@ class FeedForward(nn.Module):
         act = activation_map[self.mlp_type]
         u = dense_2d(self.w1, x)
         v = dense_2d(self.w3, x)        # used for *any* gated MLP; ignore if plain GELU MLP
-        y = dense_2d(self.w2, act(u) * v)
+        y = dense_2d(self.w2, act(u.astype(jnp.float32)).astype(self.dtype) * v)
         if self.dropout_rate > 0.0:
             y = self.dropout(y, deterministic=not train)
         return y
@@ -336,10 +336,10 @@ class TransformerBlock(nn.Module):
                 jnp.split(ln(cond)[:, None, :], 6, axis=-1)
             )
             attention_norm = nn.LayerNorm(
-                epsilon=self.args.norm_eps, use_bias=False, use_scale=False, dtype=self.args.dtype, param_dtype=self.args.param_dtype
+                epsilon=self.args.norm_eps, use_bias=False, use_scale=False, dtype=jnp.float32, param_dtype=jnp.float32
             )
             ffn_norm = nn.LayerNorm(
-                epsilon=self.args.norm_eps, use_bias=False, use_scale=False, dtype=self.args.dtype, param_dtype=self.args.param_dtype
+                epsilon=self.args.norm_eps, use_bias=False, use_scale=False, dtype=jnp.float32, param_dtype=jnp.float32
             )
             h = x + gate_att * self.attention(
                 attention_norm(x) * (scale_att + 1.0) + shift_att,
@@ -351,8 +351,8 @@ class TransformerBlock(nn.Module):
                 ffn_norm(h) * (scale_mlp + 1.0) + shift_mlp, train=train
             )
         else:
-            attention_norm = RMSNorm(self.args.dim, eps=self.args.norm_eps, dtype=self.args.dtype, param_dtype=self.args.param_dtype)
-            ffn_norm = RMSNorm(self.args.dim, eps=self.args.norm_eps, dtype=self.args.dtype, param_dtype=self.args.param_dtype)
+            attention_norm = RMSNorm(self.args.dim, eps=self.args.norm_eps, dtype=jnp.float32, param_dtype=jnp.float32)
+            ffn_norm = RMSNorm(self.args.dim, eps=self.args.norm_eps, dtype=jnp.float32, param_dtype=jnp.float32)
             h = x + self.attention(attention_norm(x), freqs_cos, freqs_sin, train=train)
             out = h + self.feed_forward(ffn_norm(h), train=train)
 
@@ -388,7 +388,7 @@ class Transformer(nn.Module):
 
         if cond is not None:
             output_norm = nn.LayerNorm(
-                epsilon=args.norm_eps, use_bias=False, use_scale=False, dtype=args.dtype, param_dtype=args.param_dtype
+                epsilon=args.norm_eps, use_bias=False, use_scale=False, dtype=jnp.float32, param_dtype=jnp.float32
             )
             activation = activation_map[args.mlp_type]
             if args.cond_type == "adaln":
@@ -396,7 +396,7 @@ class Transformer(nn.Module):
                     [
                         # nn.swish,
                         activation,
-                        nn.Dense(2 * args.dim, use_bias=True, dtype=args.dtype, param_dtype=args.param_dtype),
+                        nn.Dense(2 * args.dim, use_bias=True, dtype=jnp.float32, param_dtype=jnp.float32),
                     ]
                 )
             elif args.cond_type == "adaln_zero":
@@ -409,25 +409,25 @@ class Transformer(nn.Module):
                             use_bias=True,
                             kernel_init=nn.initializers.zeros,
                             bias_init=nn.initializers.zeros,
-                            dtype=args.dtype,
-                            param_dtype=args.param_dtype,
+                            dtype=jnp.float32,
+                            param_dtype=jnp.float32,
                         ),
                     ]
                 )
             else:
                 raise NotImplementedError()
-            shift_out, scale_out = jnp.split(ln(cond)[:, None, :], 2, axis=-1)
+            shift_out, scale_out = jnp.split(ln(cond.astype(jnp.float32))[:, None, :], 2, axis=-1)
             logits = nn.Dense(
-                output_channels, use_bias=False, kernel_init=nn.initializers.zeros, dtype=args.dtype, param_dtype=args.param_dtype
+                output_channels, use_bias=False, kernel_init=nn.initializers.zeros, dtype=jnp.float32, param_dtype=jnp.float32
             )(output_norm(h) * (scale_out + 1) + shift_out)
         else:
-            h = RMSNorm(args.dim, args.norm_eps, dtype=args.dtype, param_dtype=args.param_dtype)(h)
+            h = RMSNorm(args.dim, args.norm_eps, dtype=jnp.float32, param_dtype=jnp.float32)(h)
             logits = nn.Dense(
                 features=output_channels,
                 use_bias=False,
                 kernel_init=nn.initializers.zeros,
-                dtype=args.dtype,
-                param_dtype=args.param_dtype,
+                dtype=jnp.float32,
+                param_dtype=jnp.float32,
             )(h)
 
         return logits

@@ -160,8 +160,7 @@ def loss_fn(params, state, rng, model, batch, train=False):
         raise ValueError("Unsupported targets/tasks.")
 
     # Get model dtype for proper mixed precision handling
-    model_dtype = getattr(model, 'dtype', jnp.float32)
-    conditioning = state_utils.get_conditioning_from_batch(batch, dtype=model_dtype)
+    conditioning = state_utils.get_conditioning_from_batch(batch, dtype=jnp.float32)
 
     new_state = {}
     if train:

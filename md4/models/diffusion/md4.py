@@ -221,7 +221,7 @@ class MD4(nn.Module):
                 if "atom_types" in conditioning:
                     atom_conditioning = self.atom_embeddings(conditioning["atom_types"])
                     atom_conditioning = jax.vmap(self.atom_embeddings_agg)(atom_conditioning)
-                    atom_conditioning = nn.swish(atom_conditioning)
+                    atom_conditioning = nn.swish(atom_conditioning.astype(jnp.float32)).astype(self.dtype)
 
                     if atom_conditioning.ndim == 2:
                         atom_conditioning = jnp.sum(atom_conditioning, axis=0)
@@ -314,7 +314,7 @@ class MD4(nn.Module):
             gamma: Focusing parameter
         """
         labels = labels.astype(self.dtype)
-        probas = jax.nn.sigmoid(logits)
+        probas = jax.nn.sigmoid(logits.astype(jnp.float32))
         
         # Calculate focal weights
         pt = labels * probas + (1.0 - labels) * (1.0 - probas)
@@ -336,6 +336,7 @@ class MD4(nn.Module):
         # sample z_t
         zt = self.forward_sample(x, t)
         logits, _ = self.predict_x(zt, t, cond=cond, train=train)
+        logits = logits.astype(jnp.float32)
         log_p = jax.nn.log_softmax(logits, axis=-1)
         one_hot_x = jax.nn.one_hot(x, self.vocab_size)
         neg_cross_ent = one_hot_x * log_p
@@ -382,7 +383,7 @@ class MD4(nn.Module):
             
             # Calculate average bit differences between true_fp and predicted fingerprint
             # Convert logits to binary predictions
-            pred_fp = jnp.where(nn.sigmoid(fp_logits) < 0.5, 0.0, 1.0)
+            pred_fp = jnp.where(nn.sigmoid(fp_logits.astype(jnp.float32)) < 0.5, 0.0, 1.0)
             bit_diff = jnp.abs(true_fp - pred_fp)
             avg_bit_diff = jnp.mean(jnp.sum(bit_diff, axis=-1))
 
