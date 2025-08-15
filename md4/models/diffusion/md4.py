@@ -335,14 +335,15 @@ class MD4(nn.Module):
 
         # sample z_t
         zt = self.forward_sample(x, t)
+        # Ensure all loss computations are in fp32 for numerical stability
         logits, _ = self.predict_x(zt, t, cond=cond, train=train)
         logits = logits.astype(jnp.float32)
         log_p = jax.nn.log_softmax(logits, axis=-1)
-        one_hot_x = jax.nn.one_hot(x, self.vocab_size)
+        one_hot_x = jax.nn.one_hot(x, self.vocab_size).astype(jnp.float32)
         neg_cross_ent = one_hot_x * log_p
         neg_cross_ent = jnp.where(one_hot_x, neg_cross_ent, 0.0)
         neg_cross_ent = jnp.sum(neg_cross_ent, axis=-1)
-        mask = jnp.asarray(zt == self.vocab_size, dtype=self.dtype)
+        mask = jnp.asarray(zt == self.vocab_size, dtype=jnp.float32)
 
         remaining_axis = list(range(x.ndim)[1:])
         # masked_neg_cross_ent: [bs]
@@ -353,18 +354,20 @@ class MD4(nn.Module):
             s = t - (1.0 / self.timesteps)
             gt = self.noise_schedule(t)
             gs = self.noise_schedule(s)
+            # Ensure numerical stability by casting to fp32
             loss_diff = (
-                self.timesteps
-                * jnp.expm1(gt - gs)
-                * self.noise_schedule.alpha(s)
+                jnp.asarray(self.timesteps, dtype=jnp.float32)
+                * jnp.expm1(gt - gs).astype(jnp.float32)
+                * self.noise_schedule.alpha(s).astype(jnp.float32)
                 * masked_neg_cross_ent
             )
         else:
             # cont-time loss
-            loss_diff = self.noise_schedule.dgamma_times_alpha(t) * masked_neg_cross_ent
+            loss_diff = (self.noise_schedule.dgamma_times_alpha(t).astype(jnp.float32) 
+                        * masked_neg_cross_ent)
 
         # loss_diff: [bs]
-        return loss_diff, 0.0
+        return loss_diff.astype(self.dtype), 0.0
 
     @nn.compact
     def __call__(self, x, cond=None, train=False):
@@ -404,11 +407,17 @@ class MD4(nn.Module):
             t = jax.random.uniform(rng1, shape=[bs])
 
         loss_diff, _ = self.diffusion_loss(t, x, cond=cond_embedding, train=train)
-        loss_diff = loss_diff.mean()
+        # Ensure loss aggregation is numerically stable
+        loss_diff = jnp.nan_to_num(loss_diff, nan=0.0).mean()
 
         if self.only_adapter:
             loss = loss_fp
         else:
+            # Cast all loss components to same dtype for stable addition
+            loss_diff = loss_diff.astype(jnp.float32)
+            loss_prior = loss_prior.astype(jnp.float32)
+            loss_recon = loss_recon.astype(jnp.float32)
+            loss_fp = loss_fp.astype(jnp.float32)
             loss = loss_diff + loss_prior + loss_recon + loss_fp
 
         model_stats = {

@@ -65,7 +65,7 @@ def get_config() -> config_dict.ConfigDict:
 
     config.num_heads = 8
     config.n_kv_heads = 4
-    config.mlp_type = "swiglu"
+    config.mlp_type = "glu"
     config.depth_scaled_init = True
     config.cond_type = "adaln_zero"
 

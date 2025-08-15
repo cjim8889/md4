@@ -273,8 +273,11 @@ def create_train_state(
 
     optimizer = optax.chain(
         optax.clip(config.clip) if config.clip > 0.0 else optax.identity(),
+        optax.zero_nans(),
         adam,
     )
+
+    optimizer = optax.apply_if_finite(optimizer, max_consecutive_errors=10)
 
     return (
         model,
