@@ -409,7 +409,7 @@ class Transformer(nn.Module):
                             use_bias=True,
                             kernel_init=nn.initializers.zeros,
                             bias_init=nn.initializers.zeros,
-                            dtype=jnp.dtype,
+                            dtype=args.dtype,
                             param_dtype=jnp.float32,
                         ),
                     ]
