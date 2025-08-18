@@ -9,11 +9,11 @@ import numpy as np
 import polars as pl
 import tensorflow as tf
 import tensorflow_datasets as tfds
-import transformers
 from datasets import load_dataset
 from ml_collections import config_dict
 from tqdm import tqdm
 
+from md4.tokenizers import SMILESTokenizer
 from md4.utils import rdkit_utils
 
 FlatFeatures = dict[str, Any]
@@ -23,7 +23,7 @@ _SMILES_TOKENIZER = "data/smiles_tokenizer"
 
 @dataclasses.dataclass
 class Tokenize(grain.MapTransform):
-    tokenizer: transformers.PreTrainedTokenizerFast
+    tokenizer: SMILESTokenizer
     max_length: int = 128
 
     def map(self, features):
@@ -200,7 +200,7 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
     )
     data_source = pubchem_builder.as_data_source()
 
-    tokenizer = transformers.AutoTokenizer.from_pretrained(_SMILES_TOKENIZER)
+    tokenizer = SMILESTokenizer(_SMILES_TOKENIZER)
     train_transformations = [
         Tokenize(tokenizer, max_length=max_length),
         ProcessMolecular(),

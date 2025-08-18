@@ -11,9 +11,9 @@ from pathlib import Path
 
 import tensorflow as tf
 import tensorflow_datasets as tfds
-import transformers
 from ml_collections import config_dict
 
+from md4.tokenizers import SMILESTokenizer
 from md4.utils.pubchem_worker import process_and_write_msg_tfrecord
 
 # Heavy imports are now imported conditionally within functions to reduce memory usage
@@ -22,7 +22,7 @@ _SMILES_TOKENIZER = "data/pubchem_large_tokenizer"
 
 def preprocess_or_load_msg_finetune(
         data_dir, 
-        tokenizer: "transformers.PreTrainedTokenizerFast",
+        tokenizer: SMILESTokenizer,
         version="1.1.0",
         max_length=128,
         fp_bits=4096,
@@ -141,7 +141,7 @@ def create_msg_finetune_datasets(config: config_dict.ConfigDict, seed: int):
     batch_size = config.get("batch_size", 512)  
     fp_bits = config.get("fp_bits", 4096)  # Default to 4096 bits for MSG dataset
 
-    tokenizer = transformers.PreTrainedTokenizerFast.from_pretrained(tokenizer_path)
+    tokenizer = SMILESTokenizer(tokenizer_path)
 
     # Use preprocess_pubchem to get the dataset builder
     pubchem_builder = preprocess_or_load_msg_finetune(

@@ -2,89 +2,19 @@ import glob
 import multiprocessing as mp
 import os
 from pathlib import Path
-from typing import List, Sequence
 
 import numpy as np
 import polars as pl
 import tensorflow as tf
 import tensorflow_datasets as tfds
-import tensorflow_text as tftxt
 from ml_collections import config_dict
 
-import jax.numpy as jnp
-
+from md4.tokenizers import SentencePieceTokenizer
 from md4.utils.pubchem_worker import process_and_write_shard_tfrecord
 
 # Heavy imports are now imported conditionally within functions to reduce memory usage
 
 _SENTENCEPIECE_TOKENIZER = "data/sentencepiece_tokenizer.model"
-
-
-class SentencePieceTokenizer:
-    """
-    Tokenizing and encoding/decoding text using the Sentencepiece tokenizer loaded with tensorflow_text
-    """
-
-    def __init__(self, model_path: str, add_bos: bool = True, add_eos: bool = True):
-        print(f"Tokenizer path: {model_path}")
-        with tf.io.gfile.GFile(model_path, "rb") as model_fp:
-            sp_model = model_fp.read()
-        self.sp_tokenizer = tftxt.SentencepieceTokenizer(
-            model=sp_model, add_bos=add_bos, add_eos=add_eos, reverse=False
-        )
-        self.vocab_size = self.sp_tokenizer.vocab_size()
-        self.pad_id = self.sp_tokenizer.string_to_id("[PAD]")
-        self.unk_id = self.sp_tokenizer.string_to_id("[UNK]")
-        self.sep_id = self.sp_tokenizer.string_to_id("[SEP]")
-
-    def encode(self, s: str) -> List[int]:
-        return self.sp_tokenizer.tokenize(s)
-
-    def decode(self, t: Sequence[int]) -> str:
-        return self.sp_tokenizer.detokenize(t)
-
-    def batch_decode(self, t: Sequence[Sequence[int]], **kwargs) -> List[str]:
-        return [b.decode() for b in self.decode_with_padding_removal(t)]
-
-    def decode_with_padding_removal(self, t):
-        """Decode tokens after removing padding tokens."""
-        # Handle multi-dimensional numpy arrays
-        if isinstance(t, np.ndarray) or isinstance(t, jnp.ndarray):
-            if t.ndim > 1:
-                # For multi-dimensional arrays, process each sequence separately
-                results = []
-                for seq in t:
-                    # Remove padding tokens from each sequence
-                    seq_no_padding = seq[seq != self.pad_id]
-                    # Convert to int32 for SentencePiece tokenizer
-                    seq_no_padding = seq_no_padding.astype(np.int32)
-                    decoded = self.sp_tokenizer.detokenize(seq_no_padding).numpy()
-                    results.append(decoded)
-                return results
-            else:
-                # For 1D numpy arrays
-                t_no_padding = t[t != self.pad_id]
-                # Convert to int32 for SentencePiece tokenizer
-                t_no_padding = t_no_padding.astype(np.int32)
-                return self.sp_tokenizer.detokenize(t_no_padding).numpy()
-        else:
-            # For lists or other sequences
-            if hasattr(t, "__len__") and len(t) > 0 and hasattr(t[0], "__len__"):
-                # Handle nested sequences (batch of sequences)
-                results = []
-                for seq in t:
-                    seq_no_padding = [token for token in seq if token != self.pad_id]
-                    # Convert to numpy array with int32 dtype
-                    seq_no_padding = np.array(seq_no_padding, dtype=np.int32)
-                    decoded = self.sp_tokenizer.detokenize(seq_no_padding).numpy()
-                    results.append(decoded)
-                return results
-            else:
-                # Handle single sequence
-                t_no_padding = [token for token in t if token != self.pad_id]
-                # Convert to numpy array with int32 dtype
-                t_no_padding = np.array(t_no_padding, dtype=np.int32)
-                return self.sp_tokenizer.detokenize(t_no_padding).numpy()
 
 
 def find_data_files(data_file_pattern):
@@ -380,7 +310,7 @@ if __name__ == "__main__":
     )  # Decode smiles of the first sample
     print("Decoded SMILES:", decoded)
 
-    decoded_2 = tokenizer.decode_with_padding_removal(
+    decoded_2 = tokenizer._decode_with_padding_removal(
         features["smiles"][1]
     )  # Decode smiles of the second sample
     print("Decoded SMILES 2:", decoded_2)
