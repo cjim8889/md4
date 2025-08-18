@@ -72,9 +72,13 @@ class SentencePieceTokenizer(BaseTokenizer):
             text: Input SMILES string
             
         Returns:
-            Token IDs as numpy array
+            Token IDs as numpy array or TensorFlow tensor
         """
-        return self.sp_tokenizer.tokenize(text).numpy()
+        tokens = self.sp_tokenizer.tokenize(text)
+        # If in eager mode, convert to numpy, otherwise return tensor
+        if tf.executing_eagerly():
+            return tokens.numpy()
+        return tokens
     
     def decode(self, token_ids: Sequence[int], **kwargs) -> str:
         """Decode token IDs to text.
@@ -87,7 +91,10 @@ class SentencePieceTokenizer(BaseTokenizer):
         """
         # Convert to int32 for SentencePiece
         token_ids = np.array(token_ids, dtype=np.int32)
-        return self.sp_tokenizer.detokenize(token_ids).numpy().decode('utf-8')
+        decoded = self.sp_tokenizer.detokenize(token_ids)
+        if tf.executing_eagerly():
+            return decoded.numpy().decode('utf-8')
+        return decoded
     
     def batch_decode(self, token_ids: Sequence[Sequence[int]], **kwargs) -> List[str]:
         """Decode multiple sequences with padding removal.
@@ -121,14 +128,19 @@ class SentencePieceTokenizer(BaseTokenizer):
                     seq_no_padding = seq[seq != self.pad_id]
                     # Convert to int32 for SentencePiece
                     seq_no_padding = seq_no_padding.astype(np.int32)
-                    decoded = self.sp_tokenizer.detokenize(seq_no_padding).numpy()
+                    decoded = self.sp_tokenizer.detokenize(seq_no_padding)
+                    if tf.executing_eagerly():
+                        decoded = decoded.numpy()
                     results.append(decoded)
                 return results
             else:
                 # 1D array
                 t_no_padding = token_ids[token_ids != self.pad_id]
                 t_no_padding = t_no_padding.astype(np.int32)
-                return self.sp_tokenizer.detokenize(t_no_padding).numpy()
+                decoded = self.sp_tokenizer.detokenize(t_no_padding)
+                if tf.executing_eagerly():
+                    return decoded.numpy()
+                return decoded
         else:
             # Handle lists or other sequences
             if hasattr(token_ids, "__len__") and len(token_ids) > 0 and hasattr(token_ids[0], "__len__"):
@@ -137,11 +149,16 @@ class SentencePieceTokenizer(BaseTokenizer):
                 for seq in token_ids:
                     seq_no_padding = [token for token in seq if token != self.pad_id]
                     seq_no_padding = np.array(seq_no_padding, dtype=np.int32)
-                    decoded = self.sp_tokenizer.detokenize(seq_no_padding).numpy()
+                    decoded = self.sp_tokenizer.detokenize(seq_no_padding)
+                    if tf.executing_eagerly():
+                        decoded = decoded.numpy()
                     results.append(decoded)
                 return results
             else:
                 # Single sequence
                 t_no_padding = [token for token in token_ids if token != self.pad_id]
                 t_no_padding = np.array(t_no_padding, dtype=np.int32)
-                return self.sp_tokenizer.detokenize(t_no_padding).numpy()
+                decoded = self.sp_tokenizer.detokenize(t_no_padding)
+                if tf.executing_eagerly():
+                    return decoded.numpy()
+                return decoded
