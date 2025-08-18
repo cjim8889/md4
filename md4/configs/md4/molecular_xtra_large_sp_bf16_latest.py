@@ -17,6 +17,9 @@ def get_config() -> config_dict.ConfigDict:
     config.dtype = jnp.bfloat16
     config.param_dtype = jnp.float32
 
+    # profiler
+    config.start_profiler = False
+
     # dataset configs
     config.vocab_size = 4096
     config.dataset = "pubchem_large_text"
@@ -69,21 +72,21 @@ def get_config() -> config_dict.ConfigDict:
     config.depth_scaled_init = True
     config.cond_type = "adaln_zero"
 
-    config.learning_rate = 3e-4
+    config.learning_rate = 1e-4
     config.learning_rate_schedule = "cosine"
     config.warmup_steps = 2000
-    config.weight_decay = 1e-4
+    config.weight_decay = 1e-6
     config.clip = 1.0
     config.b2 = 0.999
     config.num_epochs = -1
     config.ema_rate = 0.9999
     # If num_train_steps==-1 then the number of training steps is calculated from
     # num_epochs.
-    config.num_train_steps = 1_000_000
+    config.num_train_steps = 2_000_000
     # Evaluates for a full epoch if num_eval_steps==-1.
     config.num_eval_steps = 1000
-    config.batch_size = 512
-    config.num_microbatches = 2
+    config.batch_size = 2048
+    config.num_microbatches = 4
     config.per_device_batch_size = -1
     # If batches should be added to evaluate the entire dataset.
     config.eval_pad_last_batch = False

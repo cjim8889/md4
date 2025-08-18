@@ -30,6 +30,7 @@ dependencies = [
     "tf-keras>=2.19.0",
     "xprof>=2.20.5",
     "wandb>=0.21.0",
+    "flax>=0.10.7",
 ]
 
 

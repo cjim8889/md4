@@ -11,6 +11,8 @@ import tensorflow_datasets as tfds
 import tensorflow_text as tftxt
 from ml_collections import config_dict
 
+import jax.numpy as jnp
+
 from md4.utils.pubchem_worker import process_and_write_shard_tfrecord
 
 # Heavy imports are now imported conditionally within functions to reduce memory usage
@@ -47,7 +49,7 @@ class SentencePieceTokenizer:
     def decode_with_padding_removal(self, t):
         """Decode tokens after removing padding tokens."""
         # Handle multi-dimensional numpy arrays
-        if isinstance(t, np.ndarray):
+        if isinstance(t, np.ndarray) or isinstance(t, jnp.ndarray):
             if t.ndim > 1:
                 # For multi-dimensional arrays, process each sequence separately
                 results = []

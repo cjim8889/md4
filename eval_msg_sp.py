@@ -29,7 +29,6 @@ import jax.numpy as jnp
 import ml_collections
 import numpy as np
 import polars as pl
-import transformers
 from orbax import checkpoint as orbax_checkpoint
 from tqdm import tqdm
 
@@ -43,6 +42,7 @@ except ImportError:
 # Import MD4 modules
 from md4 import sampling
 from md4.utils import rdkit_utils, utils, state_utils
+from md4.input_pipeline_pubchem_large_text import SentencePieceTokenizer
 
 def load_config_from_path(config_path: str) -> ml_collections.ConfigDict:
     """Load configuration from a given path.
@@ -125,40 +125,64 @@ def smiles_to_molecular_formula(smiles_list: List[str]) -> List[str]:
     return formulas
 
 
-def extract_smiles_between_sep(decoded_text: str) -> str:
-    """Extract SMILES content between [SEP] tokens and remove spaces.
+def safe_decode_tokens(tokenizer, tokens) -> str:
+    """Safely decode tokens using SentencePiece tokenizer.
     
     Args:
-        decoded_text: Decoded text from tokenizer containing [CLS], [SEP], [PAD] tokens
+        tokenizer: SentencePieceTokenizer instance
+        tokens: Token sequence (can be numpy array, list, or tensor)
+        
+    Returns:
+        Decoded string
+    """
+    try:
+        # Convert to list of integers
+        if hasattr(tokens, 'tolist'):
+            tokens_list = tokens.tolist()
+        elif hasattr(tokens, 'numpy'):
+            tokens_list = tokens.numpy().tolist()
+        else:
+            tokens_list = list(tokens)
+        
+        # Use batch_decode method like in train.py for consistency
+        texts = tokenizer.batch_decode(
+            [tokens_list],  # Convert single sequence to batch format
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=True,
+        )
+        
+        return texts[0]  # Return the first (and only) decoded text
+            
+    except Exception as e:
+        print(f"Warning: Failed to decode tokens {tokens[:10] if len(tokens) > 10 else tokens}: {e}")
+        return ""
+
+
+def extract_smiles_between_sep(decoded_text: str) -> str:
+    """Extract SMILES content after [SEP] token and remove spaces.
+    
+    Args:
+        decoded_text: Decoded text from tokenizer. SentencePiece automatically removes 
+                     [BEGIN], [END], and [PAD] tokens, so the format is: "formula [SEP] smiles"
         
     Returns:
         Clean SMILES string with spaces removed, or empty string if parsing fails
         
     Example:
-        Input: "[CLS] C21H19 N3O2S2 [SEP] CS 1 (=O) (C 2)C1 c1ccc(N n2 nc( cc3 cs c(- c4ccccc4) c23)cc1 [SEP] [PAD] ..."
+        Input: "C21H19N3O2S2 [SEP] CS 1 (=O) (C 2)C1 c1ccc(N n2 nc( cc3 cs c(- c4ccccc4) c23)cc1"
         Output: "CS1(=O)(C2)C1c1ccc(Nn2nc(cc3csc(-c4ccccc4)c23)cc1"
     """
     try:
-        # Find all [SEP] tokens
-        sep_positions = []
-        sep_token = "[SEP]"
-        start = 0
-        while True:
-            pos = decoded_text.find(sep_token, start)
-            if pos == -1:
-                break
-            sep_positions.append(pos)
-            start = pos + len(sep_token)
+        # Find [SEP] token
+        sep_pos = decoded_text.find("[SEP]")
         
-        # We need at least 2 [SEP] tokens to extract content between them
-        if len(sep_positions) < 2:
+        # We need the [SEP] token to separate formula from SMILES
+        if sep_pos == -1:
             return ""
         
-        # Extract content between first and second [SEP] tokens
-        start_pos = sep_positions[0] + len(sep_token)
-        end_pos = sep_positions[1]
-        
-        smiles_content = decoded_text[start_pos:end_pos].strip()
+        # Extract content after [SEP] token
+        start_pos = sep_pos + len("[SEP]")
+        smiles_content = decoded_text[start_pos:].strip()
         
         # Remove all spaces
         smiles_content = smiles_content.replace(" ", "")
@@ -171,10 +195,10 @@ def extract_smiles_between_sep(decoded_text: str) -> str:
 
 
 def tokenize_smiles_with_formulas(tokenizer, smiles_list: List[str], max_length: int) -> dict:
-    """Tokenize SMILES with corresponding molecular formulas.
+    """Tokenize SMILES with corresponding molecular formulas using SentencePiece tokenizer.
     
     Args:
-        tokenizer: The tokenizer instance
+        tokenizer: The SentencePieceTokenizer instance
         smiles_list: List of SMILES strings  
         max_length: Maximum sequence length
         
@@ -184,15 +208,31 @@ def tokenize_smiles_with_formulas(tokenizer, smiles_list: List[str], max_length:
     # Generate molecular formulas from SMILES
     formulas = smiles_to_molecular_formula(smiles_list)
     
-    # Tokenize with formulas as text and SMILES as text_pair
-    return tokenizer(
-        text=formulas,
-        text_pair=smiles_list,
-        padding="max_length",
-        truncation=True,
-        max_length=max_length,
-        return_tensors="np",
-    )
+    # Create combined text with formula and SMILES separated by [SEP]
+    # Format: "formula [SEP] smiles" (SentencePiece will automatically add [BEGIN] and [END])
+    combined_texts = []
+    for formula, smiles in zip(formulas, smiles_list):
+        combined_text = f"{formula}[SEP]{smiles}"
+        combined_texts.append(combined_text)
+    
+    # Tokenize all texts
+    input_ids = []
+    for text in combined_texts:
+        tokens_tensor = tokenizer.encode(text)
+        # Convert tensor to list
+        tokens = tokens_tensor.numpy().tolist() if hasattr(tokens_tensor, 'numpy') else list(tokens_tensor)
+        
+        # Truncate if too long
+        if len(tokens) > max_length:
+            tokens = tokens[:max_length]
+        
+        # Pad to max_length
+        while len(tokens) < max_length:
+            tokens.append(int(tokenizer.pad_id))
+        
+        input_ids.append(tokens)
+    
+    return {"input_ids": np.array(input_ids, dtype=np.int32)}
 
 
 class MolecularEvaluator:
@@ -290,19 +330,36 @@ class MolecularEvaluator:
         return config
 
     def _load_tokenizer(self):
-        """Load SMILES tokenizer."""
+        """Load SentencePiece SMILES tokenizer."""
         try:
-            tokenizer_cls = getattr(transformers, "AutoTokenizer")
-            tokenizer = tokenizer_cls.from_pretrained(
-                self.config.tokenizer or self.args.tokenizer_path
+            tokenizer_path = str(self.config.tokenizer or self.args.tokenizer_path)
+            # Handle .model file extension for SentencePiece
+            if not tokenizer_path.endswith('.model'):
+                tokenizer_path = os.path.join(tokenizer_path, 'sentencepiece_tokenizer.model')
+                if not os.path.exists(tokenizer_path):
+                    # Try with different common paths
+                    possible_paths = [
+                        str(self.config.tokenizer or self.args.tokenizer_path) + '.model',
+                        'data/sentencepiece_tokenizer.model',
+                        'data/sentencepiece_tokenizer_4096_bpe_latest.model'
+                    ]
+                    for path in possible_paths:
+                        if os.path.exists(path):
+                            tokenizer_path = path
+                            break
+            
+            tokenizer = SentencePieceTokenizer(
+                model_path=tokenizer_path,
+                add_bos=True,
+                add_eos=True
             )
             print(
-                f"Loaded tokenizer with vocab size: {tokenizer.vocab_size} from {self.config.tokenizer or self.args.tokenizer_path}"
+                f"Loaded SentencePiece tokenizer with vocab size: {tokenizer.vocab_size} from {tokenizer_path}"
             )
             return tokenizer
         except Exception as e:
             raise ValueError(
-                f"Failed to load tokenizer from {self.config.tokenizer or self.args.tokenizer_path}: {e}"
+                f"Failed to load SentencePiece tokenizer from {self.config.tokenizer or self.args.tokenizer_path}: {e}"
             )
 
     def _load_checkpoint_manager(self) -> orbax_checkpoint.CheckpointManager:
@@ -703,17 +760,19 @@ class MolecularEvaluator:
                 for i in range(actual_samples_per_input):
                     tokens = samples[b, i]
                     print(f"Generated tokens: {tokens}")
-                    decoded_text = self.tokenizer.decode(tokens, skip_special_tokens=False, clean_up_tokenization_spaces=True)
+                    decoded_text = safe_decode_tokens(self.tokenizer, tokens)
                     print(f"Raw decoded: {decoded_text}")
                     clean_smiles = extract_smiles_between_sep(decoded_text)
                     print(f"Clean SMILES: {clean_smiles}")
                     sample_list.append(clean_smiles)
             else:
-                decoded_list = self.tokenizer.batch_decode(
-                    samples[b], skip_special_tokens=False, clean_up_tokenization_spaces=True
-                )
-                # Process each decoded string to extract SMILES between [SEP] tokens
-                sample_list = [extract_smiles_between_sep(decoded_text) for decoded_text in decoded_list]
+                # Use safe decoding for SentencePiece tokenizer
+                sample_list = []
+                for i in range(actual_samples_per_input):
+                    tokens = samples[b, i]
+                    decoded_text = safe_decode_tokens(self.tokenizer, tokens)
+                    clean_smiles = extract_smiles_between_sep(decoded_text)
+                    sample_list.append(clean_smiles)
             batch_results.append(sample_list)
 
         return batch_results
@@ -1053,8 +1112,8 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--tokenizer_path",
-        default="data/smiles_tokenizer",
-        help="Path to SMILES tokenizer",
+        default="data/sentencepiece_tokenizer.model",
+        help="Path to SentencePiece SMILES tokenizer model file",
     )
     parser.add_argument(
         "--config_path",

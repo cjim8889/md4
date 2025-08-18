@@ -389,6 +389,11 @@ def train_and_evaluate(
     writer = metric_writers.create_default_writer(
         workdir, just_logging=jax.process_index() > 0
     )
+
+    # Start the profiler if requested
+    if config.get('start_profiler', False) and jax.process_index() == 0:
+        logging.info("Starting profiler.")
+        jax.profiler.start_server(9999)
     
     # Add wandb writer to the multi-writer if we're on the main process
     if jax.process_index() == 0 and hasattr(writer, '_writers') and config.get('enable_wandb', False):
