@@ -173,16 +173,15 @@ def extract_smiles_between_sep(decoded_text: str) -> str:
         Output: "CS1(=O)(C2)C1c1ccc(Nn2nc(cc3csc(-c4ccccc4)c23)cc1"
     """
     try:
-        # Find [SEP] token
-        sep_pos = decoded_text.find("[SEP]")
+        # Split by [SEP] and take the last part (more robust approach)
+        parts = decoded_text.split("[SEP]")
         
-        # We need the [SEP] token to separate formula from SMILES
-        if sep_pos == -1:
+        # We need at least 2 parts (formula and SMILES)
+        if len(parts) < 2:
             return ""
         
-        # Extract content after [SEP] token
-        start_pos = sep_pos + len("[SEP]")
-        smiles_content = decoded_text[start_pos:].strip()
+        # Take the last part as SMILES (handles cases with multiple [SEP] tokens)
+        smiles_content = parts[-1].strip()
         
         # Remove all spaces
         smiles_content = smiles_content.replace(" ", "")
@@ -197,6 +196,8 @@ def extract_smiles_between_sep(decoded_text: str) -> str:
 def tokenize_smiles_with_formulas(tokenizer, smiles_list: List[str], max_length: int) -> dict:
     """Tokenize SMILES with corresponding molecular formulas using SentencePiece tokenizer.
     
+    This function aligns with the training pipeline's tokenization approach.
+    
     Args:
         tokenizer: The SentencePieceTokenizer instance
         smiles_list: List of SMILES strings  
@@ -208,27 +209,33 @@ def tokenize_smiles_with_formulas(tokenizer, smiles_list: List[str], max_length:
     # Generate molecular formulas from SMILES
     formulas = smiles_to_molecular_formula(smiles_list)
     
-    # Create combined text with formula and SMILES separated by [SEP]
-    # Format: "formula [SEP] smiles" (SentencePiece will automatically add [BEGIN] and [END])
+    # Create combined text exactly as in training pipeline
+    # Format: "formula[SEP]smiles" (SentencePiece will automatically add [BEGIN] and [END])
     combined_texts = []
     for formula, smiles in zip(formulas, smiles_list):
         combined_text = f"{formula}[SEP]{smiles}"
         combined_texts.append(combined_text)
     
-    # Tokenize all texts
+    # Tokenize using the same approach as training pipeline's _tokenize_and_truncate
     input_ids = []
     for text in combined_texts:
-        tokens_tensor = tokenizer.encode(text)
-        # Convert tensor to list
-        tokens = tokens_tensor.numpy().tolist() if hasattr(tokens_tensor, 'numpy') else list(tokens_tensor)
+        # Use tokenizer.encode directly (it handles BOS/EOS automatically)
+        tokens = tokenizer.encode(text)
         
-        # Truncate if too long
-        if len(tokens) > max_length:
-            tokens = tokens[:max_length]
+        # Convert to numpy array if it's a tensor
+        if hasattr(tokens, 'numpy'):
+            tokens = tokens.numpy()
         
-        # Pad to max_length
-        while len(tokens) < max_length:
-            tokens.append(int(tokenizer.pad_id))
+        # Ensure it's a list for manipulation
+        tokens = list(tokens)
+        
+        # Truncate to max_length (same as training)
+        tokens = tokens[:max_length]
+        
+        # Pad to max_length with pad_id (same as training)
+        current_length = len(tokens)
+        padding_length = max_length - current_length
+        tokens.extend([int(tokenizer.pad_id)] * padding_length)
         
         input_ids.append(tokens)
     
