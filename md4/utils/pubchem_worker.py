@@ -79,76 +79,82 @@ def process_and_write_shard_tfrecord(args):
     import os
 
     shard_filename = os.path.join(output_dir, f"pubchem_large-{split}.tfrecord-{shard_index:05d}-of-{total_shards:05d}") # args[4] = num_total_chunks
+    shard_txt_filename = os.path.join(output_dir, f"pubchem_large-{split}-{shard_index:05d}-of-{total_shards:05d}.txt")
     
-    with tf.io.TFRecordWriter(shard_filename) as writer:
-        written_count = 0
-        for i, smi in enumerate(shard):
-            result = process_smiles(smi, fp_radius=2, fp_bits=fp_bits)
-            if result is not None:
-                # Prepare input for tokenizer - either just SMILES or [formula, SMILES]
-                text = None
-                text_pair = None
-                if include_formula and formula_shard is not None:
-                    # Use formula and SMILES as text pair for tokenizer
-                    formula = formula_shard[i]
-                    
-                    # Handle missing or invalid formulas
-                    if formula is None:
-                        # Skip this entry if formula is missing
-                        continue
-                    
-                    # Convert to string and validate
-                    try:
-                        formula_str = str(formula).strip()
-                        smi_str = str(smi).strip()
-                        
-                        # Skip if either is empty after conversion
-                        if not formula_str or not smi_str or formula_str.lower() in ['nan', 'none', 'null']:
-                            continue
-                            
-                        text = formula_str
-                        text_pair = smi_str
-                    except (ValueError, TypeError):
-                        # Skip entries with conversion errors
-                        continue
-                else:
-                    # Backward compatibility: just use SMILES
-                    try:
-                        text = str(smi).strip()
-                        text_pair = None
-                        # Validate that text is a non-empty string
-                        if not text or text.lower() in ['nan', 'none', 'null']:
-                            continue
-                    except (ValueError, TypeError):
-                        # Skip entries with conversion errors
-                        continue
-                    
-                if tokenizer is not None:
-                    try:
-                        smiles = tokenizer.encode(
-                            text=text,
-                            text_pair=text_pair,
-                            add_special_tokens=True,
-                            padding="max_length",
-                            truncation=True,
-                            max_length=max_length,
-                            return_tensors="np",
-                        ).reshape(-1).astype(np.int32)
-                    except Exception as e:
-                        # Skip entries that cause tokenization errors
-                        print(f"Tokenization error for shard {shard_index}, entry {i}: {e}")
-                        print(f"  Text: {repr(text)}")
-                        print(f"  Text_pair: {repr(text_pair)}")
-                        continue
-                else:
-                    smiles = f"{text}[SEP]{text_pair}"
+    with open(shard_txt_filename, 'w') as txt_file:
+        with tf.io.TFRecordWriter(shard_filename) as writer:
+            written_count = 0
+            for i, smi in enumerate(shard):
+                result = process_smiles(smi, fp_radius=2, fp_bits=fp_bits)
+                if result is not None:
+                    _fp, _smiles = result
 
-                serialised = features.serialize_example({
-                    "smiles": smiles,
-                    "fingerprint": result,
-                })
-                writer.write(serialised)
-                written_count += 1
+                    # Prepare input for tokenizer - either just SMILES or [formula, SMILES]
+                    text = None
+                    text_pair = None
+                    if include_formula and formula_shard is not None:
+                        # Use formula and SMILES as text pair for tokenizer
+                        formula = formula_shard[i]
+                        
+                        # Handle missing or invalid formulas
+                        if formula is None:
+                            # Skip this entry if formula is missing
+                            continue
+                        
+                        # Convert to string and validate
+                        try:
+                            formula_str = str(formula).strip()
+                            smi_str = str(_smiles).strip()
+                            
+                            # Skip if either is empty after conversion
+                            if not formula_str or not smi_str or formula_str.lower() in ['nan', 'none', 'null']:
+                                continue
+                                
+                            text = formula_str
+                            text_pair = smi_str
+                        except (ValueError, TypeError):
+                            # Skip entries with conversion errors
+                            continue
+                    else:
+                        # Backward compatibility: just use SMILES
+                        try:
+                            text = str(_smiles).strip()
+                            text_pair = None
+                            # Validate that text is a non-empty string
+                            if not text or text.lower() in ['nan', 'none', 'null']:
+                                continue
+                        except (ValueError, TypeError):
+                            # Skip entries with conversion errors
+                            continue
+                        
+                    if tokenizer is not None:
+                        try:
+                            smiles = tokenizer.encode(
+                                text=text,
+                                text_pair=text_pair,
+                                add_special_tokens=True,
+                                padding="max_length",
+                                truncation=True,
+                                max_length=max_length,
+                                return_tensors="np",
+                            ).reshape(-1).astype(np.int32)
+                        except Exception as e:
+                            # Skip entries that cause tokenization errors
+                            print(f"Tokenization error for shard {shard_index}, entry {i}: {e}")
+                            print(f"  Text: {repr(text)}")
+                            print(f"  Text_pair: {repr(text_pair)}")
+                            continue
+                    else:
+                        smiles = f"{text}[SEP]{text_pair}"
+
+                    serialised = features.serialize_example({
+                        "smiles": smiles,
+                        "fingerprint": _fp,
+                    })
+                    writer.write(serialised)
+                    txt_file.write(f"{smiles}\n")
+                    
+                    written_count += 1
 
     print(f"Shard {shard_index} processed: {written_count} entries written to {shard_filename}")
     return written_count

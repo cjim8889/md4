@@ -289,10 +289,10 @@ if __name__ == "__main__":
                 "max_length": 128,
                 "tokenizer": "data/sentencepiece_tokenizer_4096_bpe_latest.model",
                 "batch_size": 512,
-                "version": "1.0.0",
+                "version": "1.1.0",
                 "training_shards": 128,
                 "validation_shards": 4,
-                "num_processes": 160,
+                "num_processes": 128,
                 "include_formula": True,  # Set to True to include molecular formulas
             }
         ),

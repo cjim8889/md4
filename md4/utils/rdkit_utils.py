@@ -111,12 +111,12 @@ def format_atom_types_summary(atom_types):
 
 def filter_molecule(mol):
     """Basic molecule filtering without atom type restrictions."""
-    if Descriptors.MolWt(mol) >= 3000:  # Molecular weight filter
+    if Descriptors.MolWt(mol) >= 1500:  # Molecular weight filter
         return False
 
-    for atom in mol.GetAtoms():
-        if atom.GetFormalCharge() != 0:  # No charged atoms
-            return False
+    # for atom in mol.GetAtoms():
+        # if atom.GetFormalCharge() != 0:  # No charged atoms
+            # return False
         # if atom.GetSymbol() not in FILTER_ATOMS:  # Only allowed atom types
         #     return False
 
@@ -154,8 +154,8 @@ def process_smiles(smi, fp_radius=2, fp_bits=2048):
         mol = Chem.MolFromSmiles(smi)
         if filter_molecule(mol):
             fingerprint = get_generator(fp_radius, fp_bits).GetFingerprintAsNumPy(mol)
-
-            return np.asarray(fingerprint, dtype=np.int8)
+            smiles = Chem.MolToSmiles(mol, isomericSmiles=False, doRandom=True)
+            return np.asarray(fingerprint, dtype=np.int8), smiles
     except Exception:
         pass
     return None
