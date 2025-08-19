@@ -22,6 +22,7 @@ from typing import Any, Tuple
 import jax
 from clu import parameter_overview
 from orbax import checkpoint as orbax_checkpoint
+from flax.training import orbax_utils
 
 
 def should_use_partial_loading(config) -> bool:
@@ -42,23 +43,25 @@ def should_use_partial_loading(config) -> bool:
 
 def get_old_config(config):
     """Get the old molecular configuration.
-    
+
     Args:
         config: Current configuration that contains old_config path
-        
+
     Returns:
         Configuration object for the old molecular model
     """
     import importlib.util
     import sys
     from pathlib import Path
-    
+
     if not hasattr(config, "old_config") or config.old_config is None:
-        raise ValueError("Config must have 'old_config' attribute specifying the old config path")
-    
+        raise ValueError(
+            "Config must have 'old_config' attribute specifying the old config path"
+        )
+
     old_config_path = config.old_config
     logging.info(f"Loading old config from: {old_config_path}")
-    
+
     # Handle different path formats
     if old_config_path.startswith("md4/"):
         # Relative path from md4 package - convert to module path
@@ -66,25 +69,27 @@ def get_old_config(config):
         module_path = old_config_path.replace("/", ".")
         if module_path.endswith(".py"):
             module_path = module_path[:-3]  # Remove .py extension
-        
+
         # Import as module
         try:
             module = importlib.import_module(module_path)
             return module.get_config()
         except ImportError as e:
             logging.error(f"Failed to import {module_path}: {e}")
-            raise ImportError(f"Could not import old config module {module_path}") from e
+            raise ImportError(
+                f"Could not import old config module {module_path}"
+            ) from e
     else:
         # Absolute file path
         config_file = Path(old_config_path)
         if not config_file.exists():
             raise FileNotFoundError(f"Old config file not found: {old_config_path}")
-        
+
         # Load module from file path
         spec = importlib.util.spec_from_file_location("old_config", config_file)
         if spec is None or spec.loader is None:
             raise ImportError(f"Could not load config from {old_config_path}")
-        
+
         module = importlib.util.module_from_spec(spec)
         sys.modules["old_config"] = module
         spec.loader.exec_module(module)
@@ -231,8 +236,9 @@ def standard_checkpoint_loading(
     if train_iter is not None:
         checkpointed_state["train_iter"] = train_iter
 
+    restore_args = orbax_utils.restore_args_from_target(checkpointed_state)
     checkpointed_state = checkpoint_manager.restore(
-        checkpoint_manager.latest_step(), items=checkpointed_state
+        checkpoint_manager.latest_step(), items=checkpointed_state, restore_kwargs={'restore_args': restore_args}
     )
 
     loaded_train_state = checkpointed_state["train_state"]

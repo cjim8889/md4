@@ -185,7 +185,7 @@ class Attention(nn.Module):
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             kernel_init=nn.with_logical_partitioning(
-                nn.initializers.xavier_normal, (None, "attn_qkv")
+                nn.initializers.xavier_normal(), (None, "attn_qkv")
             )
         )
         self.wk = nn.Dense(
@@ -194,7 +194,7 @@ class Attention(nn.Module):
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             kernel_init=nn.with_logical_partitioning(
-                nn.initializers.xavier_normal, (None, "attn_qkv")
+                nn.initializers.xavier_normal(), (None, "attn_qkv")
             )
         )
         self.wv = nn.Dense(
@@ -203,13 +203,13 @@ class Attention(nn.Module):
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             kernel_init=nn.with_logical_partitioning(
-                nn.initializers.xavier_normal, (None, "attn_qkv")
+                nn.initializers.xavier_normal(), (None, "attn_qkv")
             )
         )
         self.wo = nn.Dense(
             self.dim, use_bias=False, dtype=self.dtype, param_dtype=self.param_dtype,
             kernel_init=nn.with_logical_partitioning(
-                nn.initializers.xavier_normal, ("attn_o", None)
+                nn.initializers.xavier_normal(), ("attn_o", None)
             )
         )
         if self.dropout_rate > 0.0:
@@ -219,9 +219,9 @@ class Attention(nn.Module):
     def __call__(self, x, freqs_cos, freqs_sin, train=False):
         bsz, seqlen, _ = x.shape
 
-        x = nn.with_logical_constraint(
-            x, ("batch", None, "hidden")
-        )
+        # x = nn.with_logical_constraint(
+        #     x, ("batch", None, "hidden")
+        # )
 
         # QKV
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
