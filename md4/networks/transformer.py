@@ -49,7 +49,6 @@ class ModelArgs:
     multiple_of: int = 32  # MLP hidden layer size will be multiple of
     norm_eps: float = 1e-5
     dropout_rate: float = 0.0
-    weight_tying: bool = False
     w_init_scale: float = 1.0
     depth_scaled_init: bool = False
     # glu, geglu, swiglu
@@ -61,6 +60,8 @@ class ModelArgs:
     causal: bool = False
     dtype: jnp.dtype = jnp.float32
     param_dtype: jnp.dtype = jnp.float32
+    # rope
+    rope_theta: float = 10000.0
 
 
 class RMSNorm(nn.Module):
@@ -71,7 +72,9 @@ class RMSNorm(nn.Module):
 
     def setup(self):
         self.scale = self.param(
-            "scale", lambda key, shape: jnp.ones(shape, dtype=self.param_dtype), (self.dim,)
+            "scale",
+            lambda key, shape: jnp.ones(shape, dtype=self.param_dtype),
+            (self.dim,),
         )
 
     def _norm(self, x):
@@ -84,7 +87,9 @@ class RMSNorm(nn.Module):
 
 def precompute_freqs_cis(dim, end, theta: float = 10000.0, dtype=jnp.float32):
     # Compute everything in fp32 for numerical stability
-    freqs = 1.0 / (theta ** (jnp.arange(0, dim, 2, dtype=jnp.float32)[: (dim // 2)] / dim))
+    freqs = 1.0 / (
+        theta ** (jnp.arange(0, dim, 2, dtype=jnp.float32)[: (dim // 2)] / dim)
+    )
     t = jnp.arange(end, dtype=jnp.float32)
     freqs = jnp.outer(t, freqs)
     freqs_cos = jnp.cos(freqs)
@@ -174,16 +179,49 @@ class Attention(nn.Module):
         assert self.n_heads % self._n_kv_heads == 0
         self.n_rep = self.n_heads // self._n_kv_heads
         self.head_dim = self.dim // self.n_heads
-        self.wq = nn.Dense(self.n_heads * self.head_dim, use_bias=self.qkv_bias, dtype=self.dtype, param_dtype=self.param_dtype)
-        self.wk = nn.Dense(self._n_kv_heads * self.head_dim, use_bias=self.qkv_bias, dtype=self.dtype, param_dtype=self.param_dtype)
-        self.wv = nn.Dense(self._n_kv_heads * self.head_dim, use_bias=self.qkv_bias, dtype=self.dtype, param_dtype=self.param_dtype)
-        self.wo = nn.Dense(self.dim, use_bias=False, dtype=self.dtype, param_dtype=self.param_dtype)
+        self.wq = nn.Dense(
+            self.n_heads * self.head_dim,
+            use_bias=self.qkv_bias,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.initializers.xavier_normal, (None, "attn_qkv")
+            )
+        )
+        self.wk = nn.Dense(
+            self._n_kv_heads * self.head_dim,
+            use_bias=self.qkv_bias,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.initializers.xavier_normal, (None, "attn_qkv")
+            )
+        )
+        self.wv = nn.Dense(
+            self._n_kv_heads * self.head_dim,
+            use_bias=self.qkv_bias,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.initializers.xavier_normal, (None, "attn_qkv")
+            )
+        )
+        self.wo = nn.Dense(
+            self.dim, use_bias=False, dtype=self.dtype, param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.initializers.xavier_normal, ("attn_o", None)
+            )
+        )
         if self.dropout_rate > 0.0:
             self.attn_dropout = nn.Dropout(self.dropout_rate)
             self.resid_dropout = Dropout1d(self.dropout_rate)
 
     def __call__(self, x, freqs_cos, freqs_sin, train=False):
         bsz, seqlen, _ = x.shape
+
+        x = nn.with_logical_constraint(
+            x, ("batch", None, "hidden")
+        )
 
         # QKV
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
@@ -204,16 +242,16 @@ class Attention(nn.Module):
         xv = xv.swapaxes(1, 2)
 
         xk_transposed = xk.swapaxes(2, 3)
-        scores = jnp.matmul(xq, xk_transposed) / math.sqrt(self.head_dim)
+        scores = jnp.matmul(
+            xq.astype(jnp.float32), xk_transposed.astype(jnp.float32)
+        ) / math.sqrt(self.head_dim)
         if self.causal:
             mask = jnp.full((1, 1, seqlen, seqlen), -jnp.inf, dtype=jnp.float32)
             mask = jnp.triu(mask, k=1)
             scores = (
                 scores + mask[:, :, :seqlen, :seqlen]
             )  # (bs, n_heads, seqlen, seqlen)
-        # Force softmax computation in fp32 for numerical stability
-        scores_fp32 = scores.astype(jnp.float32)
-        scores = nn.softmax(scores_fp32, axis=-1).astype(self.dtype)
+        scores = nn.softmax(scores, axis=-1).astype(self.dtype)
         if self.dropout_rate > 0.0:
             scores = self.attn_dropout(scores, deterministic=not train)
         output = jnp.matmul(scores, xv)  # (bs, n_heads, seqlen, head_dim)
@@ -254,21 +292,38 @@ class FeedForward(nn.Module):
         w_init = nn.initializers.variance_scaling(
             self.w_init_scale, "fan_in", "truncated_normal"
         )
-        self.w1 = nn.Dense(hidden_dim, use_bias=False, kernel_init=w_init, dtype=self.dtype, param_dtype=self.param_dtype)
-        self.w2 = nn.Dense(self.dim, use_bias=False, kernel_init=w_init, dtype=self.dtype, param_dtype=self.param_dtype)
-        self.w3 = nn.Dense(hidden_dim, use_bias=False, kernel_init=w_init, dtype=self.dtype, param_dtype=self.param_dtype)
+        self.w1 = nn.Dense(
+            hidden_dim,
+            use_bias=False,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(w_init, ('hidden', 'ff_mlp')),
+        )
+        self.w2 = nn.Dense(
+            self.dim,
+            use_bias=False,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(w_init, ('ff_mlp', 'hidden')),
+        )
+        self.w3 = nn.Dense(
+            hidden_dim,
+            use_bias=False,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(w_init, ('hidden', 'ff_mlp'))
+        )
         # self.dropout = nn.Dropout(self.dropout_rate)
         if self.dropout_rate > 0.0:
             self.dropout = Dropout1d(self.dropout_rate)
 
     def __call__(self, x, train=False):
         act = activation_map[self.mlp_type]
-        u = dense_2d(self.w1, x)
-        v = dense_2d(self.w3, x)        # used for *any* gated MLP; ignore if plain GELU MLP
-        y = dense_2d(self.w2, act(u.astype(jnp.float32)).astype(self.dtype) * v)
+        y = self.w2(act(self.w1(x)) * self.w3(x))
         if self.dropout_rate > 0.0:
-            y = self.dropout(y, deterministic=not train)
-        return y
+            return self.dropout(y, deterministic=not train)
+        else:
+            return y
 
 
 class TransformerBlock(nn.Module):
@@ -312,7 +367,12 @@ class TransformerBlock(nn.Module):
                     [
                         # nn.swish,
                         activation,
-                        nn.Dense(6 * self.args.dim, use_bias=True, dtype=self.args.dtype, param_dtype=self.args.param_dtype),
+                        nn.Dense(
+                            6 * self.args.dim,
+                            use_bias=True,
+                            dtype=self.args.dtype,
+                            param_dtype=self.args.param_dtype,
+                        ),
                     ]
                 )
             elif self.args.cond_type == "adaln_zero":
@@ -336,10 +396,18 @@ class TransformerBlock(nn.Module):
                 jnp.split(ln(cond)[:, None, :], 6, axis=-1)
             )
             attention_norm = nn.LayerNorm(
-                epsilon=self.args.norm_eps, use_bias=False, use_scale=False, dtype=self.args.dtype, param_dtype=self.args.param_dtype
+                epsilon=self.args.norm_eps,
+                use_bias=False,
+                use_scale=False,
+                dtype=self.args.dtype,
+                param_dtype=self.args.param_dtype,
             )
             ffn_norm = nn.LayerNorm(
-                epsilon=self.args.norm_eps, use_bias=False, use_scale=False, dtype=self.args.dtype, param_dtype=self.args.param_dtype
+                epsilon=self.args.norm_eps,
+                use_bias=False,
+                use_scale=False,
+                dtype=self.args.dtype,
+                param_dtype=self.args.param_dtype,
             )
             h = x + gate_att * self.attention(
                 attention_norm(x) * (scale_att + 1.0) + shift_att,
@@ -351,8 +419,18 @@ class TransformerBlock(nn.Module):
                 ffn_norm(h) * (scale_mlp + 1.0) + shift_mlp, train=train
             )
         else:
-            attention_norm = RMSNorm(self.args.dim, eps=self.args.norm_eps, dtype=self.args.dtype, param_dtype=self.args.param_dtype)
-            ffn_norm = RMSNorm(self.args.dim, eps=self.args.norm_eps, dtype=self.args.dtype, param_dtype=self.args.param_dtype)
+            attention_norm = RMSNorm(
+                self.args.dim,
+                eps=self.args.norm_eps,
+                dtype=self.args.dtype,
+                param_dtype=self.args.param_dtype,
+            )
+            ffn_norm = RMSNorm(
+                self.args.dim,
+                eps=self.args.norm_eps,
+                dtype=self.args.dtype,
+                param_dtype=self.args.param_dtype,
+            )
             h = x + self.attention(attention_norm(x), freqs_cos, freqs_sin, train=train)
             out = h + self.feed_forward(ffn_norm(h), train=train)
 
@@ -369,14 +447,31 @@ class Transformer(nn.Module):
             output_channels = args.output_channels
 
         if args.embed_input:
-            h = nn.Embed(args.n_embed_classes, args.dim, dtype=args.dtype, param_dtype=args.param_dtype)(x)
+            h = nn.Embed(
+                num_embeddings=args.n_embed_classes,
+                features=args.dim,
+                dtype=args.dtype,
+                param_dtype=args.param_dtype,
+                embedding_init=nn.with_logical_partitioning(
+                    nn.linear.default_embed_init, ("embed_vocab", "embed")
+                ),
+            )(x)
             if args.dropout_rate > 0.0:
                 h = nn.Dropout(args.dropout_rate, deterministic=not train)(h)
         else:
-            h = nn.Dense(args.dim, dtype=args.dtype, param_dtype=args.param_dtype)(x)
+            h = nn.Dense(
+                args.dim,
+                dtype=args.dtype,
+                param_dtype=args.param_dtype,
+                kernel_init=nn.with_logical_partitioning(
+                    nn.linear.default_kernel_init, ("input_embed", "embed")
+                ),
+            )(x)
 
         seqlen = x.shape[1]
-        freqs_cos, freqs_sin = precompute_freqs_cis(args.dim // args.n_heads, seqlen, dtype=args.dtype)
+        freqs_cos, freqs_sin = precompute_freqs_cis(
+            args.dim // args.n_heads, seqlen, theta=args.rope_theta, dtype=args.dtype
+        )
 
         freqs_cos = freqs_cos[:seqlen]
         freqs_sin = freqs_sin[:seqlen]
@@ -388,7 +483,11 @@ class Transformer(nn.Module):
 
         if cond is not None:
             output_norm = nn.LayerNorm(
-                epsilon=args.norm_eps, use_bias=False, use_scale=False, dtype=args.dtype, param_dtype=args.param_dtype
+                epsilon=args.norm_eps,
+                use_bias=False,
+                use_scale=False,
+                dtype=args.dtype,
+                param_dtype=args.param_dtype,
             )
             activation = activation_map[args.mlp_type]
             if args.cond_type == "adaln":
@@ -396,7 +495,12 @@ class Transformer(nn.Module):
                     [
                         # nn.swish,
                         activation,
-                        nn.Dense(2 * args.dim, use_bias=True, dtype=jnp.float32, param_dtype=jnp.float32),
+                        nn.Dense(
+                            2 * args.dim,
+                            use_bias=True,
+                            dtype=jnp.float32,
+                            param_dtype=jnp.float32,
+                        ),
                     ]
                 )
             elif args.cond_type == "adaln_zero":
@@ -416,12 +520,20 @@ class Transformer(nn.Module):
                 )
             else:
                 raise NotImplementedError()
-            shift_out, scale_out = jnp.split(ln(cond.astype(jnp.float32))[:, None, :], 2, axis=-1)
+            shift_out, scale_out = jnp.split(
+                ln(cond.astype(jnp.float32))[:, None, :], 2, axis=-1
+            )
             logits = nn.Dense(
-                output_channels, use_bias=False, kernel_init=nn.initializers.zeros, dtype=jnp.float32, param_dtype=jnp.float32
+                output_channels,
+                use_bias=False,
+                kernel_init=nn.initializers.zeros,
+                dtype=jnp.float32,
+                param_dtype=jnp.float32,
             )(output_norm(h) * (scale_out + 1) + shift_out)
         else:
-            h = RMSNorm(args.dim, args.norm_eps, dtype=args.dtype, param_dtype=args.param_dtype)(h)
+            h = RMSNorm(
+                args.dim, args.norm_eps, dtype=args.dtype, param_dtype=args.param_dtype
+            )(h)
             logits = nn.Dense(
                 features=output_channels,
                 use_bias=False,
