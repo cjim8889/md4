@@ -359,42 +359,11 @@ class TransformerBlock(nn.Module):
         )
 
     @nn.compact
-    def __call__(self, x, freqs_cos, freqs_sin, cond=None, train=False):
-        if cond is not None:
-            activation = activation_map[self.args.mlp_type]
-            if self.args.cond_type == "adaln":
-                ln = nn.Sequential(
-                    [
-                        # nn.swish,
-                        activation,
-                        nn.Dense(
-                            6 * self.args.dim,
-                            use_bias=True,
-                            dtype=self.args.dtype,
-                            param_dtype=self.args.param_dtype,
-                        ),
-                    ]
-                )
-            elif self.args.cond_type == "adaln_zero":
-                ln = nn.Sequential(
-                    [
-                        # nn.swish,
-                        activation,
-                        nn.Dense(
-                            6 * self.args.dim,
-                            use_bias=True,
-                            kernel_init=nn.initializers.zeros,
-                            bias_init=nn.initializers.zeros,
-                            dtype=self.args.dtype,
-                            param_dtype=self.args.param_dtype,
-                        ),
-                    ]
-                )
-            else:
-                raise NotImplementedError()
-            (shift_att, scale_att, gate_att, shift_mlp, scale_mlp, gate_mlp) = (
-                jnp.split(ln(cond)[:, None, :], 6, axis=-1)
-            )
+    def __call__(self, x, freqs_cos, freqs_sin, cond_params=None, train=False):
+        if cond_params is not None:
+            # Use shared conditioning parameters for all layers
+            shift_att, scale_att, gate_att, shift_mlp, scale_mlp, gate_mlp = cond_params
+            
             attention_norm = nn.LayerNorm(
                 epsilon=self.args.norm_eps,
                 use_bias=False,
@@ -476,9 +445,48 @@ class Transformer(nn.Module):
         freqs_cos = freqs_cos[:seqlen]
         freqs_sin = freqs_sin[:seqlen]
 
+        # Process conditioning once for all layers
+        cond_params = None
+        if cond is not None:
+            activation = activation_map[args.mlp_type]
+            # Create shared AdaLN/AdaLN-Zero layer for all blocks
+            if args.cond_type == "adaln":
+                shared_adaln = nn.Sequential(
+                    [
+                        activation,
+                        nn.Dense(
+                            6 * args.dim,  # Same parameters shared by all layers
+                            use_bias=True,
+                            dtype=args.dtype,
+                            param_dtype=args.param_dtype,
+                        ),
+                    ]
+                )
+            elif args.cond_type == "adaln_zero":
+                shared_adaln = nn.Sequential(
+                    [
+                        activation,
+                        nn.Dense(
+                            6 * args.dim,  # Same parameters shared by all layers
+                            use_bias=True,
+                            kernel_init=nn.initializers.zeros,
+                            bias_init=nn.initializers.zeros,
+                            dtype=args.dtype,
+                            param_dtype=args.param_dtype,
+                        ),
+                    ]
+                )
+            else:
+                raise NotImplementedError()
+            
+            # Compute conditioning parameters once, shared by all blocks
+            all_cond_params = shared_adaln(cond)[:, None, :]
+            # Split into 6 parameters (shift_att, scale_att, gate_att, shift_mlp, scale_mlp, gate_mlp)
+            cond_params = jnp.split(all_cond_params, 6, axis=-1)
+
         for layer_id in range(args.n_layers):
             h = TransformerBlock(layer_id, args)(
-                h, freqs_cos, freqs_sin, cond=cond, train=train
+                h, freqs_cos, freqs_sin, cond_params=cond_params, train=train
             )
 
         if cond is not None:
@@ -491,9 +499,8 @@ class Transformer(nn.Module):
             )
             activation = activation_map[args.mlp_type]
             if args.cond_type == "adaln":
-                ln = nn.Sequential(
+                ln_final = nn.Sequential(
                     [
-                        # nn.swish,
                         activation,
                         nn.Dense(
                             2 * args.dim,
@@ -504,9 +511,8 @@ class Transformer(nn.Module):
                     ]
                 )
             elif args.cond_type == "adaln_zero":
-                ln = nn.Sequential(
+                ln_final = nn.Sequential(
                     [
-                        # nn.swish,
                         activation,
                         nn.Dense(
                             2 * args.dim,
@@ -521,7 +527,7 @@ class Transformer(nn.Module):
             else:
                 raise NotImplementedError()
             shift_out, scale_out = jnp.split(
-                ln(cond.astype(jnp.float32))[:, None, :], 2, axis=-1
+                ln_final(cond.astype(jnp.float32))[:, None, :], 2, axis=-1
             )
             logits = nn.Dense(
                 output_channels,
