@@ -1,4 +1,3 @@
-import grain.python as grain
 import ml_collections
 from etils import epath
 from orbax import checkpoint as orbax_checkpoint
@@ -8,32 +7,17 @@ def _get_checkpoint_manager(
     config: ml_collections.ConfigDict,
     workdir: epath.PathLike,
     create: bool = True,
-    is_grain_loader: bool = True,
+    is_grain_loader: bool = False,  # Default to False since not using grain
 ) -> orbax_checkpoint.CheckpointManager:
-    """Loads the orbax checkpoint manager for train state and data iterator."""
-    # The keys in this dict should match the keys in `checkpointed_state`.
-    checkpointers = dict(
-        train_state=orbax_checkpoint.PyTreeCheckpointer(),
-    )
-
-    # Only add train_iter checkpointer for grain loaders
-    if is_grain_loader:
-        checkpointers["train_iter"] = (
-            orbax_checkpoint.Checkpointer(  # pytype:disable=unsupported-operands
-                grain.PyGrainCheckpointHandler()
-            )
-        )  # pytype:disable=wrong-arg-types
-
+    """Loads the orbax checkpoint manager for train state."""
     checkpoint_dir = epath.Path(workdir) / "checkpoints"
-    # keep_period = (
-    #     config.checkpoint_keep_period if config.checkpoint_keep_period > 0 else None
-    # )
+    
+    # Since we're only checkpointing train_state, use single-item checkpointing
+    # which is simpler with the new API
     return orbax_checkpoint.CheckpointManager(
         checkpoint_dir,
-        checkpointers=checkpointers,
         options=orbax_checkpoint.CheckpointManagerOptions(
             create=create,
-            # preservation_policy=orbax_checkpoint.checkpoint_managers.LatestN(n=20),
             best_fn=lambda x: x["validation_loss"]
             if "validation_loss" in x
             else x["loss"],
@@ -47,7 +31,7 @@ def get_checkpoint_managers(
     config: ml_collections.ConfigDict,
     workdir: epath.PathLike,
     olddir: epath.PathLike | None = None,
-    is_grain_loader: bool = True,
+    is_grain_loader: bool = False,  # Default to False since not using grain
 ) -> tuple[orbax_checkpoint.CheckpointManager, orbax_checkpoint.CheckpointManager]:
     """Get save and load checkpoint managers.
 
@@ -56,7 +40,7 @@ def get_checkpoint_managers(
         workdir: Working directory for saving checkpoints.
         olddir: Optional directory to load old checkpoints from. If provided,
             load manager will point to olddir, otherwise same as save manager.
-        is_grain_loader: Whether the data loader is a grain loader.
+        is_grain_loader: Whether the data loader is a grain loader (deprecated, not used).
 
     Returns:
         A tuple of (save_manager, load_manager).

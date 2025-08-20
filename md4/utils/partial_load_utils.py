@@ -22,8 +22,6 @@ from typing import Any, Tuple
 import jax
 from clu import parameter_overview
 from orbax import checkpoint as orbax_checkpoint
-
-
 def should_use_partial_loading(config) -> bool:
     """Check if the config should use partial loading.
 
@@ -219,32 +217,24 @@ def partial_load_checkpoint(
 
 
 def standard_checkpoint_loading(
-    train_state, train_iter, checkpoint_manager: orbax_checkpoint.CheckpointManager
-) -> Tuple[Any, Any]:
-    """Perform standard checkpoint loading.
+    train_state, train_iter, checkpoint_manager: orbax_checkpoint.CheckpointManager, state_sharding: jax.sharding.NamedSharding = None
+) -> Any:
+    """Perform standard checkpoint loading using new Orbax API.
 
     Args:
         train_state: Train state to load into
-        train_iter: Training iterator
+        train_iter: Training iterator (unused, kept for compatibility)
         checkpoint_manager: Orbax checkpoint manager
+        state_sharding: Sharding for the train state (unused for now)
 
     Returns:
-        Tuple of (loaded_train_state, loaded_train_iter)
+        Loaded train state (single item with new API)
     """
-    checkpointed_state = {"train_state": train_state}
-    if train_iter is not None:
-        checkpointed_state["train_iter"] = train_iter
-
-    checkpointed_state = checkpoint_manager.restore(
+    # With the new Orbax API, restore without args for simple case
+    # The checkpoint manager will automatically detect the item type
+    train_state = checkpoint_manager.restore(
         checkpoint_manager.latest_step(),
-        items=checkpointed_state,
+        args=orbax_checkpoint.args.StandardRestore(train_state)
     )
 
-    loaded_train_state = checkpointed_state["train_state"]
-    loaded_train_iter = (
-        checkpointed_state["train_iter"]
-        if "train_iter" in checkpointed_state
-        else train_iter
-    )
-
-    return loaded_train_state, loaded_train_iter
+    return train_state

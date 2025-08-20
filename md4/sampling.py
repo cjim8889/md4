@@ -88,9 +88,9 @@ def generate(
 def simple_generate(
     rng,
     train_state,
+    conditioning,
     batch_size,
     model,
-    conditioning=None,
     dummy_inputs=None,
     use_conditional_init: bool = False,
 ):
