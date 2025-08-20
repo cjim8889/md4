@@ -2,6 +2,7 @@ import functools
 from collections.abc import Callable, Mapping
 from typing import Any
 
+import flax
 import flax.linen as nn
 import grain.python as grain
 import jax
@@ -12,10 +13,10 @@ import optax
 from absl import logging
 from clu import metric_writers, metrics, periodic_actions
 from etils import epath
-from flax.training import orbax_utils
 from jax.experimental import checkify
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
+from orbax import checkpoint as orbax_checkpoint
 
 from md4 import (
     input_pipeline,
@@ -53,21 +54,6 @@ logging.info(f"Created mesh: {mesh}")
 def mesh_sharding(pspec: P) -> NamedSharding:
     """Helper function to create NamedSharding from PartitionSpec."""
     return NamedSharding(mesh, pspec)
-
-
-def merge_batch_stats(
-    train_state: state_utils.TrainState,
-) -> state_utils.TrainState:
-    """Merge model batch stats across devices for FSDP."""
-    if jax.tree.leaves(train_state.state):
-        # For FSDP, batch stats should already be synchronized
-        # No explicit merge needed as we're using jit instead of pmap
-        return train_state
-    else:
-        return train_state
-
-
-
 
 def loss_fn(params, state, rng, model, batch, train=False):
     """Loss function."""
@@ -122,18 +108,23 @@ def train_step(
     model: nn.Module,
     optimizer: optax.GradientTransformation,
     learning_rate_fn: Callable[[int], float],
-    train_metrics_class: metrics.Collection,
+    train_metrics_class: Any,
     ema_rate: float = 0.0,
     num_microbatches: int | None = None,
 ) -> tuple[state_utils.TrainState, metrics.Collection]:
-    """Perform a single training step with FSDP sharding."""
+    """Perform a single training step."""
     logging.info("train_step(batch=%s)", batch)
     rng, new_rng = jax.random.split(train_state.rng)
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
     if num_microbatches is None or num_microbatches <= 1:
-        (_, (new_state, metrics_dict)), grads = grad_fn(
-            train_state.params, train_state.state, rng, model, batch, train=True
+        (loss, (new_state, metrics_dict)), grads = grad_fn(
+            train_state.params,
+            train_state.state,
+            rng,
+            model,
+            batch,
+            train=True,
         )
     else:
         batch_size = next(iter(batch.values())).shape[0]
@@ -164,32 +155,38 @@ def train_step(
             _, mbrng = jax.random.split(rng)
             mb = get_microbatch(batch, loop_cnt)
 
-            (_, (new_state, metrics_dict)), grads = grad_fn(
-                train_state.params, train_state_state, mbrng, model, mb, train=True
+            (loss, (new_state, metrics_dict)), grads = grad_fn(
+                train_state.params,
+                train_state_state,
+                mbrng,
+                model,
+                mb,
+                train=True,
             )
-            return metrics_dict, grads, new_state
+            return loss, metrics_dict, grads, new_state
 
         def per_microbatch_train_step(loop_cnt, carry):
-            (rng, grad_accum, prev_metrics_dict, train_state_state) = carry
-            metrics_dict, grads, train_state_state = metrics_and_grad(
+            (rng, grad_accum, prev_metrics_dict, prev_loss, train_state_state) = carry
+            loss, metrics_dict, grads, train_state_state = metrics_and_grad(
                 loop_cnt, rng, train_state_state
             )
 
             grad_accum = jax.tree.map(jnp.add, grad_accum, grads)
+            loss = jax.tree.map(jnp.add, loss, prev_loss)
             metrics_dict = jax.lax.cond(
                 loop_cnt == 0,
                 lambda _: metrics_dict,
                 lambda _: merge_metrics(prev_metrics_dict, metrics_dict),
                 None,
             )
-            return rng, grad_accum, metrics_dict, train_state_state
+            return rng, grad_accum, metrics_dict, loss, train_state_state
 
         # Initialize gradient accumulation loop state.
         accum_dtype = jnp.float32
         grad_accum_init = jax.tree.map(
             lambda x: jnp.zeros(x.shape, accum_dtype), train_state.params
         )
-        initial_metrics_shape, _, _ = jax.eval_shape(
+        loss_shape, initial_metrics_shape, _, _ = jax.eval_shape(
             metrics_and_grad,
             loop_cnt=0,
             rng=rng,
@@ -201,33 +198,33 @@ def train_step(
             for k, v in initial_metrics_shape.items()
         }
 
+        initial_loss = jnp.zeros(shape=loss_shape.shape, dtype=loss_shape.dtype)
         loop_init = (
             rng,
             grad_accum_init,
             initial_metrics,
+            initial_loss,
             train_state.state,
         )
-        _, grads, metrics_dict, train_state_state = jax.lax.fori_loop(
+        _, grads, metrics_dict, loss, train_state_state = jax.lax.fori_loop(
             0, num_microbatches, per_microbatch_train_step, loop_init
         )
+        loss = loss / num_microbatches
         metrics_dict = jax.tree.map(lambda x: x / num_microbatches, metrics_dict)
         new_state = train_state_state
 
-    # With FSDP and jit, gradients are already properly reduced
-    # No explicit pmean needed as we're using data parallelism through sharding
     updates, new_opt_state = optimizer.update(
         grads, train_state.opt_state, train_state.params
     )
     new_params = optax.apply_updates(train_state.params, updates)
     if ema_rate > 0.0:
-        new_ema_params = jax.tree_util.tree_map(
+        new_ema_params = jax.tree.map(
             lambda x, y: x + (1.0 - ema_rate) * (y - x),
             train_state.ema_params,
             new_params,
         )
     else:
         new_ema_params = None
-
     new_train_state = train_state.replace(
         step=train_state.step + 1,
         rng=new_rng,
@@ -237,31 +234,45 @@ def train_step(
         state=new_state,
     )
 
-    metrics_update = train_metrics_class.single_from_model_output(
+    new_metrics = train_metrics_class.single_from_model_output(
         learning_rate=learning_rate_fn(train_state.step),
         **metrics_dict,
     )
-    return new_train_state, metrics_update
+    return new_train_state, new_metrics
 
 
 def eval_step(
-    model: nn.Module,
     rng: jax.Array,
     train_state: state_utils.TrainState,
     batch: Mapping[str, jax.Array],
+    model: nn.Module,
     eval_metrics_class: metrics.Collection,
     ema_rate: float = 0.0,
 ) -> metrics.Collection:
     """Compute the metrics for the given model in inference mode with FSDP."""
     logging.info("eval_step(batch=%s)", batch)
-    axis_index = jax.lax.axis_index("data")
-    rng = jax.random.fold_in(rng, axis_index)
     params = train_state.ema_params if ema_rate > 0.0 else train_state.params
 
     _, metrics_dict = loss_fn(params, train_state.state, rng, model, batch, train=False)
     return eval_metrics_class.single_from_model_output(
         learning_rate=0.0, **metrics_dict
     )
+
+
+def _process_metrics(batch_metrics, matrics_class):
+    batch_metrics = [jax.device_get(m) for m in batch_metrics]
+    final_metrics = matrics_class.empty()
+    for m in batch_metrics:
+        final_metrics = final_metrics.merge(m)
+    return final_metrics
+
+
+@flax.struct.dataclass
+class EvalMetrics(metrics.Collection):
+    eval_loss: metrics.Average.from_output("loss")
+    eval_loss_diff: metrics.Average.from_output("loss_diff")
+    eval_loss_prior: metrics.Average.from_output("loss_prior")
+    eval_loss_recon: metrics.Average.from_output("loss_recon")
 
 
 def evaluate(
@@ -274,7 +285,7 @@ def evaluate(
 ):
     """Evaluate the model on the given dataset (legacy pmap version)."""
     logging.info("Starting evaluation.")
-    eval_metrics = None
+    eval_metrics = []
     with utils.StepTraceContextHelper("eval", 0) as trace_context:
         # Use `iter` to reset the eval_loader before each evaluation.
         for step, batch_raw in enumerate(iter(eval_loader)):
@@ -285,20 +296,15 @@ def evaluate(
                 batch_raw,
             )
 
-            metrics_update = jit_eval_step(
-                sub_rng, train_state, batch
-            )
-            eval_metrics = (
-                metrics_update
-                if eval_metrics is None
-                else eval_metrics.merge(metrics_update)
-            )
+            metrics_update = jit_eval_step(sub_rng, train_state, batch)
+            eval_metrics.append(metrics_update)
             if num_eval_steps > 0 and step + 1 == num_eval_steps:
                 break
             trace_context.next_step()
 
     if eval_metrics is None:
         raise ValueError(f"Eval dataset {eval_loader} was empty.")
+    eval_metrics = _process_metrics(eval_metrics, EvalMetrics)
     return eval_metrics
 
 
@@ -344,7 +350,6 @@ def train_and_evaluate(
 
     # Learning rate schedule.
     assert config.batch_size % jax.device_count() == 0
-    per_device_batch_size = config.batch_size // jax.device_count()
     num_train_steps = input_pipeline.get_num_train_steps(config)
     steps_per_epoch = num_train_steps // config.num_epochs
     logging.info(
@@ -375,7 +380,6 @@ def train_and_evaluate(
 
     # Initialize sharding
     data_sharding = mesh_sharding(P("data", None))  # Shard data across data axis
-    replicated_sharding = mesh_sharding(P())
     state_sharding = None
 
     # Initialize model.
@@ -391,10 +395,9 @@ def train_and_evaluate(
             state_utils.create_sharded_train_state(
                 config,
                 data_sharding,
-                replicated_sharding,
                 mesh,
                 model_rng,
-                input_shape=(per_device_batch_size,) + data_shape,
+                input_shape=(config.batch_size, *data_shape),
                 schedule_fn=schedule_fn,
             )
         )
@@ -403,7 +406,7 @@ def train_and_evaluate(
     # Get both save and load checkpoint managers
     save_checkpoint_manager, load_checkpoint_manager = (
         checkpoint_utils.get_checkpoint_managers(
-            config, workdir, olddir, is_grain_loader=is_grain_loader
+            config, workdir, olddir, is_grain_loader=False  # Not using grain anymore
         )
     )
 
@@ -414,11 +417,12 @@ def train_and_evaluate(
             logging.error("Partial Loading is not supported for fsdp")
             raise NotImplementedError()
         else:
-            # Standard checkpoint loading
-            train_state, _ = partial_load_utils.standard_checkpoint_loading(
+            # Standard checkpoint loading with new Orbax API
+            train_state = partial_load_utils.standard_checkpoint_loading(
                 train_state=train_state,
-                train_iter=train_iter if is_grain_loader else None,
+                train_iter=None,  # No train_iter since not using grain
                 checkpoint_manager=load_checkpoint_manager,
+                state_sharding=state_sharding
             )
 
     logging.info("Batch Size: %s", config.batch_size)
@@ -454,11 +458,23 @@ def train_and_evaluate(
         functools.partial(
             eval_step,
             model=model,
-            eval_metrics_class=metrics_class,
+            eval_metrics_class=EvalMetrics,
             ema_rate=config.ema_rate,
         ),
-        in_shardings=(replicated_sharding, state_sharding, data_sharding),
-        out_shardings=replicated_sharding,
+        in_shardings=(None, state_sharding, data_sharding),
+        out_shardings=(None),
+    )
+
+    jit_generate = jax.jit(
+        functools.partial(
+            sampling.simple_generate,
+            batch_size=config.batch_size,
+            model=model,
+            dummy_inputs=None,
+            use_conditional_init=False,
+        ),
+        in_shardings=(None, state_sharding, data_sharding),
+        out_shardings=(None),
     )
 
     hooks = []
@@ -468,9 +484,9 @@ def train_and_evaluate(
     if jax.process_index() == 0:
         hooks += [
             report_progress,
-            periodic_actions.Profile(num_profile_steps=5, logdir=workdir),
+            # periodic_actions.Profile(num_profile_steps=5, logdir=workdir),
         ]
-    train_metrics = None
+    train_metrics = []
 
     # With FSDP/jit, we don't need to unreplicate
     initial_step = int(train_state.step)
@@ -496,31 +512,24 @@ def train_and_evaluate(
                         )
                         errs.throw()
                     else:
-                        train_state, metrics_update = jit_train_step(
-                            train_state, batch
-                        )
+                        train_state, metrics_update = jit_train_step(train_state, batch)
 
-                    train_metrics = (
-                        metrics_update
-                        if train_metrics is None
-                        else train_metrics.merge(metrics_update)
-                    )
+                    train_metrics.append(metrics_update)
 
-            # Quick indication that training is happening.
-            logging.log_first_n(logging.INFO, "Finished training step %d.", 5, step)
-            for h in hooks:
-                h(step)
+                # Quick indication that training is happening.
+                logging.log_first_n(logging.INFO, "Finished training step %d.", 5, step)
+                for h in hooks:
+                    h(step)
 
-            if step % config.log_loss_every_steps == 0 or is_last_step:
-                writer.write_scalars(step, train_metrics.compute())
-                train_metrics = None
+                if step % config.log_loss_every_steps == 0 or is_last_step:
+                    train_metrics = _process_metrics(train_metrics, metrics_class)
+                    writer.write_scalars(step, train_metrics.compute())
+                    train_metrics = []
 
                 if step == 1 or step % config.eval_every_steps == 0 or is_last_step:
                     for split, eval_loader in eval_loaders.items():
                         rng, eval_rng = jax.random.split(rng)
                         with report_progress.timed("eval"):
-                            train_state = merge_batch_stats(train_state)
-                            # Pass jit_eval_step instead of p_eval_step
                             eval_metrics = evaluate(
                                 jit_eval_step,
                                 eval_rng,
@@ -537,102 +546,75 @@ def train_and_evaluate(
                         }
                         writer.write_scalars(step, eval_metrics_cpu)
 
-                # if hasattr(model, "sample_step"):
-                #     with report_progress.timed("sample"):
-                #         _, sample_rng = jax.random.split(rng)
-                #         dummy_loader = train_loader
-                #         dummy_batch_raw = next(iter(dummy_loader))
-                #         dummy_batch = jax.tree.map(
-                #             lambda x: jax.device_put(x, data_sharding),
-                #             dummy_batch_raw
-                #         )
-                #         dummy_inputs = (
-                #             dummy_batch[config.task_type]
-                #             if "smiles" not in dummy_batch
-                #             else dummy_batch["smiles"]
-                #         )
-                #         # Get model dtype for proper mixed precision handling
-                #         model_dtype = getattr(model, 'dtype', jnp.float32)
-                #         conditioning = state_utils.get_conditioning_from_batch(
-                #             dummy_batch, dtype=model_dtype
-                #         )
+                    if hasattr(model, "sample_step"):
+                        with report_progress.timed("sample"):
+                            _, sample_rng = jax.random.split(rng)
+                            dummy_loader = train_loader
+                            dummy_batch_raw = next(iter(dummy_loader))
+                            dummy_batch = jax.tree.map(
+                                lambda x: jax.device_put(x, data_sharding),
+                                dummy_batch_raw,
+                            )
+                            # Get model dtype for proper mixed precision handling
+                            model_dtype = getattr(model, "dtype", jnp.float32)
+                            conditioning = state_utils.get_conditioning_from_batch(
+                                dummy_batch, dtype=model_dtype
+                            )
 
-                #         # For FSDP, we need to adapt the sampling
-                #         samples = sampling.generate(
-                #             model,
-                #             train_state,
-                #             sample_rng,
-                #             dummy_inputs,
-                #             conditioning,
-                #             False,
-                #         )
+                            samples = jit_generate(
+                                sample_rng,
+                                train_state,
+                                conditioning,
+                            )
 
-                #         # With FSDP, samples are already gathered
-                #         all_samples = samples
-                #         if hasattr(all_samples, 'shape'):
-                #             all_samples = all_samples.reshape(-1, *data_shape)
-                #         else:
-                #             all_samples = jnp.array(all_samples).reshape(-1, *data_shape)
-                #         if config.task_type == "image":
-                #             sample_grid = utils.generate_image_grids(all_samples)
-                #             writer.write_images(step, {"samples": sample_grid})
-                #             del all_samples, sample_grid
-                #         elif config.task_type == "text":
-                #             tokenizer = dataset_info["tokenizer"]
-                #             texts = None
-                #             try:
-                #                 texts = tokenizer.batch_decode(
-                #                     all_samples,
-                #                     skip_special_tokens=False,
-                #                     clean_up_tokenization_spaces=True,
-                #                 )
-                #                 # writer.write_texts(step, {"samples": texts})
+                            # With FSDP, samples are already gathered
+                            all_samples = samples
 
-                #                 # Calculate SMILES validity for pubchem_large dataset
-                #                 if (
-                #                     config.dataset
-                #                     in [
-                #                         "pubchem_large",
-                #                         "msg_finetune",
-                #                         "pubchem_large_text",
-                #                     ]
-                #                     and texts is not None
-                #                 ):
-                #                     validity_metrics = (
-                #                         rdkit_utils.calculate_smiles_validity(texts)
-                #                     )
-                #                     # Write validity metrics to the writer
-                #                     validity_scalars = {
-                #                         f"sample_{k}": v
-                #                         for k, v in validity_metrics.items()
-                #                     }
-                #                     writer.write_scalars(step, validity_scalars)
-                #             except Exception as e:
-                #                 logging.error("Error decoding texts: %s", e)
+                            if config.task_type == "text":
+                                tokenizer = dataset_info["tokenizer"]
+                                texts = None
+                                try:
+                                    texts = tokenizer.batch_decode(
+                                        all_samples,
+                                        skip_special_tokens=False,
+                                        clean_up_tokenization_spaces=True,
+                                    )
+                                    # writer.write_texts(step, {"samples": texts})
+
+                                    # Calculate SMILES validity for pubchem_large dataset
+                                    if (
+                                        config.dataset
+                                        in [
+                                            "pubchem_large",
+                                            "msg_finetune",
+                                            "pubchem_large_text",
+                                        ]
+                                        and texts is not None
+                                    ):
+                                        validity_metrics = (
+                                            rdkit_utils.calculate_smiles_validity(texts)
+                                        )
+                                        # Write validity metrics to the writer
+                                        validity_scalars = {
+                                            f"sample_{k}": v
+                                            for k, v in validity_metrics.items()
+                                        }
+                                        writer.write_scalars(step, validity_scalars)
+                                except Exception as e:
+                                    logging.error("Error decoding texts: %s", e)
 
                 if step % config.checkpoint_every_steps == 0 or is_last_step:
                     with report_progress.timed("checkpoint"):
-                        # Prepare checkpoint items - with FSDP, no unreplication needed
-                        checkpoint_items = dict(
-                            train_state=train_state,
-                        )
-
-
-                        # Only include train_iter for grain loaders
-                        if is_grain_loader:
-                            checkpoint_items["train_iter"] = train_iter
-
-                        save_args = orbax_utils.save_args_from_target(checkpoint_items)
+                        # Use new Orbax API for single-item checkpointing
                         save_checkpoint_manager.save(
                             step,
-                            items=checkpoint_items,
+                            args=orbax_checkpoint.args.StandardSave(train_state),
                             metrics=jax.tree_util.tree_map(
                                 lambda x: x.item() if hasattr(x, "item") else x,
                                 eval_metrics_cpu
                                 if eval_metrics_cpu is not None
                                 else {},
                             ),
-                            args=save_args,
                         )
 
     logging.info("Finishing training at step %d", num_train_steps)
