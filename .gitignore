@@ -56,3 +56,5 @@ wandb/
 latest_eval/
 
 docs/
+
+.claude

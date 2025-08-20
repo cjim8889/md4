@@ -240,8 +240,10 @@ version = "0.1.89"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "absl-py" },
-    { name = "jax" },
-    { name = "jaxlib" },
+    { name = "jax", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'macOS'" },
+    { name = "jax", version = "0.7.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or sys_platform == 'macOS'" },
+    { name = "jaxlib", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'macOS'" },
+    { name = "jaxlib", version = "0.7.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or sys_platform == 'macOS'" },
     { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'macOS'" },
     { name = "numpy", version = "2.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13' or sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'macOS'" },
     { name = "setuptools" },
@@ -282,8 +284,10 @@ dependencies = [
     { name = "absl-py" },
     { name = "etils", extra = ["epath"] },
     { name = "flax" },
-    { name = "jax" },
-    { name = "jaxlib" },
+    { name = "jax", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'macOS'" },
+    { name = "jax", version = "0.7.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or sys_platform == 'macOS'" },
+    { name = "jaxlib", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'macOS'" },
+    { name = "jaxlib", version = "0.7.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or sys_platform == 'macOS'" },
     { name = "ml-collections" },
     { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'macOS'" },
     { name = "numpy", version = "2.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13' or sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'macOS'" },
@@ -434,8 +438,10 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "absl-py" },
     { name = "chex" },
-    { name = "jax" },
-    { name = "jaxlib" },
+    { name = "jax", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'macOS'" },
+    { name = "jax", version = "0.7.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or sys_platform == 'macOS'" },
+    { name = "jaxlib", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'macOS'" },
+    { name = "jaxlib", version = "0.7.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or sys_platform == 'macOS'" },
     { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'macOS'" },
     { name = "numpy", version = "2.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13' or sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'macOS'" },
     { name = "setuptools" },
@@ -573,7 +579,8 @@ name = "flax"
 version = "0.10.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "jax" },
+    { name = "jax", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'macOS'" },
+    { name = "jax", version = "0.7.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or sys_platform == 'macOS'" },
     { name = "msgpack" },
     { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'macOS'" },
     { name = "numpy", version = "2.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13' or sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'macOS'" },
@@ -1042,22 +1049,50 @@ wheels = [
 name = "jax"
 version = "0.6.2"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.13' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'macOS'",
+    "python_full_version < '3.13' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'macOS'",
+    "python_full_version >= '3.13' and sys_platform == 'darwin'",
+    "python_full_version < '3.13' and sys_platform == 'darwin'",
+]
 dependencies = [
-    { name = "jaxlib" },
-    { name = "ml-dtypes" },
+    { name = "jaxlib", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'macOS'" },
+    { name = "ml-dtypes", marker = "sys_platform != 'linux' and sys_platform != 'macOS'" },
     { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'macOS'" },
-    { name = "numpy", version = "2.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13' or sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'macOS'" },
-    { name = "opt-einsum" },
-    { name = "scipy" },
+    { name = "numpy", version = "2.1.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.13' and sys_platform != 'linux' and sys_platform != 'macOS') or sys_platform == 'darwin'" },
+    { name = "opt-einsum", marker = "sys_platform != 'linux' and sys_platform != 'macOS'" },
+    { name = "scipy", marker = "sys_platform != 'linux' and sys_platform != 'macOS'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/cf/1e/267f59c8fb7f143c3f778c76cb7ef1389db3fd7e4540f04b9f42ca90764d/jax-0.6.2.tar.gz", hash = "sha256:a437d29038cbc8300334119692744704ca7941490867b9665406b7f90665cd96", size = 2334091, upload-time = "2025-06-17T23:10:27.186Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/31/a8/97ef0cbb7a17143ace2643d600a7b80d6705b2266fc31078229e406bdef2/jax-0.6.2-py3-none-any.whl", hash = "sha256:bb24a82dc60ccf704dcaf6dbd07d04957f68a6c686db19630dd75260d1fb788c", size = 2722396, upload-time = "2025-06-17T23:10:25.293Z" },
 ]
 
+[[package]]
+name = "jax"
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.13' and sys_platform == 'linux'",
+    "python_full_version < '3.13' and sys_platform == 'linux'",
+    "python_full_version >= '3.13' and sys_platform == 'macOS'",
+    "python_full_version < '3.13' and sys_platform == 'macOS'",
+]
+dependencies = [
+    { name = "jaxlib", version = "0.7.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or sys_platform == 'macOS'" },
+    { name = "ml-dtypes", marker = "sys_platform == 'linux' or sys_platform == 'macOS'" },
+    { name = "numpy", version = "2.1.3", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or sys_platform == 'macOS'" },
+    { name = "opt-einsum", marker = "sys_platform == 'linux' or sys_platform == 'macOS'" },
+    { name = "scipy", marker = "sys_platform == 'linux' or sys_platform == 'macOS'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c8/34/f26cdcb8e664306dc349aa9e126a858915089c22d0caa0131213b84e52da/jax-0.7.0.tar.gz", hash = "sha256:4dd8924f171ed73a4f1a6191e2f800ae1745069989b69fabc45593d6b6504003", size = 2391317, upload-time = "2025-07-22T20:30:57.169Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ad/de/3092df5073cd9c07c01b10612fc541538b74b02184fac90e3beada20f758/jax-0.7.0-py3-none-any.whl", hash = "sha256:62833036cbaf4641d66ae94c61c0446890a91b2c0d153946583a0ebe04877a76", size = 2785944, upload-time = "2025-07-22T20:30:55.687Z" },
+]
+
 [package.optional-dependencies]
 tpu = [
-    { name = "jaxlib", marker = "sys_platform == 'linux'" },
+    { name = "jaxlib", version = "0.7.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux'" },
     { name = "libtpu", marker = "sys_platform == 'linux'" },
     { name = "requests", marker = "sys_platform == 'linux'" },
 ]
@@ -1066,23 +1101,47 @@ tpu = [
 name = "jaxlib"
 version = "0.6.2"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.13' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'macOS'",
+    "python_full_version < '3.13' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'macOS'",
+    "python_full_version >= '3.13' and sys_platform == 'darwin'",
+    "python_full_version < '3.13' and sys_platform == 'darwin'",
+]
 dependencies = [
-    { name = "ml-dtypes" },
+    { name = "ml-dtypes", marker = "sys_platform != 'linux' and sys_platform != 'macOS'" },
     { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'macOS'" },
-    { name = "numpy", version = "2.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13' or sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'macOS'" },
-    { name = "scipy" },
+    { name = "numpy", version = "2.1.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.13' and sys_platform != 'linux' and sys_platform != 'macOS') or sys_platform == 'darwin'" },
+    { name = "scipy", marker = "sys_platform != 'linux' and sys_platform != 'macOS'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ac/db/05e702d2534e87abf606b1067b46a273b120e6adc7d459696e3ce7399317/jaxlib-0.6.2-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:34d8a684a8be949dd87dd4acc97101b4106a0dc9ad151ec891da072319a57b99", size = 54301644, upload-time = "2025-06-17T23:11:10.977Z" },
-    { url = "https://files.pythonhosted.org/packages/0d/8a/b0a96887b97a25d45ae2c30e4acecd2f95acd074c18ec737dda8c5cc7016/jaxlib-0.6.2-cp312-cp312-manylinux2014_aarch64.whl", hash = "sha256:87ec2dc9c3ed9ab936eec8535160c5fbd2c849948559f1c5daa75f63fabe5942", size = 79439161, upload-time = "2025-06-17T23:11:14.822Z" },
-    { url = "https://files.pythonhosted.org/packages/ba/e8/71c2555431edb5dd115cf86a7b599aa7e1be26728d89ae59aa11251d299c/jaxlib-0.6.2-cp312-cp312-manylinux2014_x86_64.whl", hash = "sha256:f1dd09b481a93c1d4c750013f467f74194493ba7bd29fcd4d1cec16e3a214f65", size = 89942952, upload-time = "2025-06-17T23:11:19.181Z" },
     { url = "https://files.pythonhosted.org/packages/de/3a/06849113c844b86d20174df54735c84202ccf82cbd36d805f478c834418b/jaxlib-0.6.2-cp312-cp312-win_amd64.whl", hash = "sha256:921dbd4db214eba19a29ba9f2450d880e08b2b2c7b968f28cc89da3e62366af4", size = 57919603, upload-time = "2025-06-17T23:11:23.207Z" },
     { url = "https://files.pythonhosted.org/packages/af/38/bed4279c2a3407820ed8bcd72dbad43c330ada35f88fafe9952b35abf785/jaxlib-0.6.2-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:bff67b188133ce1f0111c7b163ac321fd646b59ed221ea489063e2e0f85cb967", size = 54300638, upload-time = "2025-06-17T23:11:26.372Z" },
-    { url = "https://files.pythonhosted.org/packages/52/dc/9e35a1dc089ddf3d6be53ef2e6ba4718c5b6c0f90bccc535a20edac0c895/jaxlib-0.6.2-cp313-cp313-manylinux2014_aarch64.whl", hash = "sha256:70498837caf538bd458ff6858c8bfd404db82015aba8f663670197fa9900ff02", size = 79439983, upload-time = "2025-06-17T23:11:30.016Z" },
-    { url = "https://files.pythonhosted.org/packages/34/16/e93f0184b80a4e1ad38c6998aa3a2f7569c0b0152cbae39f7572393eda04/jaxlib-0.6.2-cp313-cp313-manylinux2014_x86_64.whl", hash = "sha256:f94163f14c8fd3ba93ae14b631abacf14cb031bba0b59138869984b4d10375f8", size = 89941720, upload-time = "2025-06-17T23:11:34.62Z" },
     { url = "https://files.pythonhosted.org/packages/06/b9/ea50792ee0333dba764e06c305fe098bce1cb938dcb66fbe2fc47ef5dd02/jaxlib-0.6.2-cp313-cp313-win_amd64.whl", hash = "sha256:b977604cd36c74b174d25ed685017379468138eb747d865f75e466cb273c801d", size = 57919073, upload-time = "2025-06-17T23:11:39.344Z" },
-    { url = "https://files.pythonhosted.org/packages/09/ce/9596391c104a0547fcaf6a8c72078bbae79dbc8e7f0843dc8318f6606328/jaxlib-0.6.2-cp313-cp313t-manylinux2014_aarch64.whl", hash = "sha256:39cf9555f85ae1ce2e2c1a59fc71f2eca4f9867a7cb934fef881ba56b11371d1", size = 79579638, upload-time = "2025-06-17T23:11:43.054Z" },
-    { url = "https://files.pythonhosted.org/packages/10/79/f6e80f7f4cacfc9f03e64ac57ecb856b140de7c2f939b25f8dcf1aff63f9/jaxlib-0.6.2-cp313-cp313t-manylinux2014_x86_64.whl", hash = "sha256:3abd536e44b05fb1657507e3ff1fc3691f99613bae3921ecab9e82f27255f784", size = 90066675, upload-time = "2025-06-17T23:11:47.454Z" },
+]
+
+[[package]]
+name = "jaxlib"
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.13' and sys_platform == 'linux'",
+    "python_full_version < '3.13' and sys_platform == 'linux'",
+    "python_full_version >= '3.13' and sys_platform == 'macOS'",
+    "python_full_version < '3.13' and sys_platform == 'macOS'",
+]
+dependencies = [
+    { name = "ml-dtypes", marker = "sys_platform == 'linux' or sys_platform == 'macOS'" },
+    { name = "numpy", version = "2.1.3", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or sys_platform == 'macOS'" },
+    { name = "scipy", marker = "sys_platform == 'linux' or sys_platform == 'macOS'" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b6/2e/07a5d4d4cdff2acac148530f93e73460b4bf6605cbdd18a5a52933f82f12/jaxlib-0.7.0-cp312-cp312-manylinux2014_aarch64.whl", hash = "sha256:005213b6dcbd20b0bd65580b740255950150b489e1a5306f65d8e49f9114ab85", size = 82536043, upload-time = "2025-07-22T20:31:26.837Z" },
+    { url = "https://files.pythonhosted.org/packages/58/9e/46a2584a98220631813898a01799c86cdaaafaef8b6077e1f56e27ddf85f/jaxlib-0.7.0-cp312-cp312-manylinux2014_x86_64.whl", hash = "sha256:534fb3272b90e2c7f8ed9a4229a69b5e5c19b02fa14516ccc5eef9d01f248546", size = 93123543, upload-time = "2025-07-22T20:31:31.634Z" },
+    { url = "https://files.pythonhosted.org/packages/c9/7d/d378e469a83e59818c981020a628ce4b4b429e76948f95244377ed22e464/jaxlib-0.7.0-cp313-cp313-manylinux2014_aarch64.whl", hash = "sha256:5b7393c8694a17ed522e9553e06791dd76b4789b3448d085d0ed4ffbad77a2e7", size = 82533573, upload-time = "2025-07-22T20:31:43.581Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/83/7ba260095e98a5004af4fdb4315010c445441473cac41afdb973bf212deb/jaxlib-0.7.0-cp313-cp313-manylinux2014_x86_64.whl", hash = "sha256:df31664a53c13a9263bca0e8c39e0380a0ccae0b1c125376df63a480d9cb2087", size = 93122891, upload-time = "2025-07-22T20:31:48.154Z" },
+    { url = "https://files.pythonhosted.org/packages/1b/cf/7fbc9b7dced481b1f4442ee007f42958ba2ab24c787a0b3c95d4db8abd4d/jaxlib-0.7.0-cp313-cp313t-manylinux2014_aarch64.whl", hash = "sha256:a0bc3a08248c0a36913ac8af93f4c632ec111d6ee7ffe7b6dae63d2f2d6233d5", size = 82670248, upload-time = "2025-07-22T20:31:55.887Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/79/787ddad061a38a2338d6797664e5e72c682af86e7c04938e894bc73834d7/jaxlib-0.7.0-cp313-cp313t-manylinux2014_x86_64.whl", hash = "sha256:e6f06c5050803f9d149c3ba4fdf85a62e1dae78a31ecb6f25744004977b492a9", size = 93254916, upload-time = "2025-07-22T20:32:00.662Z" },
 ]
 
 [[package]]
@@ -1196,10 +1255,10 @@ wheels = [
 
 [[package]]
 name = "libtpu"
-version = "0.0.17"
+version = "0.0.19.1"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1e/17/3fe7239155d65be6872ed55bf0516c8de85610df36b009bf708536037b91/libtpu-0.0.17-py3-none-manylinux_2_31_x86_64.whl", hash = "sha256:4963214199e151613874c2b3f45b983bb09a6e4ba43bb028c917323b8caf418b", size = 135216139, upload-time = "2025-06-13T00:23:49.407Z" },
+    { url = "https://files.pythonhosted.org/packages/87/94/2e440fd8de171628cf7af160f080828f9e8437670ea0466ba8a6cbc28d04/libtpu-0.0.19.1-py3-none-manylinux_2_31_x86_64.whl", hash = "sha256:373368791794e2ffa20d48ae522232c3146918e138825fe8f7c29b9eae8544e5", size = 136507259, upload-time = "2025-07-31T00:11:09.216Z" },
 ]
 
 [[package]]
@@ -1323,8 +1382,8 @@ dependencies = [
     { name = "flax" },
     { name = "grain" },
     { name = "huggingface-hub" },
-    { name = "jax", marker = "sys_platform == 'linux' or sys_platform == 'macOS'" },
-    { name = "jax", extra = ["tpu"], marker = "sys_platform == 'linux'" },
+    { name = "jax", version = "0.7.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or sys_platform == 'macOS'" },
+    { name = "jax", version = "0.7.0", source = { registry = "https://pypi.org/simple" }, extra = ["tpu"], marker = "sys_platform == 'linux'" },
     { name = "matplotlib" },
     { name = "ml-collections" },
     { name = "polars" },
@@ -1337,6 +1396,7 @@ dependencies = [
     { name = "tensorflow-datasets" },
     { name = "tensorflow-text" },
     { name = "tf-keras" },
+    { name = "tfp-nightly" },
     { name = "tokenizers" },
     { name = "torch", version = "2.7.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
     { name = "torch", version = "2.7.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
@@ -1353,8 +1413,8 @@ requires-dist = [
     { name = "flax", specifier = ">=0.10.7" },
     { name = "grain", specifier = ">=0.2.11" },
     { name = "huggingface-hub", specifier = ">=0.33.2" },
-    { name = "jax", marker = "sys_platform == 'macOS'", specifier = ">=0.6.2" },
-    { name = "jax", extras = ["tpu"], marker = "sys_platform == 'linux'", specifier = ">=0.6.2" },
+    { name = "jax", marker = "sys_platform == 'macOS'", specifier = ">=0.7.0" },
+    { name = "jax", extras = ["tpu"], marker = "sys_platform == 'linux'", specifier = ">=0.7.0" },
     { name = "matplotlib", specifier = ">=3.10.3" },
     { name = "ml-collections", specifier = ">=1.1.0" },
     { name = "polars", specifier = ">=1.31.0" },
@@ -1367,6 +1427,7 @@ requires-dist = [
     { name = "tensorflow-datasets", specifier = ">=4.9.9" },
     { name = "tensorflow-text", specifier = "==2.19" },
     { name = "tf-keras", specifier = ">=2.19.0" },
+    { name = "tfp-nightly" },
     { name = "tokenizers", specifier = "==0.21.4" },
     { name = "torch", specifier = "==2.7.1", index = "https://download.pytorch.org/whl/cpu" },
     { name = "transformers", specifier = "==4.51.2" },
@@ -1655,8 +1716,10 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "absl-py" },
     { name = "chex" },
-    { name = "jax" },
-    { name = "jaxlib" },
+    { name = "jax", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'macOS'" },
+    { name = "jax", version = "0.7.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or sys_platform == 'macOS'" },
+    { name = "jaxlib", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'macOS'" },
+    { name = "jaxlib", version = "0.7.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or sys_platform == 'macOS'" },
     { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'macOS'" },
     { name = "numpy", version = "2.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13' or sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'macOS'" },
 ]
@@ -1714,7 +1777,8 @@ dependencies = [
     { name = "absl-py" },
     { name = "etils", extra = ["epath", "epy"] },
     { name = "humanize" },
-    { name = "jax" },
+    { name = "jax", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'macOS'" },
+    { name = "jax", version = "0.7.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or sys_platform == 'macOS'" },
     { name = "msgpack" },
     { name = "nest-asyncio" },
     { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'macOS'" },
@@ -2761,6 +2825,24 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a9/71/a6e82b8e8ce04a8ab1ff0560791698b70d1b2dda1a0270f1d69a834e8880/tf_keras-2.19.0.tar.gz", hash = "sha256:b09a407d87a4571ce1e8ca985cfc68483e3d63b2518a5d79a97ad92cb64dbe9c", size = 1261172, upload-time = "2025-03-03T21:24:13.582Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/45/6b/d245122d108a94df5969ee7408ad343af1627730e91478e01ef098976bfa/tf_keras-2.19.0-py3-none-any.whl", hash = "sha256:4f339e800987b39d1548a8c76a7b33b6801a97ec7fcd89c299ec29741f7890bd", size = 1726787, upload-time = "2025-03-03T21:24:11.826Z" },
+]
+
+[[package]]
+name = "tfp-nightly"
+version = "0.26.0.dev20250820"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "absl-py" },
+    { name = "cloudpickle" },
+    { name = "decorator" },
+    { name = "dm-tree" },
+    { name = "gast" },
+    { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'macOS'" },
+    { name = "numpy", version = "2.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13' or sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'macOS'" },
+    { name = "six" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9f/fa/a57e9ec52ff2e8c926f9c53999a936fcf1204902604fdcad1c046a6d8c46/tfp_nightly-0.26.0.dev20250820-py2.py3-none-any.whl", hash = "sha256:cb70ea3b835e5b62190a472f14510c762f1a5fb7a12aa41279c6ca172a3bdbc3", size = 6975547, upload-time = "2025-08-20T08:44:04.277Z" },
 ]
 
 [[package]]
