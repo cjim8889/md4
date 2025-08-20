@@ -22,7 +22,6 @@ from typing import Any, Tuple
 import jax
 from clu import parameter_overview
 from orbax import checkpoint as orbax_checkpoint
-from flax.training import orbax_utils
 
 
 def should_use_partial_loading(config) -> bool:
@@ -236,9 +235,9 @@ def standard_checkpoint_loading(
     if train_iter is not None:
         checkpointed_state["train_iter"] = train_iter
 
-    restore_args = orbax_utils.restore_args_from_target(checkpointed_state)
     checkpointed_state = checkpoint_manager.restore(
-        checkpoint_manager.latest_step(), items=checkpointed_state, restore_kwargs={'restore_args': restore_args}
+        checkpoint_manager.latest_step(),
+        items=checkpointed_state,
     )
 
     loaded_train_state = checkpointed_state["train_state"]

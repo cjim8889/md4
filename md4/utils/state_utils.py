@@ -224,11 +224,15 @@ def create_train_metrics_class():
     logging.info("metric_keys: %s", metric_keys)
     return create_train_metrics_class_from_keys(metric_keys)
 
+def show_pspec(name, x):
+    try:
+        print(name, getattr(x, "sharding", None))
+    except:
+        pass
 
 def create_sharded_train_state(
     config: ml_collections.ConfigDict,
     x_sharding: jax.sharding.NamedSharding,
-    replicated_sharding: jax.sharding.NamedSharding,
     mesh: jax.sharding.Mesh,
     rng: jnp.ndarray,
     input_shape: Sequence[int] | Mapping[str, Sequence[int]],
@@ -275,48 +279,58 @@ def create_sharded_train_state(
         # optax.zero_nans(), # This is more tricky to use when fsdp is enabled
     )
 
-    rules = (
-        ("batch", "data"),
+    axis_rules = (
+        # ("batch", "data"),
         ("ff_mlp", "model"),
         ("attn_qkv", "model"),
         ("attn_o", "model"),
     )
 
-    logical_abstract_variables = jax.eval_shape(
-        functools.partial(_init_fn, model=model, optimizer=optimizer),
-        rng,
-        dummy_input,
-        conditioning,
-    )
-    logical_state_spec = nn.get_partition_spec(logical_abstract_variables)
-    logical_state_sharding = nn.logical_to_mesh_sharding(
-        logical_state_spec, mesh=mesh, rules=rules
-    )
+    # ---- trace shapes and derive sharding under mesh + rules ----
+    with mesh, nn.logical_axis_rules(axis_rules):
+        logical_abstract_state = jax.eval_shape(
+            functools.partial(_init_fn, model=model, optimizer=optimizer),
+            rng, dummy_input, conditioning
+        )
+        logical_state_pspec = nn.get_partition_spec(logical_abstract_state)
+        state_sharding = nn.logical_to_mesh_sharding(
+            logical_state_pspec, mesh=mesh, rules=axis_rules
+        )
 
-    jitted_init_fn = jax.jit(
-        _init_fn,
-        static_argnums=(3, 4),
-        in_shardings=(replicated_sharding, x_sharding, x_sharding),
-        out_shardings=logical_state_sharding,
-    )
+        jitted_init_fn = jax.jit(
+            _init_fn,
+            static_argnums=(3, 4),
+            in_shardings=(None, x_sharding, x_sharding),
+            out_shardings=state_sharding,
+        )
+        initialized_state = jitted_init_fn(rng, dummy_input, conditioning, model, optimizer)
 
-    initialized_state = jitted_init_fn(rng, dummy_input, conditioning, model, optimizer)
+    initialized_state = nn.meta.unbox(initialized_state)
     parameter_overview.log_parameter_overview(
         initialized_state.state, msg="############# state #############"
     )
 
     parameter_overview.log_parameter_overview(
-        nn.meta.unbox(initialized_state.params), msg="############# params #############"
+        initialized_state.params, msg="############# params #############"
     )
 
     metrics_class = create_train_metrics_class()
+
+    jax.tree_util.tree_map_with_path(
+        lambda p, v: show_pspec("/".join(map(str, p)), v),
+        initialized_state.params
+    )
+    jax.tree_util.tree_map_with_path(
+        lambda p, v: show_pspec("/".join(map(str, p)), v),
+        initialized_state.opt_state
+    )
 
     return (
         model,
         optimizer,
         initialized_state,
         metrics_class,
-        logical_state_sharding
+        state_sharding
     )
 
 
