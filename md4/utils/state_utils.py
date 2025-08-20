@@ -310,14 +310,14 @@ def create_sharded_train_state(
 
     metrics_class = create_train_metrics_class()
 
-    jax.tree_util.tree_map_with_path(
-        lambda p, v: show_pspec("/".join(map(str, p)), v),
-        initialized_state.params
-    )
-    jax.tree_util.tree_map_with_path(
-        lambda p, v: show_pspec("/".join(map(str, p)), v),
-        initialized_state.opt_state
-    )
+    # jax.tree_util.tree_map_with_path(
+    #     lambda p, v: show_pspec("/".join(map(str, p)), v),
+    #     initialized_state.params
+    # )
+    # jax.tree_util.tree_map_with_path(
+    #     lambda p, v: show_pspec("/".join(map(str, p)), v),
+    #     initialized_state.opt_state
+    # )
 
     return (
         model,

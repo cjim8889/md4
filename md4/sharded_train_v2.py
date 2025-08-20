@@ -484,7 +484,7 @@ def train_and_evaluate(
     if jax.process_index() == 0:
         hooks += [
             report_progress,
-            # periodic_actions.Profile(num_profile_steps=5, logdir=workdir),
+            periodic_actions.Profile(num_profile_steps=5, logdir=workdir),
         ]
     train_metrics = []
 

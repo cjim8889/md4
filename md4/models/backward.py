@@ -89,6 +89,7 @@ class DiscreteClassifier(nn.Module):
     param_dtype: jnp.dtype = jnp.float32
     use_cross_attention: bool = False
     cross_attention_layers: Optional[int] = None
+    cross_cond_proj_dim: Optional[int] = None
 
     @nn.compact
     def __call__(self, z, t=None, cond=None, cross_conditioning=None, train=False):
@@ -137,6 +138,7 @@ class DiscreteClassifier(nn.Module):
                     param_dtype=self.param_dtype,
                     use_cross_attention=self.use_cross_attention,
                     cross_attention_layers=self.cross_attention_layers,
+                    cross_cond_proj_dim=self.cross_cond_proj_dim,
                 )
                 # [bs, seq_len] -> [bs, seq_len, |V|]
                 net = transformer.Transformer(args)

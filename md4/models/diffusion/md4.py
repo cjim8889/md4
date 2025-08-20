@@ -115,6 +115,7 @@ class MD4(nn.Module):
     param_dtype: jnp.dtype = jnp.float32
     use_cross_attention: bool = False
     cross_attention_layers: Optional[int] = None
+    cross_cond_proj_dim: Optional[int] = None
 
     def setup(self):
         self.noise_schedule = MaskingSchedule(self.data_shape, self.noise_schedule_type)
@@ -164,6 +165,7 @@ class MD4(nn.Module):
             param_dtype=self.param_dtype,
             use_cross_attention=self.use_cross_attention,
             cross_attention_layers=self.cross_attention_layers,
+            cross_cond_proj_dim=self.cross_cond_proj_dim,
         )
 
     def forward_sample(self, x, t):
@@ -213,8 +215,8 @@ class MD4(nn.Module):
             if isinstance(conditioning, dict):
                 # Extract cross-conditioning if present
                 cross_cond = conditioning.get("cross_conditioning", None)
-                cross_cond = cross_cond.reshape(cross_cond.shape[0], -1, self.feature_dim)
-                
+                cross_cond = cross_cond.reshape(cross_cond.shape[0], 64, -1)
+
                 # Process fingerprint conditioning
                 if "fingerprint" in conditioning:
                     _cond = conditioning["fingerprint"]

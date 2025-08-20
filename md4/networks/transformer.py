@@ -65,6 +65,7 @@ class ModelArgs:
     # cross-attention configuration
     use_cross_attention: bool = False
     cross_attention_layers: Optional[int] = None  # Number of layers with cross-attention (from first layer)
+    cross_cond_proj_dim: Optional[int] = None  # Projection dimension for cross-conditioning
 
 
 class RMSNorm(nn.Module):
@@ -276,6 +277,7 @@ class CrossAttention(nn.Module):
     qkv_bias: bool = False
     dtype: jnp.dtype = jnp.float32
     param_dtype: jnp.dtype = jnp.float32
+    cross_cond_dim: Optional[int] = None  # Input dimension for cross-conditioning
 
     def setup(self):
         self._n_kv_heads = self.n_kv_heads if self.n_kv_heads is not None else self.n_heads
@@ -327,10 +329,10 @@ class CrossAttention(nn.Module):
     def __call__(self, x, cross_conditioning, train: bool = False):
         """
         x:                 (bsz, tgt_len, dim)         -- queries come from here
-        cross_conditioning:(bsz, src_len, dim)         -- keys/values come from here
+        cross_conditioning:(bsz, src_len, cross_cond_dim or dim)  -- keys/values come from here
         """
         bsz, tgt_len, _ = x.shape
-        _, src_len, _ = cross_conditioning.shape
+        _, src_len, cross_dim = cross_conditioning.shape
 
         # Project Q from x; K,V from cross_conditioning
         xq = self.wq(x)                                   # (bsz, tgt_len, n_heads*head_dim)
@@ -465,6 +467,7 @@ class TransformerBlock(nn.Module):
                     dropout_rate=args.dropout_rate,
                     dtype=args.dtype,
                     param_dtype=args.param_dtype,
+                    cross_cond_dim=args.cross_cond_proj_dim if args.cross_cond_proj_dim is not None else args.dim,
                 )
 
         if args.depth_scaled_init:
@@ -644,8 +647,10 @@ class Transformer(nn.Module):
         # Process cross-conditioning if provided
         if cross_conditioning is not None:
             # Project cross-conditioning to model dimension if needed
+            # Use cross_cond_proj_dim if specified, otherwise use args.dim
+            proj_dim = args.cross_cond_proj_dim if args.cross_cond_proj_dim is not None else args.dim
             cross_cond_proj = nn.Dense(
-                args.dim,
+                proj_dim,
                 dtype=args.dtype,
                 param_dtype=args.param_dtype,
                 kernel_init=nn.with_logical_partitioning(
