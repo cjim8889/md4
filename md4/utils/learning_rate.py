@@ -1,6 +1,7 @@
-"""Learning rate scheduling utilities using numpy."""
+"""Learning rate scheduling utilities using JAX numpy."""
 
-import numpy as np
+import jax
+import jax.numpy as jnp
 from typing import Any
 from absl import logging
 
@@ -8,7 +9,7 @@ from absl import logging
 def cosine_decay(
     lr: Any, current_step: Any, total_steps: Any
 ) -> Any:
-    """Cosine decay that accepts Python scalars or numpy arrays.
+    """Cosine decay that accepts Python scalars or JAX arrays.
     
     Args:
         lr: Base learning rate
@@ -18,12 +19,13 @@ def cosine_decay(
     Returns:
         Decayed learning rate value
     """
-    current_step = np.asarray(current_step, dtype=np.float32)
-    total_steps = np.maximum(1.0, np.asarray(total_steps, dtype=np.float32))
-    lr = np.asarray(lr, dtype=np.float32)
-    ratio = np.maximum(0.0, current_step / total_steps)
-    mult = 0.5 * (1.0 + np.cos(np.pi * ratio))
-    return mult * lr
+    with jax.default_device(jax.devices("cpu")[0]):
+        current_step = jnp.asarray(current_step, dtype=jnp.float32)
+        total_steps = jnp.maximum(1.0, jnp.asarray(total_steps, dtype=jnp.float32))
+        lr = jnp.asarray(lr, dtype=jnp.float32)
+        ratio = jnp.maximum(0.0, current_step / total_steps)
+        mult = 0.5 * (1.0 + jnp.cos(jnp.pi * ratio))
+        return mult * lr
 
 
 def get_learning_rate(
@@ -70,58 +72,59 @@ def get_learning_rate(
         schedule_type,
     )
 
-    # Handle warmup (gracefully if warmup_steps is None or 0).
-    if warmup_steps is None or warmup_steps <= 0:
-        warmup = 1.0
-        effective_step = step
-        effective_total = num_steps
-    else:
-        warmup = np.minimum(1.0, step / warmup_steps)
-        effective_step = np.maximum(0, step - warmup_steps)
-        effective_total = np.maximum(1, num_steps - warmup_steps)
+    with jax.default_device(jax.devices("cpu")[0]):
+        # Handle warmup (gracefully if warmup_steps is None or 0).
+        if warmup_steps is None or warmup_steps <= 0:
+            warmup = 1.0
+            effective_step = step
+            effective_total = num_steps
+        else:
+            warmup = jnp.minimum(1.0, step / warmup_steps)
+            effective_step = jnp.maximum(0, step - warmup_steps)
+            effective_total = jnp.maximum(1, num_steps - warmup_steps)
 
-    # Allow parameter overrides for cyclic cosine via semi-colon separated kv pairs.
-    schedule_base = schedule_type.split(";")[0]
-    extra_params = schedule_type.split(";")[1:]
-    parsed: dict[str, str] = {}
-    for kv in extra_params:
-        if "=" in kv:
-            k, v = kv.split("=", 1)
-            parsed[k.strip()] = v.strip()
+        # Allow parameter overrides for cyclic cosine via semi-colon separated kv pairs.
+        schedule_base = schedule_type.split(";")[0]
+        extra_params = schedule_type.split(";")[1:]
+        parsed: dict[str, str] = {}
+        for kv in extra_params:
+            if "=" in kv:
+                k, v = kv.split("=", 1)
+                parsed[k.strip()] = v.strip()
 
-    if schedule_base == "cosine":
-        lr = cosine_decay(base_learning_rate, effective_step, effective_total)
-    elif schedule_base == "constant":
-        lr = base_learning_rate
-    elif schedule_base == "cyclic_cosine":
-        # Derive cycle_length (at least 1) and other params.
-        default_cycle = max(1, num_steps // 10)
-        try:
-            cycle_length = int(parsed.get("cycle_length", default_cycle))
-        except ValueError:  # Fall back to default if parsing fails.
-            cycle_length = default_cycle
-        cycle_length = max(1, cycle_length)
+        if schedule_base == "cosine":
+            lr = cosine_decay(base_learning_rate, effective_step, effective_total)
+        elif schedule_base == "constant":
+            lr = base_learning_rate
+        elif schedule_base == "cyclic_cosine":
+            # Derive cycle_length (at least 1) and other params.
+            default_cycle = max(1, num_steps // 10)
+            try:
+                cycle_length = int(parsed.get("cycle_length", default_cycle))
+            except ValueError:  # Fall back to default if parsing fails.
+                cycle_length = default_cycle
+            cycle_length = max(1, cycle_length)
 
-        try:
-            min_lr = float(parsed.get("min_lr", 0.0))
-        except ValueError:
-            min_lr = 0.0
-        try:
-            decay_factor = float(parsed.get("decay_factor", 1.0))
-        except ValueError:
-            decay_factor = 1.0
+            try:
+                min_lr = float(parsed.get("min_lr", 0.0))
+            except ValueError:
+                min_lr = 0.0
+            try:
+                decay_factor = float(parsed.get("decay_factor", 1.0))
+            except ValueError:
+                decay_factor = 1.0
 
-        # Position within current cycle (after warmup region).
-        cycle_index = np.floor_divide(effective_step, cycle_length)
-        pos_in_cycle = np.mod(effective_step, cycle_length)
+            # Position within current cycle (after warmup region).
+            cycle_index = jnp.floor_divide(effective_step, cycle_length)
+            pos_in_cycle = jnp.mod(effective_step, cycle_length)
 
-        # Optionally decay the peak LR each cycle.
-        peak_lr = base_learning_rate * (decay_factor**cycle_index)
+            # Optionally decay the peak LR each cycle.
+            peak_lr = base_learning_rate * (decay_factor**cycle_index)
 
-        # Cosine within the cycle from peak_lr down to min_lr.
-        cosine_ratio = pos_in_cycle / cycle_length
-        lr = min_lr + 0.5 * (peak_lr - min_lr) * (1.0 + np.cos(np.pi * cosine_ratio))
-    else:
-        raise NotImplementedError(f"Unknown schedule type: {schedule_type}")
+            # Cosine within the cycle from peak_lr down to min_lr.
+            cosine_ratio = pos_in_cycle / cycle_length
+            lr = min_lr + 0.5 * (peak_lr - min_lr) * (1.0 + jnp.cos(jnp.pi * cosine_ratio))
+        else:
+            raise NotImplementedError(f"Unknown schedule type: {schedule_type}")
 
-    return np.asarray(lr * warmup, dtype=np.float32)
+        return jnp.asarray(lr * warmup, dtype=jnp.float32)
