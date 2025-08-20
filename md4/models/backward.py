@@ -16,6 +16,7 @@
 """Classifier implementation."""
 
 from collections.abc import Sequence
+from typing import Optional
 
 import flax.linen as nn
 import jax
@@ -86,9 +87,11 @@ class DiscreteClassifier(nn.Module):
     multiple_of: int = 64
     dtype: jnp.dtype = jnp.float32
     param_dtype: jnp.dtype = jnp.float32
+    use_cross_attention: bool = False
+    cross_attention_layers: Optional[int] = None
 
     @nn.compact
-    def __call__(self, z, t=None, cond=None, train=False):
+    def __call__(self, z, t=None, cond=None, cross_conditioning=None, train=False):
         if t is not None:
             # z: [bs, seq_len] or [bs, h, w, c]
             assert jnp.isscalar(t) or t.ndim == 0 or t.ndim == 1
@@ -132,10 +135,12 @@ class DiscreteClassifier(nn.Module):
                     n_embed_classes=self.vocab_size + 1,
                     dtype=self.dtype,
                     param_dtype=self.param_dtype,
+                    use_cross_attention=self.use_cross_attention,
+                    cross_attention_layers=self.cross_attention_layers,
                 )
                 # [bs, seq_len] -> [bs, seq_len, |V|]
                 net = transformer.Transformer(args)
-            logits = net(z, cond=cond, train=train)
+            logits = net(z, cond=cond, cross_conditioning=cross_conditioning, train=train)
         else:
             raise NotImplementedError()
 

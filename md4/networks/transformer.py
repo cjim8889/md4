@@ -62,6 +62,9 @@ class ModelArgs:
     param_dtype: jnp.dtype = jnp.float32
     # rope
     rope_theta: float = 10000.0
+    # cross-attention configuration
+    use_cross_attention: bool = False
+    cross_attention_layers: Optional[int] = None  # Number of layers with cross-attention (from first layer)
 
 
 class RMSNorm(nn.Module):
@@ -265,6 +268,107 @@ class Attention(nn.Module):
             output = self.resid_dropout(output, deterministic=not train)
         return output
 
+class CrossAttention(nn.Module):
+    dim: int
+    n_heads: int
+    n_kv_heads: int | None = None
+    dropout_rate: float = 0.0
+    qkv_bias: bool = False
+    dtype: jnp.dtype = jnp.float32
+    param_dtype: jnp.dtype = jnp.float32
+
+    def setup(self):
+        self._n_kv_heads = self.n_kv_heads if self.n_kv_heads is not None else self.n_heads
+        assert self.n_heads % self._n_kv_heads == 0
+        self.n_rep = self.n_heads // self._n_kv_heads
+        self.head_dim = self.dim // self.n_heads
+
+        # Projections: Q from x, K/V from cross_conditioning
+        self.wq = nn.Dense(
+            self.n_heads * self.head_dim,
+            use_bias=self.qkv_bias,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.initializers.xavier_normal(), (None, "attn_qkv")
+            ),
+        )
+        self.wk = nn.Dense(
+            self._n_kv_heads * self.head_dim,
+            use_bias=self.qkv_bias,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.initializers.xavier_normal(), (None, "attn_qkv")
+            ),
+        )
+        self.wv = nn.Dense(
+            self._n_kv_heads * self.head_dim,
+            use_bias=self.qkv_bias,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.initializers.xavier_normal(), (None, "attn_qkv")
+            ),
+        )
+        self.wo = nn.Dense(
+            self.dim,
+            use_bias=False,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.initializers.xavier_normal(), ("attn_o", None)
+            ),
+        )
+        if self.dropout_rate > 0.0:
+            self.attn_dropout = nn.Dropout(self.dropout_rate)
+            self.resid_dropout = Dropout1d(self.dropout_rate)
+
+    def __call__(self, x, cross_conditioning, train: bool = False):
+        """
+        x:                 (bsz, tgt_len, dim)         -- queries come from here
+        cross_conditioning:(bsz, src_len, dim)         -- keys/values come from here
+        """
+        bsz, tgt_len, _ = x.shape
+        _, src_len, _ = cross_conditioning.shape
+
+        # Project Q from x; K,V from cross_conditioning
+        xq = self.wq(x)                                   # (bsz, tgt_len, n_heads*head_dim)
+        xk = self.wk(cross_conditioning)                  # (bsz, src_len,  n_kv_heads*head_dim)
+        xv = self.wv(cross_conditioning)                  # (bsz, src_len,  n_kv_heads*head_dim)
+
+        xq = xq.reshape(bsz, tgt_len, self.n_heads, self.head_dim)
+        xk = xk.reshape(bsz, src_len, self._n_kv_heads, self.head_dim)
+        xv = xv.reshape(bsz, src_len, self._n_kv_heads, self.head_dim)
+
+        # Grouped multi-query attention: expand shared K/V heads to full head count
+        xk = repeat_kv(xk, self.n_rep)                    # (bsz, src_len,  n_heads, head_dim)
+        xv = repeat_kv(xv, self.n_rep)                    # (bsz, src_len,  n_heads, head_dim)
+
+        # Move heads to batch axis
+        xq = xq.swapaxes(1, 2)                            # (bsz, n_heads, tgt_len, head_dim)
+        xk = xk.swapaxes(1, 2)                            # (bsz, n_heads, src_len, head_dim)
+        xv = xv.swapaxes(1, 2)                            # (bsz, n_heads, src_len, head_dim)
+
+        # Scaled dot-product attention
+        xk_t = xk.swapaxes(2, 3)                          # (bsz, n_heads, head_dim, src_len)
+        scores = jnp.matmul(
+            xq.astype(jnp.float32), xk_t.astype(jnp.float32)
+        ) / math.sqrt(self.head_dim)                      # (bsz, n_heads, tgt_len, src_len)
+
+        attn = nn.softmax(scores, axis=-1).astype(self.dtype)
+        if self.dropout_rate > 0.0:
+            attn = self.attn_dropout(attn, deterministic=not train)
+
+        out = jnp.matmul(attn, xv)                        # (bsz, n_heads, tgt_len, head_dim)
+
+        # Concat heads and project back
+        out = out.swapaxes(1, 2).reshape(bsz, tgt_len, -1)  # (bsz, tgt_len, dim)
+        out = self.wo(out)
+        if self.dropout_rate > 0.0:
+            out = self.resid_dropout(out, deterministic=not train)
+        return out
+
 
 def dense_2d(dense, x):
     x2 = x.reshape(-1, x.shape[-1])  # [B*S, D]
@@ -342,6 +446,27 @@ class TransformerBlock(nn.Module):
             param_dtype=args.param_dtype,
         )
 
+        # Add cross-attention if configured
+        self.use_cross_attention = False
+        if args.use_cross_attention:
+            # Check if this layer should have cross-attention
+            if args.cross_attention_layers is None:
+                # All layers have cross-attention
+                self.use_cross_attention = True
+            elif self.layer_id < args.cross_attention_layers:
+                # Only first N layers have cross-attention
+                self.use_cross_attention = True
+            
+            if self.use_cross_attention:
+                self.cross_attention = CrossAttention(
+                    dim=args.dim,
+                    n_heads=args.n_heads,
+                    n_kv_heads=args.n_kv_heads,
+                    dropout_rate=args.dropout_rate,
+                    dtype=args.dtype,
+                    param_dtype=args.param_dtype,
+                )
+
         if args.depth_scaled_init:
             w_init_scale = 2.0 / args.n_layers
         else:
@@ -359,7 +484,7 @@ class TransformerBlock(nn.Module):
         )
 
     @nn.compact
-    def __call__(self, x, freqs_cos, freqs_sin, cond_params=None, train=False):
+    def __call__(self, x, freqs_cos, freqs_sin, cond_params=None, cross_conditioning=None, train=False):
         if cond_params is not None:
             # Use shared conditioning parameters for all layers
             shift_att, scale_att, gate_att, shift_mlp, scale_mlp, gate_mlp = cond_params
@@ -378,12 +503,31 @@ class TransformerBlock(nn.Module):
                 dtype=self.args.dtype,
                 param_dtype=self.args.param_dtype,
             )
+            # Self-attention
             h = x + gate_att * self.attention(
                 attention_norm(x) * (scale_att + 1.0) + shift_att,
                 freqs_cos,
                 freqs_sin,
                 train=train,
             )
+            
+            # Cross-attention if configured and available
+            if self.use_cross_attention and cross_conditioning is not None:
+                cross_norm = nn.LayerNorm(
+                    epsilon=self.args.norm_eps,
+                    use_bias=False,
+                    use_scale=False,
+                    dtype=self.args.dtype,
+                    param_dtype=self.args.param_dtype,
+                )
+                # Apply cross-attention with same gating as self-attention
+                h = h + gate_att * self.cross_attention(
+                    cross_norm(h) * (scale_att + 1.0) + shift_att,
+                    cross_conditioning,
+                    train=train,
+                )
+            
+            # Feed-forward
             out = h + gate_mlp * self.feed_forward(
                 ffn_norm(h) * (scale_mlp + 1.0) + shift_mlp, train=train
             )
@@ -400,7 +544,20 @@ class TransformerBlock(nn.Module):
                 dtype=self.args.dtype,
                 param_dtype=self.args.param_dtype,
             )
+            # Self-attention
             h = x + self.attention(attention_norm(x), freqs_cos, freqs_sin, train=train)
+            
+            # Cross-attention if configured and available
+            if self.use_cross_attention and cross_conditioning is not None:
+                cross_norm = RMSNorm(
+                    self.args.dim,
+                    eps=self.args.norm_eps,
+                    dtype=self.args.dtype,
+                    param_dtype=self.args.param_dtype,
+                )
+                h = h + self.cross_attention(cross_norm(h), cross_conditioning, train=train)
+            
+            # Feed-forward
             out = h + self.feed_forward(ffn_norm(h), train=train)
 
         return out
@@ -410,7 +567,7 @@ class Transformer(nn.Module):
     args: ModelArgs
 
     @nn.compact
-    def __call__(self, x, cond=None, train=False, output_channels=None):
+    def __call__(self, x, cond=None, cross_conditioning=None, train=False, output_channels=None):
         args = self.args
         if output_channels is None:
             output_channels = args.output_channels
@@ -484,9 +641,24 @@ class Transformer(nn.Module):
             # Split into 6 parameters (shift_att, scale_att, gate_att, shift_mlp, scale_mlp, gate_mlp)
             cond_params = jnp.split(all_cond_params, 6, axis=-1)
 
+        # Process cross-conditioning if provided
+        if cross_conditioning is not None:
+            # Project cross-conditioning to model dimension if needed
+            cross_cond_proj = nn.Dense(
+                args.dim,
+                dtype=args.dtype,
+                param_dtype=args.param_dtype,
+                kernel_init=nn.with_logical_partitioning(
+                    nn.linear.default_kernel_init, ("cross_cond", "hidden")
+                ),
+            )(cross_conditioning)
+        else:
+            cross_cond_proj = cross_conditioning
+
         for layer_id in range(args.n_layers):
             h = TransformerBlock(layer_id, args)(
-                h, freqs_cos, freqs_sin, cond_params=cond_params, train=train
+                h, freqs_cos, freqs_sin, cond_params=cond_params, 
+                cross_conditioning=cross_cond_proj, train=train
             )
 
         if cond is not None:

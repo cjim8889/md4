@@ -28,9 +28,8 @@ import jax
 from ml_collections import config_flags
 import tensorflow.compat.v2 as tf
 
-from md4 import sharded_train
+from md4 import sharded_train_v2
 from md4 import train
-
 
 FLAGS = flags.FLAGS
 
@@ -66,7 +65,7 @@ def main(argv):
                                        FLAGS.workdir, "workdir")
 
   if FLAGS.sharded:
-    sharded_train.train_and_evaluate(FLAGS.config, FLAGS.workdir, FLAGS.olddir)
+    sharded_train_v2.train_and_evaluate(FLAGS.config, FLAGS.workdir, FLAGS.olddir)
   else:
     train.train_and_evaluate(FLAGS.config, FLAGS.workdir, FLAGS.olddir)
 

@@ -55,7 +55,7 @@ def get_conditioning_from_batch(batch, dtype=jnp.float32):
         conditioning["true_fingerprint"] = batch["true_fingerprint"].astype(dtype)
 
     if "fingerprint" in batch:
-        conditioning["fingerprint"] = batch["fingerprint"].astype(dtype)
+        conditioning["cross_conditioning"] = batch["fingerprint"].astype(dtype)
 
     # Handle atom_types
     if "atom_types" in batch:
@@ -87,14 +87,8 @@ def get_dummy_conditioning(config, input_shape, dtype=jnp.float32):
             if config.get("raw_fingerprint_dim", 0) > 0
             else config.fingerprint_dim
         )
-        conditioning["fingerprint"] = jnp.zeros(
+        conditioning["cross_conditioning"] = jnp.zeros(
             (input_shape[0], fingerprint_dim), dtype=dtype
-        )
-
-    # Handle atom types
-    if config.atom_type_size > 0:
-        conditioning["atom_types"] = jnp.zeros(
-            (input_shape[0], config.pad_to_length), dtype="int32"
         )
 
     if (
