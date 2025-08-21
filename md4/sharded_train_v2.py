@@ -32,26 +32,15 @@ from md4.utils import (
     wandb_writer,
 )
 
-# Set up device mesh for FSDP sharding
-device_count = len(jax.devices())
-logging.info(f"Setting up FSDP mesh with {device_count} devices")
-
-# Create mesh based on device count
-if device_count >= 8:
-    # Use 2D mesh for both data and model parallelism
-    mesh_shape = (2, device_count // 2)  # e.g., (2, 4) for 8 devices
-    mesh = jax.make_mesh(mesh_shape, ("data", "model"))
-elif device_count >= 4:
-    # Use 1D mesh for FSDP only
-    mesh = jax.make_mesh((device_count,), ("model",))
-else:
-    # Fallback to single device or small device count
-    mesh = jax.make_mesh((device_count,), ("model",))
-
-logging.info(f"Created mesh: {mesh}")
+def create_device_mesh(config):
+    """Create device mesh based on configuration."""
+    mesh_config = config.mesh_config
+    mesh = jax.make_mesh(mesh_config.mesh_shape, mesh_config.mesh_axis_names)
+    logging.info(f"Created mesh: {mesh}")
+    return mesh
 
 
-def mesh_sharding(pspec: P) -> NamedSharding:
+def mesh_sharding(mesh, pspec: P) -> NamedSharding:
     """Helper function to create NamedSharding from PartitionSpec."""
     return NamedSharding(mesh, pspec)
 
@@ -324,6 +313,9 @@ def train_and_evaluate(
     """
     workdir = epath.Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
+    
+    # Set up device mesh from config
+    mesh = create_device_mesh(config)
 
     rng = utils.get_rng(config.seed)
     logging.info("Using random seed %s.", rng)
@@ -379,7 +371,7 @@ def train_and_evaluate(
     train_iter = iter(train_loader) if is_grain_loader else train_loader
 
     # Initialize sharding
-    data_sharding = mesh_sharding(P("data", None))  # Shard data across data axis
+    data_sharding = mesh_sharding(mesh, P("data", None))  # Shard data across data axis
     state_sharding = None
 
     # Initialize model.
