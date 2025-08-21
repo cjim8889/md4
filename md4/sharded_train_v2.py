@@ -44,7 +44,7 @@ def mesh_sharding(mesh, pspec: P) -> NamedSharding:
     """Helper function to create NamedSharding from PartitionSpec."""
     return NamedSharding(mesh, pspec)
 
-def loss_fn(params, state, rng, model, batch, train=False):
+def loss_fn(params, state, rng, batch, model, train=False):
     """Loss function."""
     rng, sample_rng = jax.random.split(rng)
     rngs = {"sample": sample_rng}
@@ -91,21 +91,43 @@ def merge_metrics(a_tree, b_tree):
     return jax.tree.map(lambda a, b: a + b, a_tree, b_tree)
 
 
+def _reshape_to_microbatches(
+    batch: Mapping[str, jnp.ndarray],
+    num_microbatches: int,
+) -> Mapping[str, jnp.ndarray]:
+    """Reshape leading batch axis -> [M, m, ...] and constrain sharding to P(None,'data',...)."""
+    if num_microbatches is None or num_microbatches <= 1:
+        return batch
+
+    B = next(iter(batch.values())).shape[0]
+    assert B % num_microbatches == 0, "Batch size must be divisible by num_microbatches."
+    m = B // num_microbatches
+
+    def to_mb(x):
+        x = x.reshape((num_microbatches, m) + x.shape[1:])
+        # Keep microbatch axis replicated; inner batch axis remains sharded on 'data'
+        pspec = P(None, "data", *([None] * (x.ndim - 2)))
+        return jax.lax.with_sharding_constraint(x, pspec)
+
+    return jax.tree.map(to_mb, batch)
+
 def train_step(
     train_state: state_utils.TrainState,
     batch: Mapping[str, jnp.ndarray],
     model: nn.Module,
     optimizer: optax.GradientTransformation,
     learning_rate_fn: Callable[[int], float],
-    train_metrics_class: Any,
+    train_metrics_class: metrics.Collection,
     ema_rate: float = 0.0,
     num_microbatches: int | None = None,
 ) -> tuple[state_utils.TrainState, metrics.Collection]:
     """Perform a single training step."""
     logging.info("train_step(batch=%s)", batch)
     rng, new_rng = jax.random.split(train_state.rng)
+    loss_fn_train = functools.partial(loss_fn, model=model, train=True)
+    grad_fn = jax.value_and_grad(loss_fn_train, has_aux=True)
 
-    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+
     if num_microbatches is None or num_microbatches <= 1:
         (loss, (new_state, metrics_dict)), grads = grad_fn(
             train_state.params,
@@ -113,7 +135,6 @@ def train_step(
             rng,
             model,
             batch,
-            train=True,
         )
     else:
         batch_size = next(iter(batch.values())).shape[0]
@@ -127,93 +148,58 @@ def train_step(
             microbatch_size,
         )
 
-        def get_microbatch(
-            batch: Mapping[str, jnp.ndarray], idx: int
-        ) -> Mapping[str, jnp.ndarray]:
-            """Fetch microbatch slice from possibly-packed input data."""
-            offset = idx * microbatch_size
-            length = microbatch_size
-            starts = {k: [offset] + [0] * (b.ndim - 1) for k, b in batch.items()}
-            limits = {k: [length] + list(b.shape[1:]) for k, b in batch.items()}
-            return {
-                k: jax.lax.dynamic_slice(b, starts[k], limits[k])
-                for k, b in batch.items()
-            }
+        # 1) Reshape once; no dynamic_slice on a sharded axis.
+        batch_mb = _reshape_to_microbatches(batch, num_microbatches)
 
-        def metrics_and_grad(loop_cnt, rng, train_state_state):
-            _, mbrng = jax.random.split(rng)
-            mb = get_microbatch(batch, loop_cnt)
+        # 2) Build zeroed templates (dtype/shape match grads & metrics) using eval_shape on one microbatch.
+        mb0 = jax.tree.map(lambda x: x[0], batch_mb)
+        # Shape-only trace; NOTE: model is not an argument here.
+        (out_avals, _grads_avals) = jax.eval_shape(
+            grad_fn, train_state.params, train_state.state, rng, mb0
+        )
+        loss_aval, (_state_aval, metrics_avals) = out_avals
 
-            (loss, (new_state, metrics_dict)), grads = grad_fn(
-                train_state.params,
-                train_state_state,
-                mbrng,
-                model,
-                mb,
-                train=True,
+        # FP32 gradient accumulator (same tree as params)
+        grad_acc0 = jax.tree.map(lambda p: jnp.zeros(p.shape, jnp.float32), train_state.params)
+        metrics0 = jax.tree.map(lambda a: jnp.zeros(a.shape, a.dtype), metrics_avals)
+        loss0 = jnp.zeros(loss_aval.shape, loss_aval.dtype)
+
+        def body(carry, mb):
+            loop_rng, state, grad_acc, metrics_acc, loss_acc = carry
+            loop_rng, mbrng = jax.random.split(loop_rng)
+            (loss, (state_new, mdict)), grads_param_dtype = grad_fn(
+                train_state.params, state, mbrng, mb
             )
-            return loss, metrics_dict, grads, new_state
+            grad_acc    = jax.tree.map(lambda a, g: a + g.astype(jnp.float32), grad_acc, grads_param_dtype)
+            metrics_acc = jax.tree.map(lambda a, b: a + b, metrics_acc, mdict)
+            loss_acc    = loss_acc + loss
+            return (loop_rng, state_new, grad_acc, metrics_acc, loss_acc), None
 
-        def per_microbatch_train_step(loop_cnt, carry):
-            (rng, grad_accum, prev_metrics_dict, prev_loss, train_state_state) = carry
-            loss, metrics_dict, grads, train_state_state = metrics_and_grad(
-                loop_cnt, rng, train_state_state
-            )
-
-            grad_accum = jax.tree.map(jnp.add, grad_accum, grads)
-            loss = jax.tree.map(jnp.add, loss, prev_loss)
-            metrics_dict = jax.lax.cond(
-                loop_cnt == 0,
-                lambda _: metrics_dict,
-                lambda _: merge_metrics(prev_metrics_dict, metrics_dict),
-                None,
-            )
-            return rng, grad_accum, metrics_dict, loss, train_state_state
-
-        # Initialize gradient accumulation loop state.
-        accum_dtype = jnp.float32
-        grad_accum_init = jax.tree.map(
-            lambda x: jnp.zeros(x.shape, accum_dtype), train_state.params
+        (rng_after, new_state, grad_sum_f32, metrics_sum, loss_sum), _ = jax.lax.scan(
+            body, (rng, train_state.state, grad_acc0, metrics0, loss0), batch_mb, unroll=1
         )
-        loss_shape, initial_metrics_shape, _, _ = jax.eval_shape(
-            metrics_and_grad,
-            loop_cnt=0,
-            rng=rng,
-            train_state_state=train_state.state,
-        )
+        _ = rng_after
 
-        initial_metrics = {
-            k: jnp.zeros(shape=v.shape, dtype=v.dtype)
-            for k, v in initial_metrics_shape.items()
-        }
+        inv = 1.0 / float(num_microbatches)
+        loss = loss_sum * inv
+        metrics_dict = jax.tree.map(lambda x: x * inv, metrics_sum)
+        # average grads, then cast back to param dtype for the optimizer step
+        grads = jax.tree.map(lambda p, g: (g * inv).astype(p.dtype), train_state.params, grad_sum_f32)
 
-        initial_loss = jnp.zeros(shape=loss_shape.shape, dtype=loss_shape.dtype)
-        loop_init = (
-            rng,
-            grad_accum_init,
-            initial_metrics,
-            initial_loss,
-            train_state.state,
-        )
-        _, grads, metrics_dict, loss, train_state_state = jax.lax.fori_loop(
-            0, num_microbatches, per_microbatch_train_step, loop_init
-        )
-        loss = loss / num_microbatches
-        metrics_dict = jax.tree.map(lambda x: x / num_microbatches, metrics_dict)
-        new_state = train_state_state
 
-    updates, new_opt_state = optimizer.update(
-        grads, train_state.opt_state, train_state.params
-    )
+    # 4) Optimizer + (optional) EMA
+    updates, new_opt_state = optimizer.update(grads, train_state.opt_state, train_state.params)
     new_params = optax.apply_updates(train_state.params, updates)
+
     if ema_rate > 0.0:
         new_ema_params = jax.tree.map(
-            lambda x, y: x + (1.0 - ema_rate) * (y - x),
+            lambda ema, p: ema + (1.0 - ema_rate) * (p - ema),
             train_state.ema_params,
             new_params,
         )
     else:
         new_ema_params = None
+
     new_train_state = train_state.replace(
         step=train_state.step + 1,
         rng=new_rng,
@@ -224,7 +210,7 @@ def train_step(
     )
 
     new_metrics = train_metrics_class.single_from_model_output(
-        learning_rate=learning_rate_fn(train_state.step),
+        learning_rate=learning_rate_fn(train_state.step),  # lr at start of step (matches your original)
         **metrics_dict,
     )
     return new_train_state, new_metrics
@@ -242,7 +228,7 @@ def eval_step(
     logging.info("eval_step(batch=%s)", batch)
     params = train_state.ema_params if ema_rate > 0.0 else train_state.params
 
-    _, metrics_dict = loss_fn(params, train_state.state, rng, model, batch, train=False)
+    _, metrics_dict = loss_fn(params, train_state.state, rng, batch, model, train=False)
     return eval_metrics_class.single_from_model_output(
         learning_rate=0.0, **metrics_dict
     )
