@@ -1,3 +1,4 @@
+import functools
 import glob
 import multiprocessing as mp
 import os
@@ -15,6 +16,60 @@ from md4.utils.pubchem_worker import process_and_write_shard_tfrecord
 # Heavy imports are now imported conditionally within functions to reduce memory usage
 
 _SENTENCEPIECE_TOKENIZER = "data/sentencepiece_tokenizer.model"
+
+
+def _parse_tfexample_fn(tfrecord, fp_bits=2048):
+    """Parse a single TFRecord example."""
+    # Define feature description based on the features used in dataset creation
+    # Note: fingerprint might be stored as int64 in TFRecord but we want int8
+    # SMILES could be either string (raw SMILES) or tokenized integers depending on tokenizer usage
+    feature_description = {
+        'smiles': tf.io.FixedLenFeature([], tf.string),  # Use VarLenFeature to handle both cases
+        'fingerprint': tf.io.FixedLenFeature([fp_bits], tf.int64),  # Read as int8 directly
+    }
+    
+    # Parse the input tf.train.Example proto using the dictionary above
+    example = tf.io.parse_single_example(tfrecord, feature_description)
+    
+    # Convert sparse tensor to dense for SMILES
+    # example['smiles'] = tf.sparse.to_dense(example['smiles'], default_value='')
+    # example['smiles'] = tf.squeeze(example['smiles'])  # Remove extra dimensions
+    
+    # Convert fingerprint from int64 to int8 to match expected format
+    example['fingerprint'] = tf.cast(example['fingerprint'], tf.int8)
+    
+    return example
+
+
+def create_high_entropy_dataset(tfrecord_pattern, fp_bits=2048, cycle_length=10, block_length=1, 
+                               file_shuffle_buffer=1000, record_shuffle_buffer=2000,
+                               batch_shuffle_buffer=20):
+    """Create a high-entropy dataset from TFRecord files with multiple levels of shuffling."""
+    # First, list all file paths to the sharded tfrecord dataset
+    dataset = tf.data.Dataset.list_files(tfrecord_pattern, shuffle=True)
+    
+    # Make sure to fully shuffle the list of tfrecord files
+    dataset = dataset.shuffle(buffer_size=file_shuffle_buffer, reshuffle_each_iteration=True)
+    
+    # Preprocesses files concurrently and interleaves records from each file into a single, unified dataset
+    dataset = dataset.interleave(
+        tf.data.TFRecordDataset,
+        cycle_length=cycle_length,
+        block_length=block_length,
+        num_parallel_calls=tf.data.AUTOTUNE,
+        deterministic=False  # Important for high entropy
+    )
+    
+    # Parse raw protobufs into structs
+    dataset = dataset.map(
+        functools.partial(_parse_tfexample_fn, fp_bits=fp_bits),
+        num_parallel_calls=tf.data.AUTOTUNE
+    )
+    
+    # Add record-level shuffling for maximum entropy
+    dataset = dataset.shuffle(record_shuffle_buffer, reshuffle_each_iteration=True)
+    
+    return dataset
 
 
 def find_data_files(data_file_pattern):
@@ -217,13 +272,19 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
     # Load SMILES tokenizer
     vocab_size = tokenizer.vocab_size
 
-    # Load Datasets
-    train_split = tfds.split_for_jax_process("train", drop_remainder=True)
-    train_dataset = pubchem_builder.as_dataset(
-        split=train_split,
-        shuffle_files=True,
+    # Create high-entropy datasets using TFRecord pattern loading
+    tfds_data_dir = Path("./data/pubchem_large_text") / config.get("version", "1.0.0")
+    
+    # Define TFRecord patterns for train and validation splits (matching pubchem_worker.py naming)
+    train_pattern = str(tfds_data_dir / "pubchem_large-train.tfrecord-?????-of-?????")
+    validation_pattern = str(tfds_data_dir / "pubchem_large-validation.tfrecord-?????-of-?????")
+    
+    # Check if TFRecord files exist, otherwise fall back to TFDS builder
+    use_high_entropy_loading = (
+        len(glob.glob(train_pattern)) > 0 and 
+        len(glob.glob(validation_pattern)) > 0
     )
-
+    
     def _tokenize_and_truncate(x):
         x["smiles"] = tokenizer.encode(x["smiles"])
         x["smiles"] = x["smiles"][:max_length]
@@ -236,31 +297,90 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         )
         return x
 
-    train_dataset = train_dataset.map(
-        _tokenize_and_truncate,
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
+    if use_high_entropy_loading:
+        print("Using high-entropy TFRecord loading for maximum data diversity...")
+        
+        # Create high-entropy training dataset
+        train_dataset = create_high_entropy_dataset(
+            train_pattern,
+            fp_bits=fp_bits,
+            cycle_length=config.get("cycle_length", 16),
+            block_length=config.get("block_length", 4),
+            file_shuffle_buffer=config.get("file_shuffle_buffer", 1000),
+            record_shuffle_buffer=config.get("record_shuffle_buffer", 10000)
+        )
+        
+        train_dataset = train_dataset.map(
+            _tokenize_and_truncate,
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
 
-    train_dataset = train_dataset.repeat()  # Repeat for continuous training
-    train_dataset = train_dataset.shuffle(batch_size * 8)  # Shuffle with larger buffer
-    train_dataset = train_dataset.batch(batch_size, drop_remainder=True)
-    train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
-    train_dataset = train_dataset.as_numpy_iterator()
+        # Apply multiple levels of shuffling and batching for maximum entropy
+        train_dataset = train_dataset.shuffle(batch_size * 16, reshuffle_each_iteration=True)  # Large shuffle buffer
+        train_dataset = train_dataset.repeat()  # Repeat for continuous training
+        train_dataset = train_dataset.batch(batch_size, drop_remainder=True)
+        train_dataset = train_dataset.shuffle(config.get("batch_shuffle_buffer", 50), reshuffle_each_iteration=True)  # Batch-level shuffling
+        train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
+        train_dataset = train_dataset.as_numpy_iterator()
 
-    validation_split = tfds.split_for_jax_process("validation", drop_remainder=True)
-    eval_dataset = pubchem_builder.as_dataset(
-        split=validation_split,
-        shuffle_files=True,
-    )
-    eval_dataset = eval_dataset.map(
-        _tokenize_and_truncate,
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
-    eval_dataset = eval_dataset.repeat()  # Repeat for continuous evaluation
-    eval_dataset = eval_dataset.shuffle(batch_size * 8)  # Shuffle with larger buffer
-    eval_dataset = eval_dataset.batch(batch_size, drop_remainder=True)
-    eval_dataset = eval_dataset.prefetch(tf.data.AUTOTUNE)
-    eval_dataset = eval_dataset.as_numpy_iterator()
+        # Create high-entropy validation dataset
+        eval_dataset = create_high_entropy_dataset(
+            validation_pattern,
+            fp_bits=fp_bits,
+            cycle_length=config.get("cycle_length", 8),
+            block_length=config.get("block_length", 2),
+            file_shuffle_buffer=config.get("file_shuffle_buffer", 200),
+            record_shuffle_buffer=config.get("record_shuffle_buffer", 2000)
+        )
+        
+        eval_dataset = eval_dataset.map(
+            _tokenize_and_truncate,
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
+        eval_dataset = eval_dataset.shuffle(batch_size * 8, reshuffle_each_iteration=True)  # Shuffle with larger buffer
+        eval_dataset = eval_dataset.repeat()  # Repeat for continuous evaluation
+        eval_dataset = eval_dataset.batch(batch_size, drop_remainder=True)
+        eval_dataset = eval_dataset.shuffle(config.get("batch_shuffle_buffer", 20), reshuffle_each_iteration=True)  # Batch-level shuffling
+        eval_dataset = eval_dataset.prefetch(tf.data.AUTOTUNE)
+        eval_dataset = eval_dataset.as_numpy_iterator()
+        
+    else:
+        print("TFRecord files not found, falling back to TFDS builder with enhanced shuffling...")
+        
+        # Load Datasets using TFDS builder with enhanced shuffling
+        train_split = tfds.split_for_jax_process("train", drop_remainder=True)
+        train_dataset = pubchem_builder.as_dataset(
+            split=train_split,
+            shuffle_files=True,
+        )
+
+        train_dataset = train_dataset.map(
+            _tokenize_and_truncate,
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
+
+        train_dataset = train_dataset.repeat()  # Repeat for continuous training
+        train_dataset = train_dataset.shuffle(batch_size * 16, reshuffle_each_iteration=True)  # Enhanced shuffle buffer
+        train_dataset = train_dataset.batch(batch_size, drop_remainder=True)
+        train_dataset = train_dataset.shuffle(config.get("batch_shuffle_buffer", 50), reshuffle_each_iteration=True)  # Batch-level shuffling
+        train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
+        train_dataset = train_dataset.as_numpy_iterator()
+
+        validation_split = tfds.split_for_jax_process("validation", drop_remainder=True)
+        eval_dataset = pubchem_builder.as_dataset(
+            split=validation_split,
+            shuffle_files=True,
+        )
+        eval_dataset = eval_dataset.map(
+            _tokenize_and_truncate,
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
+        eval_dataset = eval_dataset.repeat()  # Repeat for continuous evaluation
+        eval_dataset = eval_dataset.shuffle(batch_size * 8, reshuffle_each_iteration=True)  # Enhanced shuffle buffer
+        eval_dataset = eval_dataset.batch(batch_size, drop_remainder=True)
+        eval_dataset = eval_dataset.shuffle(config.get("batch_shuffle_buffer", 20), reshuffle_each_iteration=True)  # Batch-level shuffling
+        eval_dataset = eval_dataset.prefetch(tf.data.AUTOTUNE)
+        eval_dataset = eval_dataset.as_numpy_iterator()
 
     info = {
         "fp_radius": fp_radius,
@@ -294,6 +414,12 @@ if __name__ == "__main__":
                 "validation_shards": 4,
                 "num_processes": 128,
                 "include_formula": True,  # Set to True to include molecular formulas
+                # High-entropy loading configuration
+                "cycle_length": 16,  # Number of files to interleave concurrently
+                "block_length": 4,   # Number of consecutive elements from each file
+                "file_shuffle_buffer": 1000,  # File-level shuffle buffer
+                "record_shuffle_buffer": 10000,  # Record-level shuffle buffer
+                "batch_shuffle_buffer": 50,  # Batch-level shuffle buffer
             }
         ),
         seed=42,
