@@ -1,4 +1,6 @@
+import collections
 import functools
+import itertools
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -32,6 +34,23 @@ from md4.utils import (
     wandb_writer,
 )
 
+
+def prefetch_to_mesh(iterator, size: int, data_sharding: NamedSharding):
+    queue = collections.deque()
+
+    def _prefetch(xs):
+        return jax.device_put(xs, data_sharding)
+
+    def enqueue(n):  # Enqueues *up to* `n` elements from the iterator.
+        for data in itertools.islice(iterator, n):
+            queue.append(jax.tree_util.tree_map(_prefetch, data))
+
+    enqueue(size)  # Fill up the buffer.
+    while queue:
+        yield queue.popleft()
+        enqueue(1)
+
+
 def create_device_mesh(config):
     """Create device mesh based on configuration."""
     mesh_config = config.mesh_config
@@ -43,6 +62,7 @@ def create_device_mesh(config):
 def mesh_sharding(mesh, pspec: P) -> NamedSharding:
     """Helper function to create NamedSharding from PartitionSpec."""
     return NamedSharding(mesh, pspec)
+
 
 def loss_fn(params, state, rng, batch, model, train=False):
     """Loss function."""
@@ -100,7 +120,9 @@ def _reshape_to_microbatches(
         return batch
 
     B = next(iter(batch.values())).shape[0]
-    assert B % num_microbatches == 0, "Batch size must be divisible by num_microbatches."
+    assert B % num_microbatches == 0, (
+        "Batch size must be divisible by num_microbatches."
+    )
     m = B // num_microbatches
 
     def to_mb(x):
@@ -110,6 +132,7 @@ def _reshape_to_microbatches(
         return jax.lax.with_sharding_constraint(x, pspec)
 
     return jax.tree.map(to_mb, batch)
+
 
 def train_step(
     train_state: state_utils.TrainState,
@@ -127,13 +150,11 @@ def train_step(
     loss_fn_train = functools.partial(loss_fn, model=model, train=True)
     grad_fn = jax.value_and_grad(loss_fn_train, has_aux=True)
 
-
     if num_microbatches is None or num_microbatches <= 1:
         (loss, (new_state, metrics_dict)), grads = grad_fn(
             train_state.params,
             train_state.state,
             rng,
-            model,
             batch,
         )
     else:
@@ -160,7 +181,9 @@ def train_step(
         loss_aval, (_state_aval, metrics_avals) = out_avals
 
         # FP32 gradient accumulator (same tree as params)
-        grad_acc0 = jax.tree.map(lambda p: jnp.zeros(p.shape, jnp.float32), train_state.params)
+        grad_acc0 = jax.tree.map(
+            lambda p: jnp.zeros(p.shape, jnp.float32), train_state.params
+        )
         metrics0 = jax.tree.map(lambda a: jnp.zeros(a.shape, a.dtype), metrics_avals)
         loss0 = jnp.zeros(loss_aval.shape, loss_aval.dtype)
 
@@ -170,13 +193,18 @@ def train_step(
             (loss, (state_new, mdict)), grads_param_dtype = grad_fn(
                 train_state.params, state, mbrng, mb
             )
-            grad_acc    = jax.tree.map(lambda a, g: a + g.astype(jnp.float32), grad_acc, grads_param_dtype)
+            grad_acc = jax.tree.map(
+                lambda a, g: a + g.astype(jnp.float32), grad_acc, grads_param_dtype
+            )
             metrics_acc = jax.tree.map(lambda a, b: a + b, metrics_acc, mdict)
-            loss_acc    = loss_acc + loss
+            loss_acc = loss_acc + loss
             return (loop_rng, state_new, grad_acc, metrics_acc, loss_acc), None
 
         (rng_after, new_state, grad_sum_f32, metrics_sum, loss_sum), _ = jax.lax.scan(
-            body, (rng, train_state.state, grad_acc0, metrics0, loss0), batch_mb, unroll=1
+            body,
+            (rng, train_state.state, grad_acc0, metrics0, loss0),
+            batch_mb,
+            unroll=1,
         )
         _ = rng_after
 
@@ -184,11 +212,14 @@ def train_step(
         loss = loss_sum * inv
         metrics_dict = jax.tree.map(lambda x: x * inv, metrics_sum)
         # average grads, then cast back to param dtype for the optimizer step
-        grads = jax.tree.map(lambda p, g: (g * inv).astype(p.dtype), train_state.params, grad_sum_f32)
-
+        grads = jax.tree.map(
+            lambda p, g: (g * inv).astype(p.dtype), train_state.params, grad_sum_f32
+        )
 
     # 4) Optimizer + (optional) EMA
-    updates, new_opt_state = optimizer.update(grads, train_state.opt_state, train_state.params)
+    updates, new_opt_state = optimizer.update(
+        grads, train_state.opt_state, train_state.params
+    )
     new_params = optax.apply_updates(train_state.params, updates)
 
     if ema_rate > 0.0:
@@ -210,7 +241,9 @@ def train_step(
     )
 
     new_metrics = train_metrics_class.single_from_model_output(
-        learning_rate=learning_rate_fn(train_state.step),  # lr at start of step (matches your original)
+        learning_rate=learning_rate_fn(
+            train_state.step
+        ),  # lr at start of step (matches your original)
         **metrics_dict,
     )
     return new_train_state, new_metrics
@@ -299,7 +332,7 @@ def train_and_evaluate(
     """
     workdir = epath.Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
-    
+
     # Set up device mesh from config
     mesh = create_device_mesh(config)
 
@@ -360,6 +393,13 @@ def train_and_evaluate(
     data_sharding = mesh_sharding(mesh, P("data", None))  # Shard data across data axis
     state_sharding = None
 
+    # Initialize prefetching
+    train_iter = prefetch_to_mesh(train_iter, size=4, data_sharding=data_sharding)
+    eval_loaders = jax.tree.map(
+        lambda x: prefetch_to_mesh(x, size=4, data_sharding=data_sharding),
+        eval_loaders,
+    )
+
     # Initialize model.
     rng, model_rng = jax.random.split(rng)
     data_shape = input_pipeline.get_data_shape(config)
@@ -384,7 +424,10 @@ def train_and_evaluate(
     # Get both save and load checkpoint managers
     save_checkpoint_manager, load_checkpoint_manager = (
         checkpoint_utils.get_checkpoint_managers(
-            config, workdir, olddir, is_grain_loader=False  # Not using grain anymore
+            config,
+            workdir,
+            olddir,
+            is_grain_loader=False,  # Not using grain anymore
         )
     )
 
@@ -400,7 +443,7 @@ def train_and_evaluate(
                 train_state=train_state,
                 train_iter=None,  # No train_iter since not using grain
                 checkpoint_manager=load_checkpoint_manager,
-                state_sharding=state_sharding
+                state_sharding=state_sharding,
             )
 
     logging.info("Batch Size: %s", config.batch_size)

@@ -69,7 +69,7 @@ def get_config() -> config_dict.ConfigDict:
 
     config.num_heads = 8
     config.n_kv_heads = 4
-    config.mlp_type = "swiglu"
+    config.mlp_type = "glu"
     config.depth_scaled_init = True
     config.cond_type = "adaln_zero"
     
@@ -91,9 +91,9 @@ def get_config() -> config_dict.ConfigDict:
     # num_epochs.
     config.num_train_steps = 2_000_000
     # Evaluates for a full epoch if num_eval_steps==-1.
-    config.num_eval_steps = 1000
-    config.batch_size = 1920
-    config.num_microbatches = 3
+    config.num_eval_steps = 100
+    config.batch_size = 640
+    config.num_microbatches = 1
     config.per_device_batch_size = -1
     # If batches should be added to evaluate the entire dataset.
     config.eval_pad_last_batch = False

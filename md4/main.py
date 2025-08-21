@@ -19,9 +19,30 @@ This file is intentionally kept short. The majority for logic is in libraries
 than can be easily tested and imported in Colab.
 """
 
+import os
+import sys
+
+# Add parent directory to Python path
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
+os.environ["XLA_FLAGS"] = (
+    "--xla_gpu_triton_gemm_any=True --xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_use_memcpy_local_p2p=true"
+)
+os.environ.update(
+    {
+        "NCCL_LL128_BUFFSIZE": "-2",
+        "NCCL_LL_BUFFSIZE": "-2",
+        "NCCL_PROTO": "SIMPLE,LL,LL128",
+        "NCCL_NVLS_ENABLE": "1",
+    }
+)
+
 from absl import app
 from absl import flags
 from absl import logging
+
 # Required import to setup work units when running through XManager.
 from clu import platform
 import jax
@@ -34,7 +55,8 @@ from md4 import train
 FLAGS = flags.FLAGS
 
 config_flags.DEFINE_config_file(
-    "config", None, "Training configuration.", lock_config=True)
+    "config", None, "Training configuration.", lock_config=True
+)
 flags.DEFINE_string("workdir", None, "Work unit directory.")
 flags.DEFINE_string("olddir", None, "Old checkpoint directory for partial loading.")
 flags.DEFINE_boolean("sharded", False, "Whether to use sharded training.")
@@ -43,35 +65,38 @@ flags.mark_flags_as_required(["config", "workdir"])
 
 
 def main(argv):
-  del argv
+    del argv
 
-  tf.enable_v2_behavior()
-  # Hide any GPUs form TensorFlow. Otherwise TF might reserve memory and make
-  # it unavailable to JAX.
-  tf.config.experimental.set_visible_devices([], "GPU")
+    tf.enable_v2_behavior()
+    # Hide any GPUs form TensorFlow. Otherwise TF might reserve memory and make
+    # it unavailable to JAX.
+    tf.config.experimental.set_visible_devices([], "GPU")
 
-  if FLAGS.jax_backend_target:
-    logging.info("Using JAX backend target %s", FLAGS.jax_backend_target)
-    jax_xla_backend = ("None" if FLAGS.jax_xla_backend is None else
-                       FLAGS.jax_xla_backend)
-    logging.info("Using JAX XLA backend %s", jax_xla_backend)
+    if FLAGS.jax_backend_target:
+        logging.info("Using JAX backend target %s", FLAGS.jax_backend_target)
+        jax_xla_backend = (
+            "None" if FLAGS.jax_xla_backend is None else FLAGS.jax_xla_backend
+        )
+        logging.info("Using JAX XLA backend %s", jax_xla_backend)
 
-  logging.info("JAX process: %d / %d", jax.process_index(), jax.process_count())
-  logging.info("JAX devices: %r", jax.devices())
+    logging.info("JAX process: %d / %d", jax.process_index(), jax.process_count())
+    logging.info("JAX devices: %r", jax.devices())
 
-  platform.work_unit().set_task_status(f"process_index: {jax.process_index()}, "
-                                       f"process_count: {jax.process_count()}")
-  platform.work_unit().create_artifact(platform.ArtifactType.DIRECTORY,
-                                       FLAGS.workdir, "workdir")
+    platform.work_unit().set_task_status(
+        f"process_index: {jax.process_index()}, process_count: {jax.process_count()}"
+    )
+    platform.work_unit().create_artifact(
+        platform.ArtifactType.DIRECTORY, FLAGS.workdir, "workdir"
+    )
 
-  if FLAGS.sharded:
-    sharded_train_v2.train_and_evaluate(FLAGS.config, FLAGS.workdir, FLAGS.olddir)
-  else:
-    train.train_and_evaluate(FLAGS.config, FLAGS.workdir, FLAGS.olddir)
+    if FLAGS.sharded:
+        sharded_train_v2.train_and_evaluate(FLAGS.config, FLAGS.workdir, FLAGS.olddir)
+    else:
+        train.train_and_evaluate(FLAGS.config, FLAGS.workdir, FLAGS.olddir)
 
 
 if __name__ == "__main__":
-  # Provide access to --jax_backend_target and --jax_xla_backend flags.
-  jax.config.config_with_absl()
-  run_main = app.run
-  run_main(main)
+    # Provide access to --jax_backend_target and --jax_xla_backend flags.
+    jax.config.config_with_absl()
+    run_main = app.run
+    run_main(main)
