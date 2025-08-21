@@ -20,6 +20,30 @@ import flax.linen as nn
 from md4.models import utils as model_utils
 
 
+def get_default_logical_axis_rules():
+    """Get default logical axis rules for model sharding.
+    
+    Returns:
+        List of tuples mapping logical axis names to physical mesh axis names.
+    """
+    return [
+        ('batch', 'data'),
+        ('hidden', 'model'),
+        ('attn_qkv', 'model'),
+        ('attn_o', 'model'),
+        ('ff_mlp', 'model'),
+        ('embed_vocab', 'model'),
+        ('input_embed', 'model'),
+        ('cross_attn', 'model'),
+        ('cond', 'model'),
+        ('cond_input', 'model'),
+        ('cond_hidden', 'model'),
+        ('cond_output', 'model'),
+        ('vocab', 'model'),
+        # leave sequence/time unsharded
+    ]
+
+
 @flax.struct.dataclass
 class TrainState:
     """State of the model and the training.
@@ -273,22 +297,18 @@ def create_sharded_train_state(
         # optax.zero_nans(), # This is more tricky to use when fsdp is enabled
     )
 
-    axis_rules = (
-        # ("batch", "data"),
-        ("ff_mlp", "model"),
-        ("attn_qkv", "model"),
-        ("attn_o", "model"),
-    )
+    # Get logical axis rules from config, with fallback to defaults
+    logical_axis_rules = getattr(config, 'logical_axis_rules', get_default_logical_axis_rules())
 
     # ---- trace shapes and derive sharding under mesh + rules ----
-    with mesh, nn.logical_axis_rules(axis_rules):
+    with mesh, nn.logical_axis_rules(logical_axis_rules):
         logical_abstract_state = jax.eval_shape(
             functools.partial(_init_fn, model=model, optimizer=optimizer),
             rng, dummy_input, conditioning
         )
         logical_state_pspec = nn.get_partition_spec(logical_abstract_state)
         state_sharding = nn.logical_to_mesh_sharding(
-            logical_state_pspec, mesh=mesh, rules=axis_rules
+            logical_state_pspec, mesh=mesh, rules=logical_axis_rules
         )
 
         jitted_init_fn = jax.jit(

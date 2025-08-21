@@ -65,7 +65,7 @@ class ModelArgs:
     # cross-attention configuration
     use_cross_attention: bool = False
     cross_attention_layers: Optional[int] = None  # Number of layers with cross-attention (from first layer)
-    cross_cond_proj_dim: Optional[int] = None  # Projection dimension for cross-conditioning
+    cross_attention_proj_dim: Optional[int] = None  # Projection dimension for cross-attention
 
 
 class RMSNorm(nn.Module):
@@ -470,7 +470,7 @@ class TransformerBlock(nn.Module):
                     dropout_rate=args.dropout_rate,
                     dtype=args.dtype,
                     param_dtype=args.param_dtype,
-                    cross_cond_dim=args.cross_cond_proj_dim if args.cross_cond_proj_dim is not None else args.dim,
+                    cross_cond_dim=args.cross_attention_proj_dim if args.cross_attention_proj_dim is not None else args.dim,
                 )
 
         if args.depth_scaled_init:
@@ -655,14 +655,14 @@ class Transformer(nn.Module):
         # Process cross-conditioning if provided
         if cross_conditioning is not None:
             # Project cross-conditioning to model dimension if needed
-            # Use cross_cond_proj_dim if specified, otherwise use args.dim
-            proj_dim = args.cross_cond_proj_dim if args.cross_cond_proj_dim is not None else args.dim
+            # Use cross_attention_proj_dim if specified, otherwise use args.dim
+            proj_dim = args.cross_attention_proj_dim if args.cross_attention_proj_dim is not None else args.dim
             cross_cond_proj = nn.Dense(
                 proj_dim,
                 dtype=args.dtype,
                 param_dtype=args.param_dtype,
                 kernel_init=nn.with_logical_partitioning(
-                    nn.linear.default_kernel_init, ("cross_cond", "hidden")
+                    nn.linear.default_kernel_init, ("cross_attn", "hidden")
                 ),
             )(cross_conditioning)
         else:

@@ -115,7 +115,7 @@ class MD4(nn.Module):
     param_dtype: jnp.dtype = jnp.float32
     use_cross_attention: bool = False
     cross_attention_layers: Optional[int] = None
-    cross_cond_proj_dim: Optional[int] = None
+    cross_attention_proj_dim: Optional[int] = None
 
     def setup(self):
         self.noise_schedule = MaskingSchedule(self.data_shape, self.noise_schedule_type)
@@ -151,7 +151,7 @@ class MD4(nn.Module):
             param_dtype=self.param_dtype,
             use_cross_attention=self.use_cross_attention,
             cross_attention_layers=self.cross_attention_layers,
-            cross_cond_proj_dim=self.cross_cond_proj_dim,
+            cross_attention_proj_dim=self.cross_attention_proj_dim,
         )
 
     def forward_sample(self, x, t):

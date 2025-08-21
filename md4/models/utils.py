@@ -61,7 +61,7 @@ def get_model(config: ml_collections.ConfigDict):
             param_dtype=config.get("param_dtype", jnp.float32),
             use_cross_attention=config.get("use_cross_attention", False),
             cross_attention_layers=config.get("cross_attention_layers", None),
-            cross_cond_proj_dim=config.get("cross_cond_proj_dim", None),
+            cross_attention_proj_dim=config.get("cross_attention_proj_dim", None),
         )
     elif config.model_type == "genmd4":
         return genmd4.GenMD4(
