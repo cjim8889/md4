@@ -116,6 +116,7 @@ class MD4(nn.Module):
     use_cross_attention: bool = False
     cross_attention_layers: Optional[int] = None
     cross_attention_proj_dim: Optional[int] = None
+    cross_conditioning_seq_length: int = 64
 
     def setup(self):
         self.noise_schedule = MaskingSchedule(self.data_shape, self.noise_schedule_type)
@@ -201,7 +202,8 @@ class MD4(nn.Module):
             if isinstance(conditioning, dict):
                 # Extract cross-conditioning if present
                 cross_cond = conditioning.get("cross_conditioning", None)
-                cross_cond = cross_cond.reshape(cross_cond.shape[0], 64, -1)
+                if cross_cond is not None:
+                    cross_cond = cross_cond.reshape(cross_cond.shape[0], self.cross_conditioning_seq_length, -1)
 
                 # Process fingerprint conditioning
                 if "fingerprint" in conditioning:

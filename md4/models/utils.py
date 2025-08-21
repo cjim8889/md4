@@ -62,6 +62,7 @@ def get_model(config: ml_collections.ConfigDict):
             use_cross_attention=config.get("use_cross_attention", False),
             cross_attention_layers=config.get("cross_attention_layers", None),
             cross_attention_proj_dim=config.get("cross_attention_proj_dim", None),
+            cross_conditioning_seq_length=config.get("cross_conditioning_seq_length", 64),
         )
     elif config.model_type == "genmd4":
         return genmd4.GenMD4(
