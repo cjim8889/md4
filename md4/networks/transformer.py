@@ -189,7 +189,7 @@ class Attention(nn.Module):
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             kernel_init=nn.with_logical_partitioning(
-                nn.initializers.xavier_normal(), (None, "attn_qkv")
+                nn.initializers.xavier_normal(), ("hidden", "attn_qkv")
             )
         )
         self.wk = nn.Dense(
@@ -198,7 +198,7 @@ class Attention(nn.Module):
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             kernel_init=nn.with_logical_partitioning(
-                nn.initializers.xavier_normal(), (None, "attn_qkv")
+                nn.initializers.xavier_normal(), ("hidden", "attn_qkv")
             )
         )
         self.wv = nn.Dense(
@@ -207,13 +207,13 @@ class Attention(nn.Module):
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             kernel_init=nn.with_logical_partitioning(
-                nn.initializers.xavier_normal(), (None, "attn_qkv")
+                nn.initializers.xavier_normal(), ("hidden", "attn_qkv")
             )
         )
         self.wo = nn.Dense(
             self.dim, use_bias=False, dtype=self.dtype, param_dtype=self.param_dtype,
             kernel_init=nn.with_logical_partitioning(
-                nn.initializers.xavier_normal(), ("attn_o", None)
+                nn.initializers.xavier_normal(), ("attn_o", "hidden")
             )
         )
         if self.dropout_rate > 0.0:
@@ -223,9 +223,12 @@ class Attention(nn.Module):
     def __call__(self, x, freqs_cos, freqs_sin, train=False):
         bsz, seqlen, _ = x.shape
 
-        # x = nn.with_logical_constraint(
-        #     x, ("batch", None, "hidden")
-        # )
+        x = nn.with_logical_constraint(
+            x, ("batch", None, "hidden")
+        )
+
+        freqs_cos = nn.with_logical_constraint(freqs_cos, (None, 'hidden'))
+        freqs_sin = nn.with_logical_constraint(freqs_sin, (None, 'hidden'))
 
         # QKV
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
@@ -292,7 +295,7 @@ class CrossAttention(nn.Module):
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             kernel_init=nn.with_logical_partitioning(
-                nn.initializers.xavier_normal(), (None, "attn_qkv")
+                nn.initializers.xavier_normal(), ("hidden", "attn_qkv")
             ),
         )
         self.wk = nn.Dense(
@@ -301,7 +304,7 @@ class CrossAttention(nn.Module):
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             kernel_init=nn.with_logical_partitioning(
-                nn.initializers.xavier_normal(), (None, "attn_qkv")
+                nn.initializers.xavier_normal(), ("hidden", "attn_qkv")
             ),
         )
         self.wv = nn.Dense(
@@ -310,7 +313,7 @@ class CrossAttention(nn.Module):
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             kernel_init=nn.with_logical_partitioning(
-                nn.initializers.xavier_normal(), (None, "attn_qkv")
+                nn.initializers.xavier_normal(), ("hidden", "attn_qkv")
             ),
         )
         self.wo = nn.Dense(
@@ -319,7 +322,7 @@ class CrossAttention(nn.Module):
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             kernel_init=nn.with_logical_partitioning(
-                nn.initializers.xavier_normal(), ("attn_o", None)
+                nn.initializers.xavier_normal(), ("attn_o", "hidden")
             ),
         )
         if self.dropout_rate > 0.0:
@@ -582,7 +585,7 @@ class Transformer(nn.Module):
                 dtype=args.dtype,
                 param_dtype=args.param_dtype,
                 embedding_init=nn.with_logical_partitioning(
-                    nn.linear.default_embed_init, ("embed_vocab", "embed")
+                    nn.linear.default_embed_init, ("embed_vocab", "hidden")
                 ),
             )(x)
             if args.dropout_rate > 0.0:
@@ -593,7 +596,7 @@ class Transformer(nn.Module):
                 dtype=args.dtype,
                 param_dtype=args.param_dtype,
                 kernel_init=nn.with_logical_partitioning(
-                    nn.linear.default_kernel_init, ("input_embed", "embed")
+                    nn.linear.default_kernel_init, ("input_embed", "hidden")
                 ),
             )(x)
 
@@ -619,6 +622,9 @@ class Transformer(nn.Module):
                             use_bias=True,
                             dtype=args.dtype,
                             param_dtype=args.param_dtype,
+                            kernel_init=nn.with_logical_partitioning(
+                                nn.linear.default_kernel_init, ('cond', 'hidden')
+                            ),
                         ),
                     ]
                 )
@@ -629,7 +635,9 @@ class Transformer(nn.Module):
                         nn.Dense(
                             6 * args.dim,  # Same parameters shared by all layers
                             use_bias=True,
-                            kernel_init=nn.initializers.zeros,
+                            kernel_init=nn.with_logical_partitioning(
+                                nn.linear.default_kernel_init, ('cond', 'hidden')
+                            ),
                             bias_init=nn.initializers.zeros,
                             dtype=args.dtype,
                             param_dtype=args.param_dtype,
@@ -684,6 +692,9 @@ class Transformer(nn.Module):
                             use_bias=True,
                             dtype=jnp.float32,
                             param_dtype=jnp.float32,
+                            kernel_init=nn.with_logical_partitioning(
+                                nn.linear.default_kernel_init, ('cond', 'hidden')
+                            ),
                         ),
                     ]
                 )
@@ -694,7 +705,9 @@ class Transformer(nn.Module):
                         nn.Dense(
                             2 * args.dim,
                             use_bias=True,
-                            kernel_init=nn.initializers.zeros,
+                            kernel_init=nn.with_logical_partitioning(
+                                nn.initializers.zeros, ('cond', 'hidden')
+                            ),
                             bias_init=nn.initializers.zeros,
                             dtype=args.dtype,
                             param_dtype=jnp.float32,
@@ -709,7 +722,9 @@ class Transformer(nn.Module):
             logits = nn.Dense(
                 output_channels,
                 use_bias=False,
-                kernel_init=nn.initializers.zeros,
+                kernel_init=nn.with_logical_partitioning(
+                    nn.initializers.zeros, ('hidden', 'vocab')
+                ),
                 dtype=jnp.float32,
                 param_dtype=jnp.float32,
             )(output_norm(h) * (scale_out + 1) + shift_out)
@@ -720,7 +735,9 @@ class Transformer(nn.Module):
             logits = nn.Dense(
                 features=output_channels,
                 use_bias=False,
-                kernel_init=nn.initializers.zeros,
+                kernel_init=nn.with_logical_partitioning(
+                    nn.initializers.zeros, ('hidden', 'vocab')
+                ),
                 dtype=jnp.float32,
                 param_dtype=jnp.float32,
             )(h)

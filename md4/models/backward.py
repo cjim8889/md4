@@ -60,8 +60,23 @@ class CondEmbedding(nn.Module):
             cond = temb
         else:
             cond = jnp.concatenate([temb, cond], axis=-1)
-        cond = nn.swish(nn.Dense(features=n_embd * 4, name="dense0", dtype=self.dtype, param_dtype=self.param_dtype)(cond))
-        cond = nn.Dense(n_embd, dtype=self.dtype, param_dtype=self.param_dtype)(cond)
+        cond = nn.swish(nn.Dense(
+            features=n_embd * 4, 
+            name="dense0", 
+            dtype=self.dtype, 
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.linear.default_kernel_init, ('cond_input', 'cond_hidden')
+            )
+        )(cond))
+        cond = nn.Dense(
+            n_embd, 
+            dtype=self.dtype, 
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.linear.default_kernel_init, ('cond_hidden', 'cond_output')
+            )
+        )(cond)
         return cond
 
 
@@ -101,7 +116,15 @@ class DiscreteClassifier(nn.Module):
 
         if z.ndim == 2:
             if self.outside_embed:
-                z = nn.Embed(self.vocab_size + 1, self.feature_dim, dtype=self.dtype, param_dtype=self.param_dtype)(z)
+                z = nn.Embed(
+                    self.vocab_size + 1, 
+                    self.feature_dim, 
+                    dtype=self.dtype, 
+                    param_dtype=self.param_dtype,
+                    embedding_init=nn.with_logical_partitioning(
+                        nn.linear.default_embed_init, ('vocab', 'hidden')
+                    )
+                )(z)
             if self.model_sharding:
                 args = sharded_transformer.ModelArgs(
                     dim=self.feature_dim * self.num_heads,

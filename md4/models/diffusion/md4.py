@@ -120,8 +120,6 @@ class MD4(nn.Module):
     def setup(self):
         self.noise_schedule = MaskingSchedule(self.data_shape, self.noise_schedule_type)
 
-        if self.classes > 0:
-            self.cond_embeddings = nn.Embed(self.classes, self.feature_dim, dtype=self.dtype, param_dtype=self.param_dtype)
         if self.fingerprint_dim > 0:
             if self.fingerprint_adapter:
                 self.fp_adapter = FingerprintAdapter(
@@ -130,18 +128,6 @@ class MD4(nn.Module):
                     dtype=self.dtype,
                     param_dtype=self.param_dtype,
                 )
-
-            # Use configurable layers if provided, otherwise use default
-            # if self.fingerprint_mlp_layers:
-            #     mlp_features = list(self.fingerprint_mlp_layers)
-            # else:
-            #     mlp_features = [self.fingerprint_dim // 2, self.feature_dim * 2, self.feature_dim, self.feature_dim]
-            
-            # self.cond_embeddings = SimpleMLP(
-            #     features=mlp_features,
-            #     dtype=self.dtype,
-            #     param_dtype=self.param_dtype,
-            # )
 
         self.classifier = backward.DiscreteClassifier(
             n_layers=self.n_layers,
