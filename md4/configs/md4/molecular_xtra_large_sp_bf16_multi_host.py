@@ -122,7 +122,7 @@ def get_config() -> config_dict.ConfigDict:
     # Device mesh configuration for distributed training
     config.mesh_config = config_dict.ConfigDict()
     config.mesh_config.mesh_shape = (32, )  # Mesh shape, e.g., (2, 4) for 8 devices
-    config.mesh_config.mesh_axis_names = ("model", "data")  # Names for mesh axes
+    config.mesh_config.mesh_axis_names = ("data", )  # Names for mesh axes
     
     # Global array multiplier for make_global_array function
     # This should be the size of the model axis (first dimension in mesh_shape)
