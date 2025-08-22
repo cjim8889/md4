@@ -249,12 +249,12 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
     batch_size = config.get("batch_size", 512)
     
     # Adjust batch size for multi-host environments
-    # if config.get("initialize_multihost", False):
-    #     # In multi-host mode, each process should handle batch_size // num_processes
-    #     process_batch_size = (batch_size // jax.process_count()) * config.get("process_batch_size_multiplier", 1)
-    #     print(f"Multi-host detected: using process batch size {process_batch_size} (total: {batch_size})")
-    # else:
-    process_batch_size = batch_size
+    if config.get("initialize_multihost", False):
+        # In multi-host mode, each process should handle batch_size // num_processes
+        process_batch_size = (batch_size // jax.process_count()) * config.get("process_batch_size_multiplier", 1)
+        print(f"Multi-host detected: using process batch size {process_batch_size} (total: {batch_size})")
+    else:
+        process_batch_size = batch_size
 
     tokenizer = SentencePieceTokenizer(
         model_path=tokenizer_path,
@@ -322,12 +322,12 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         )
         
         # Add process-specific data sharding for multi-host
-        # if config.get("initialize_multihost", False):
-        #     # Shard the dataset across processes
-        #     train_dataset = train_dataset.shard(
-        #         num_shards=jax.process_count(),
-        #         index=jax.process_index()
-        #     )
+        if config.get("initialize_multihost", False):
+            # Shard the dataset across processes
+            train_dataset = train_dataset.shard(
+                num_shards=jax.process_count(),
+                index=jax.process_index()
+            )
         
         train_dataset = train_dataset.map(
             _tokenize_and_truncate,
@@ -353,12 +353,12 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         )
         
         # Add process-specific data sharding for multi-host
-        # if config.get("initialize_multihost", False):
-        #     # Shard the dataset across processes
-        #     eval_dataset = eval_dataset.shard(
-        #         num_shards=jax.process_count(),
-        #         index=jax.process_index()
-        #     )
+        if config.get("initialize_multihost", False):
+            # Shard the dataset across processes
+            eval_dataset = eval_dataset.shard(
+                num_shards=jax.process_count(),
+                index=jax.process_index()
+            )
         
         eval_dataset = eval_dataset.map(
             _tokenize_and_truncate,
@@ -387,7 +387,7 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         )
 
         train_dataset = train_dataset.repeat()  # Repeat for continuous training
-        train_dataset = train_dataset.shuffle(batch_size * 16, reshuffle_each_iteration=True)  # Enhanced shuffle buffer
+        train_dataset = train_dataset.shuffle(batch_size * 64, reshuffle_each_iteration=True)  # Enhanced shuffle buffer
         train_dataset = train_dataset.batch(batch_size, drop_remainder=True)
         train_dataset = train_dataset.shuffle(config.get("batch_shuffle_buffer", 50), reshuffle_each_iteration=True)  # Batch-level shuffling
         train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)

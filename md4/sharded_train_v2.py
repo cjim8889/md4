@@ -263,14 +263,6 @@ class EvalMetrics(metrics.Collection):
     eval_loss_prior = metrics.Average.from_output("loss_prior")
     eval_loss_recon = metrics.Average.from_output("loss_recon")
 
-def _shift_slice(idx: tuple, dim: int, offset: int) -> tuple:
-    # shift a single slice by `offset` on dimension `dim`
-    idx = list(idx)
-    s = idx[dim]
-    if isinstance(s, slice):
-        idx[dim] = slice(s.start - offset, s.stop - offset, s.step)
-    return tuple(idx)
-
 def make_global_array_data_only(
     data,                                   # numpy/jax array (global or host-local)
     global_shape: tuple[int, ...],
@@ -280,20 +272,24 @@ def make_global_array_data_only(
 ) -> jax.Array:
     if data_sharding is None:
         return data
+    
+    return jax.make_array_from_process_local_data(
+        data_sharding, data, global_shape
+    )
 
-    pspec = data_sharding.spec
-    # --- Contract: only 'data' or None appear in the PartitionSpec ---
-    if any(ax not in (None, 'data') for ax in pspec):
-        raise ValueError(f"Only data-axis sharding supported, got {pspec!r}")
-    if 'data' not in pspec:
-        # nothing is sharded -> pure replication
-        return jax.device_put(data, data_sharding)
+    # pspec = data_sharding.spec
+    # # --- Contract: only 'data' or None appear in the PartitionSpec ---
+    # if any(ax not in (None, 'data') for ax in pspec):
+    #     raise ValueError(f"Only data-axis sharding supported, got {pspec!r}")
+    # if 'data' not in pspec:
+    #     # nothing is sharded -> pure replication
+    #     return jax.device_put(data, data_sharding)
 
-    data_dim = pspec.index('data')
+    # data_dim = pspec.index('data')
 
-    # Easiest/safest path when every host sees the full global array:
-    if data_is_global:
-        return jax.device_put(data, data_sharding)
+    # # Easiest/safest path when every host sees the full global array:
+    # if data_is_global:
+    #     return jax.device_put(data, data_sharding)
 
     raise NotImplementedError("Host-local sharding not implemented.")
     # # Host-local path: use the index map for this host's addressable devices.
