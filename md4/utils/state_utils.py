@@ -13,7 +13,7 @@ import ml_collections
 import optax
 from absl import logging
 from clu import metrics, parameter_overview
-from flax import traverse_util
+from jax.experimental import multihost_utils
 import flax.linen as nn
 
 
@@ -321,11 +321,12 @@ def create_sharded_train_state(
 
     initialized_state = nn.meta.unbox(initialized_state)
     parameter_overview.log_parameter_overview(
-        initialized_state.state, msg="############# state #############"
+        initialized_state.state, msg="############# state #############", jax_logging_process=0
     )
 
+    gathered_params = multihost_utils.process_allgather(initialized_state.params)
     parameter_overview.log_parameter_overview(
-        initialized_state.params, msg="############# params #############"
+        gathered_params, msg="############# params #############", jax_logging_process=0
     )
 
     metrics_class = create_train_metrics_class()
