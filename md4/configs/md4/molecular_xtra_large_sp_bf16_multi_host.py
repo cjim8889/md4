@@ -123,6 +123,10 @@ def get_config() -> config_dict.ConfigDict:
     config.mesh_config = config_dict.ConfigDict()
     config.mesh_config.mesh_shape = (2, 8)  # Mesh shape, e.g., (2, 4) for 8 devices
     config.mesh_config.mesh_axis_names = ("model", "data")  # Names for mesh axes
+    
+    # Global array multiplier for make_global_array function
+    # This should be the size of the model axis (first dimension in mesh_shape)
+    config.global_array_multiplier = config.mesh_config.mesh_shape[0]  # model axis size = 2
 
     # Logical sharding configuration
     # Maps logical axis names (used in nn.with_logical_partitioning) to physical mesh axes

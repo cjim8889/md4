@@ -263,23 +263,14 @@ class EvalMetrics(metrics.Collection):
     eval_loss_prior = metrics.Average.from_output("loss_prior")
     eval_loss_recon = metrics.Average.from_output("loss_recon")
 
-def make_global_array(data: jax.Array, global_shape: tuple, data_sharding: NamedSharding | None, is_multihost: bool = False) -> jax.Array:
+def make_global_array(data: jax.Array, global_shape: tuple, data_sharding: NamedSharding | None, multiplier: int = 1, is_multihost: bool = False) -> jax.Array:
     if data_sharding is None:
         return data
 
     if not is_multihost:
         return jax.device_put(data, data_sharding)
 
-    mesh = data_sharding.mesh
-    
-    # Calculate per_device_batch considering model axis replication
-    # When mesh has model axis, data is replicated across model devices
-    model_axis_size = 1
-    if 'model' in mesh.axis_names:
-        model_axis_index = mesh.axis_names.index('model')
-        model_axis_size = mesh.shape[model_axis_index]
-    
-    per_device_batch = (data.shape[0] // jax.local_device_count()) * model_axis_size
+    per_device_batch = (data.shape[0] // jax.local_device_count()) * multiplier
 
     local_arrays = [
         jax.device_put(
@@ -313,7 +304,7 @@ def evaluate(
 
             batch = jax.tree.map(
                 lambda x: make_global_array(
-                    x, global_shape=(config.batch_size, *x.shape[1:]), data_sharding=data_sharding, is_multihost=config.get("initialize_multihost", False)
+                    x, global_shape=(config.batch_size, *x.shape[1:]), data_sharding=data_sharding, multiplier=config.get("global_array_multiplier", 1), is_multihost=config.get("initialize_multihost", False)
                 ), batch_raw
             )
 
@@ -540,7 +531,7 @@ def train_and_evaluate(
 
                     batch = jax.tree.map(
                         lambda x: make_global_array(
-                            x, global_shape=(config.batch_size, *x.shape[1:]), data_sharding=data_sharding, is_multihost=config.get("initialize_multihost", False)
+                            x, global_shape=(config.batch_size, *x.shape[1:]), data_sharding=data_sharding, multiplier=config.get("global_array_multiplier", 1), is_multihost=config.get("initialize_multihost", False)
                         ), batch_raw
                     )
 
@@ -593,7 +584,7 @@ def train_and_evaluate(
                             
                             dummy_batch = jax.tree.map(
                                 lambda x: make_global_array(
-                                    x, global_shape=(config.batch_size, *x.shape[1:]), data_sharding=data_sharding, is_multihost=config.get("initialize_multihost", False)
+                                    x, global_shape=(config.batch_size, *x.shape[1:]), data_sharding=data_sharding, multiplier=config.get("global_array_multiplier", 1), is_multihost=config.get("initialize_multihost", False)
                                 ), dummy_batch_raw
                             )
                             
