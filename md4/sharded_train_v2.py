@@ -2,10 +2,10 @@ import functools
 from collections.abc import Callable, Mapping
 from typing import Any
 
+import flax
 import flax.linen as nn
 import grain.python as grain
 import jax
-import flax
 import jax.numpy as jnp
 import ml_collections
 import numpy as np
@@ -13,11 +13,10 @@ import optax
 from absl import logging
 from clu import metric_writers, metrics, periodic_actions
 from etils import epath
-from jax.experimental import checkify
+from jax.experimental import checkify, multihost_utils
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 from orbax import checkpoint as orbax_checkpoint
-
 
 from md4 import (
     input_pipeline,
@@ -33,6 +32,7 @@ from md4.utils import (
     wandb_writer,
 )
 
+
 def create_device_mesh(config):
     """Create device mesh based on configuration."""
     mesh_config = config.mesh_config
@@ -44,6 +44,7 @@ def create_device_mesh(config):
 def mesh_sharding(mesh, pspec: P) -> NamedSharding:
     """Helper function to create NamedSharding from PartitionSpec."""
     return NamedSharding(mesh, pspec)
+
 
 def loss_fn(params, state, rng, batch, model, train=False):
     """Loss function."""
@@ -101,7 +102,9 @@ def _reshape_to_microbatches(
         return batch
 
     B = next(iter(batch.values())).shape[0]
-    assert B % num_microbatches == 0, "Batch size must be divisible by num_microbatches."
+    assert B % num_microbatches == 0, (
+        "Batch size must be divisible by num_microbatches."
+    )
     m = B // num_microbatches
 
     def to_mb(x):
@@ -111,6 +114,7 @@ def _reshape_to_microbatches(
         return jax.lax.with_sharding_constraint(x, pspec)
 
     return jax.tree.map(to_mb, batch)
+
 
 def train_step(
     train_state: state_utils.TrainState,
@@ -127,7 +131,6 @@ def train_step(
     rng, new_rng = jax.random.split(train_state.rng)
     loss_fn_train = functools.partial(loss_fn, model=model, train=True)
     grad_fn = jax.value_and_grad(loss_fn_train, has_aux=True)
-
 
     if num_microbatches is None or num_microbatches <= 1:
         (loss, (new_state, metrics_dict)), grads = grad_fn(
@@ -160,7 +163,9 @@ def train_step(
         loss_aval, (_state_aval, metrics_avals) = out_avals
 
         # FP32 gradient accumulator (same tree as params)
-        grad_acc0 = jax.tree.map(lambda p: jnp.zeros(p.shape, jnp.float32), train_state.params)
+        grad_acc0 = jax.tree.map(
+            lambda p: jnp.zeros(p.shape, jnp.float32), train_state.params
+        )
         metrics0 = jax.tree.map(lambda a: jnp.zeros(a.shape, a.dtype), metrics_avals)
         loss0 = jnp.zeros(loss_aval.shape, loss_aval.dtype)
 
@@ -170,24 +175,32 @@ def train_step(
             (loss, (state_new, mdict)), grads_param_dtype = grad_fn(
                 train_state.params, state, mbrng, mb
             )
-            grad_acc    = jax.tree.map(lambda a, g: a + g.astype(jnp.float32), grad_acc, grads_param_dtype)
+            grad_acc = jax.tree.map(
+                lambda a, g: a + g.astype(jnp.float32), grad_acc, grads_param_dtype
+            )
             metrics_acc = jax.tree.map(lambda a, b: a + b, metrics_acc, mdict)
-            loss_acc    = loss_acc + loss
+            loss_acc = loss_acc + loss
             return (loop_rng, state_new, grad_acc, metrics_acc, loss_acc), None
 
         (_, new_state, grad_sum_f32, metrics_sum, loss_sum), _ = jax.lax.scan(
-            body, (rng, train_state.state, grad_acc0, metrics0, loss0), batch_mb, unroll=1
+            body,
+            (rng, train_state.state, grad_acc0, metrics0, loss0),
+            batch_mb,
+            unroll=1,
         )
 
         inv = 1.0 / float(num_microbatches)
         _ = loss_sum * inv  # loss used for gradient computation
         metrics_dict = jax.tree.map(lambda x: x * inv, metrics_sum)
         # average grads, then cast back to param dtype for the optimizer step
-        grads = jax.tree.map(lambda p, g: (g * inv).astype(p.dtype), train_state.params, grad_sum_f32)
-
+        grads = jax.tree.map(
+            lambda p, g: (g * inv).astype(p.dtype), train_state.params, grad_sum_f32
+        )
 
     # 4) Optimizer + (optional) EMA
-    updates, new_opt_state = optimizer.update(grads, train_state.opt_state, train_state.params)
+    updates, new_opt_state = optimizer.update(
+        grads, train_state.opt_state, train_state.params
+    )
     new_params = optax.apply_updates(train_state.params, updates)
 
     if ema_rate > 0.0:
@@ -209,7 +222,9 @@ def train_step(
     )
 
     new_metrics = train_metrics_class.single_from_model_output(
-        learning_rate=learning_rate_fn(train_state.step),  # lr at start of step (matches your original)
+        learning_rate=learning_rate_fn(
+            train_state.step
+        ),  # lr at start of step (matches your original)
         **metrics_dict,
     )
     return new_train_state, new_metrics
@@ -266,12 +281,10 @@ def evaluate(
         for step, batch_raw in enumerate(iter(eval_loader)):
             rng, sub_rng = jax.random.split(rng)
             # Apply sharding to batch with multi-host support
-            if (config and config.get("initialize_multihost", False)):
+            if config and config.get("initialize_multihost", False):
                 # Use process-local data and create global arrays for multi-host
                 batch = jax.tree.map(
-                    lambda x: jax.make_array_from_process_local_data(
-                        data_sharding, x
-                    ),
+                    lambda x: jax.make_array_from_process_local_data(data_sharding, x),
                     batch_raw,
                 )
             else:
@@ -310,13 +323,15 @@ def train_and_evaluate(
     # Initialize multi-host JAX if enabled
     if config.get("initialize_multihost", False):
         jax.distributed.initialize()
-        logging.info(f"JAX distributed initialized. Process {jax.process_index()}/{jax.process_count()}")
+        logging.info(
+            f"JAX distributed initialized. Process {jax.process_index()}/{jax.process_count()}"
+        )
         logging.info(f"Local devices: {jax.local_devices()}")
         logging.info(f"Global devices: {len(jax.devices())}")
-    
+
     workdir = epath.Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
-    
+
     # Set up device mesh from config
     mesh = create_device_mesh(config)
 
@@ -399,9 +414,7 @@ def train_and_evaluate(
 
     # Set up checkpointing with preemption tolerance
     checkpoint_manager, load_checkpoint_manager = (
-        checkpoint_utils.get_checkpoint_managers(
-            config, workdir, olddir
-        )
+        checkpoint_utils.get_checkpoint_managers(config, workdir, olddir)
     )
 
     # Restore from checkpoint if available
@@ -409,7 +422,7 @@ def train_and_evaluate(
     if load_checkpoint_manager.latest_step() is not None:
         start_step = load_checkpoint_manager.latest_step()
         logging.info(f"Restoring from step {start_step}")
-        
+
         # Check if we should use partial loading
         if partial_load_utils.should_use_partial_loading(config):
             logging.error("Partial Loading is not supported for fsdp")
@@ -420,7 +433,7 @@ def train_and_evaluate(
                 train_state=train_state,
                 train_iter=None,
                 checkpoint_manager=load_checkpoint_manager,
-                state_sharding=state_sharding
+                state_sharding=state_sharding,
             )
 
     logging.info("Batch Size: %s", config.batch_size)
@@ -487,7 +500,9 @@ def train_and_evaluate(
     train_metrics = []
 
     # Use the restored step or start from 0
-    initial_step = max(int(train_state.step), start_step if start_step is not None else 0)
+    initial_step = max(
+        int(train_state.step), start_step if start_step is not None else 0
+    )
     eval_metrics_cpu = None
 
     # Run training within mesh context
@@ -585,8 +600,17 @@ def train_and_evaluate(
                                 conditioning,
                             )
 
-                            # Get samples to CPU for decoding - samples are already global arrays in multi-host
-                            all_samples = jax.device_get(samples)
+                            # Get samples to CPU for decoding - handle multi-host properly
+                            if config.get("initialize_multihost", False):
+                                # In multi-host mode, use process_allgather to collect samples from all processes
+                                all_samples = (
+                                    multihost_utils.process_allgather(
+                                        samples
+                                    )
+                                )
+                            else:
+                                # Single-host: use regular device_get
+                                all_samples = jax.device_get(samples)
 
                             # Only decode and calculate metrics on the main process to avoid redundant work
                             if config.task_type == "text" and jax.process_index() == 0:
@@ -633,10 +657,12 @@ def train_and_evaluate(
                         ),
                         force=is_last_step,
                     )
-                
+
                 # Check for preemption and handle gracefully
                 if checkpoint_manager.reached_preemption(step):
-                    logging.info(f"Preemption detected at step {step}. Waiting for checkpointing to finish.")
+                    logging.info(
+                        f"Preemption detected at step {step}. Waiting for checkpointing to finish."
+                    )
                     checkpoint_manager.wait_until_finished()
                     logging.info("Checkpointing completed. Exiting gracefully.")
                     return
