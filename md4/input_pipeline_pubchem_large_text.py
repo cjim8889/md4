@@ -16,6 +16,7 @@ from md4.utils.pubchem_worker import process_and_write_shard_tfrecord
 
 # Heavy imports are now imported conditionally within functions to reduce memory usage
 
+
 _SENTENCEPIECE_TOKENIZER = "data/sentencepiece_tokenizer.model"
 
 
@@ -54,7 +55,7 @@ def create_high_entropy_dataset(tfrecord_pattern, fp_bits=2048, cycle_length=10,
         cycle_length=cycle_length,
         block_length=block_length,
         num_parallel_calls=tf.data.AUTOTUNE,
-        deterministic=False  # Important for high entropy
+        deterministic=True  # Important for high entropy
     )
     
     # Parse raw protobufs into structs
@@ -248,12 +249,12 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
     batch_size = config.get("batch_size", 512)
     
     # Adjust batch size for multi-host environments
-    if config.get("initialize_multihost", False):
-        # In multi-host mode, each process should handle batch_size // num_processes
-        process_batch_size = batch_size // jax.process_count()
-        print(f"Multi-host detected: using process batch size {process_batch_size} (total: {batch_size})")
-    else:
-        process_batch_size = batch_size
+    # if config.get("initialize_multihost", False):
+    #     # In multi-host mode, each process should handle batch_size // num_processes
+    #     process_batch_size = (batch_size // jax.process_count()) * config.get("process_batch_size_multiplier", 1)
+    #     print(f"Multi-host detected: using process batch size {process_batch_size} (total: {batch_size})")
+    # else:
+    process_batch_size = batch_size
 
     tokenizer = SentencePieceTokenizer(
         model_path=tokenizer_path,
@@ -321,12 +322,12 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         )
         
         # Add process-specific data sharding for multi-host
-        if config.get("initialize_multihost", False):
-            # Shard the dataset across processes
-            train_dataset = train_dataset.shard(
-                num_shards=jax.process_count(),
-                index=jax.process_index()
-            )
+        # if config.get("initialize_multihost", False):
+        #     # Shard the dataset across processes
+        #     train_dataset = train_dataset.shard(
+        #         num_shards=jax.process_count(),
+        #         index=jax.process_index()
+        #     )
         
         train_dataset = train_dataset.map(
             _tokenize_and_truncate,
@@ -352,12 +353,12 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         )
         
         # Add process-specific data sharding for multi-host
-        if config.get("initialize_multihost", False):
-            # Shard the dataset across processes
-            eval_dataset = eval_dataset.shard(
-                num_shards=jax.process_count(),
-                index=jax.process_index()
-            )
+        # if config.get("initialize_multihost", False):
+        #     # Shard the dataset across processes
+        #     eval_dataset = eval_dataset.shard(
+        #         num_shards=jax.process_count(),
+        #         index=jax.process_index()
+        #     )
         
         eval_dataset = eval_dataset.map(
             _tokenize_and_truncate,

@@ -295,24 +295,25 @@ def make_global_array_data_only(
     if data_is_global:
         return jax.device_put(data, data_sharding)
 
-    # Host-local path: use the index map for this host's addressable devices.
-    idx_map = data_sharding.addressable_devices_indices_map(global_shape)
+    raise NotImplementedError("Host-local sharding not implemented.")
+    # # Host-local path: use the index map for this host's addressable devices.
+    # idx_map = data_sharding.addressable_devices_indices_map(global_shape)
 
-    # Compute the offset (global -> host-local) along the data dimension.
-    starts = [idx[data_dim].start for idx in idx_map.values() if isinstance(idx[data_dim], slice)]
-    host_offset = min(starts) if starts else 0
+    # # Compute the offset (global -> host-local) along the data dimension.
+    # starts = [idx[data_dim].start for idx in idx_map.values() if isinstance(idx[data_dim], slice)]
+    # host_offset = min(starts) if starts else 0
 
-    local_arrays = []
-    for dev, gidx in idx_map.items():
-        lidx = _shift_slice(gidx, data_dim, host_offset)
-        shard = np.asarray(data[lidx])
-        local_arrays.append(jax.device_put(shard, dev))
+    # local_arrays = []
+    # for dev, gidx in idx_map.items():
+    #     lidx = _shift_slice(gidx, data_dim, host_offset)
+    #     shard = np.asarray(data[lidx])
+    #     local_arrays.append(jax.device_put(shard, dev))
 
-    return jax.make_array_from_single_device_arrays(
-        shape=global_shape,
-        sharding=data_sharding,
-        arrays=local_arrays,
-    )
+    # return jax.make_array_from_single_device_arrays(
+    #     shape=global_shape,
+    #     sharding=data_sharding,
+    #     arrays=local_arrays,
+    # )
 
 def evaluate(
     jit_eval_step: Any,
@@ -333,7 +334,7 @@ def evaluate(
 
             batch = jax.tree.map(
                 lambda x: make_global_array_data_only(
-                    x, global_shape=(config.batch_size, *x.shape[1:]), data_sharding=data_sharding, data_is_global=not config.get("initialize_multihost", False)
+                    x, global_shape=(config.batch_size, *x.shape[1:]), data_sharding=data_sharding, data_is_global=True
                 ), batch_raw
             )
 
@@ -560,7 +561,7 @@ def train_and_evaluate(
 
                     batch = jax.tree.map(
                         lambda x: make_global_array_data_only(
-                            x, global_shape=(config.batch_size, *x.shape[1:]), data_sharding=data_sharding, data_is_global=not config.get("initialize_multihost", False)
+                            x, global_shape=(config.batch_size, *x.shape[1:]), data_sharding=data_sharding, data_is_global=True
                         ), batch_raw
                     )
 
@@ -613,7 +614,7 @@ def train_and_evaluate(
                             
                             dummy_batch = jax.tree.map(
                                 lambda x: make_global_array_data_only(
-                                    x, global_shape=(config.batch_size, *x.shape[1:]), data_sharding=data_sharding, data_is_global=not config.get("initialize_multihost", False)
+                                    x, global_shape=(config.batch_size, *x.shape[1:]), data_sharding=data_sharding, data_is_global=True
                                 ), dummy_batch_raw
                             )
                             

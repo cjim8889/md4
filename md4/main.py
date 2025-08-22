@@ -57,6 +57,7 @@ def main(argv):
     # Hide any GPUs form TensorFlow. Otherwise TF might reserve memory and make
     # it unavailable to JAX.
     tf.config.experimental.set_visible_devices([], "GPU")
+    tf.random.set_seed(42)
 
     platform.work_unit().create_artifact(
         platform.ArtifactType.DIRECTORY, FLAGS.workdir, "workdir"
