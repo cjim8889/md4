@@ -121,8 +121,8 @@ def get_config() -> config_dict.ConfigDict:
     
     # Device mesh configuration for distributed training
     config.mesh_config = config_dict.ConfigDict()
-    config.mesh_config.mesh_shape = (16, )  # Mesh shape, e.g., (2, 4) for 8 devices
-    config.mesh_config.mesh_axis_names = ("data",)  # Names for mesh axes
+    config.mesh_config.mesh_shape = (2, 8)  # Mesh shape, e.g., (2, 4) for 8 devices
+    config.mesh_config.mesh_axis_names = ("model", "data")  # Names for mesh axes
 
     # Logical sharding configuration
     # Maps logical axis names (used in nn.with_logical_partitioning) to physical mesh axes
@@ -132,9 +132,9 @@ def get_config() -> config_dict.ConfigDict:
     config.logical_axis_rules = [
         ('batch', 'data'),           # Batch dimension -> data parallel
         # ('hidden', 'model'),         # Hidden/embedding dimensions -> model parallel
-        # ('attn_qkv', 'model'),      # Attention Q/K/V projections -> model parallel
-        # ('attn_o', 'model'),        # Attention output projection -> model parallel
-        # ('ff_mlp', 'model'),        # Feed-forward MLP layers -> model parallel
+        ('attn_qkv', 'model'),      # Attention Q/K/V projections -> model parallel
+        ('attn_o', 'model'),        # Attention output projection -> model parallel
+        ('ff_mlp', 'model'),        # Feed-forward MLP layers -> model parallel
         # ('embed_vocab', 'model'),   # Vocabulary embeddings -> model parallel
         # ('input_embed', 'model'),   # Input embeddings -> model parallel
         # ('cross_attn', 'model'),    # Cross-attention projections -> model parallel
