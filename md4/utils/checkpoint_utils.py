@@ -9,7 +9,16 @@ def get_checkpoint_manager(
     create: bool = True,
 ) -> orbax_checkpoint.CheckpointManager:
     """Create a checkpoint manager with preemption tolerance."""
-    checkpoint_dir = epath.Path(workdir) / "checkpoints"
+    # Use checkpoint_dir from config if specified, otherwise default to workdir/checkpoints
+    if hasattr(config, 'checkpoint_dir') and config.checkpoint_dir and isinstance(config.checkpoint_dir, str):
+        checkpoint_dir = epath.Path(config.checkpoint_dir)
+    else:
+        checkpoint_dir = epath.Path(workdir) / "checkpoints"
+    
+    # Ensure checkpoint_every_steps is an integer
+    checkpoint_every_steps = config.get("checkpoint_every_steps", 10000)
+    if not isinstance(checkpoint_every_steps, int):
+        checkpoint_every_steps = 10000
     
     return orbax_checkpoint.CheckpointManager(
         checkpoint_dir,
@@ -18,7 +27,7 @@ def get_checkpoint_manager(
             best_fn=lambda x: x.get("validation_loss", x.get("loss", float('inf'))),
             best_mode="min",
             max_to_keep=20,
-            save_interval_steps=config.get("checkpoint_every_steps", 10000),
+            save_interval_steps=checkpoint_every_steps,
         ),
     )
 

@@ -254,6 +254,7 @@ def evaluate(
     eval_loader: grain.DataLoader,
     num_eval_steps: int = -1,
     data_sharding: NamedSharding | None = None,
+    config: ml_collections.ConfigDict | None = None,
 ):
     """Evaluate the model on the given dataset (legacy pmap version)."""
     logging.info("Starting evaluation.")
@@ -262,11 +263,21 @@ def evaluate(
         # Use `iter` to reset the eval_loader before each evaluation.
         for step, batch_raw in enumerate(iter(eval_loader)):
             rng, sub_rng = jax.random.split(rng)
-            # Apply sharding to batch
-            batch = jax.tree.map(
-                lambda x: jax.device_put(x, data_sharding) if data_sharding else x,
-                batch_raw,
-            )
+            # Apply sharding to batch with multi-host support
+            if (config and config.get("initialize_multihost", False)):
+                # Use process-local data and create global arrays for multi-host
+                batch = jax.tree.map(
+                    lambda x: jax.make_array_from_process_local_data(
+                        data_sharding, x
+                    ),
+                    batch_raw,
+                )
+            else:
+                # Single-host or no sharding: use regular device_put
+                batch = jax.tree.map(
+                    lambda x: jax.device_put(x, data_sharding) if data_sharding else x,
+                    batch_raw,
+                )
 
             metrics_update = jit_eval_step(sub_rng, train_state, batch)
             eval_metrics.append(metrics_update)
@@ -294,6 +305,13 @@ def train_and_evaluate(
       olddir: Optional directory to load old checkpoints from for partial loading.
         If provided, checkpoints will be loaded from olddir but saved to workdir.
     """
+    # Initialize multi-host JAX if enabled
+    if config.get("initialize_multihost", False):
+        jax.distributed.initialize()
+        logging.info(f"JAX distributed initialized. Process {jax.process_index()}/{jax.process_count()}")
+        logging.info(f"Local devices: {jax.local_devices()}")
+        logging.info(f"Global devices: {len(jax.devices())}")
+    
     workdir = epath.Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     
@@ -479,10 +497,20 @@ def train_and_evaluate(
 
                 with jax.profiler.StepTraceAnnotation("train", step_num=step):
                     batch_raw = next(train_iter)
-                    # Apply sharding to batch data
-                    batch = jax.tree.map(
-                        lambda x: jax.device_put(x, data_sharding), batch_raw
-                    )
+                    # Apply sharding to batch data with multi-host support
+                    if config.get("initialize_multihost", False):
+                        # Use process-local data and create global arrays for multi-host
+                        batch = jax.tree.map(
+                            lambda x: jax.make_array_from_process_local_data(
+                                data_sharding, x
+                            ),
+                            batch_raw,
+                        )
+                    else:
+                        # Single-host: use regular device_put
+                        batch = jax.tree.map(
+                            lambda x: jax.device_put(x, data_sharding), batch_raw
+                        )
 
                     if config.check_nans:
                         errs, (train_state, metrics_update) = jit_train_step(
@@ -515,6 +543,7 @@ def train_and_evaluate(
                                 eval_loader,
                                 config.num_eval_steps,
                                 data_sharding,
+                                config,
                             )
                         eval_metrics_cpu = jax.tree_util.tree_map(
                             np.array, eval_metrics.compute()
@@ -529,10 +558,19 @@ def train_and_evaluate(
                             _, sample_rng = jax.random.split(rng)
                             dummy_loader = train_loader
                             dummy_batch_raw = next(iter(dummy_loader))
-                            dummy_batch = jax.tree.map(
-                                lambda x: jax.device_put(x, data_sharding),
-                                dummy_batch_raw,
-                            )
+                            # Apply sharding to dummy batch with multi-host support
+                            if config.get("initialize_multihost", False):
+                                dummy_batch = jax.tree.map(
+                                    lambda x: jax.make_array_from_process_local_data(
+                                        data_sharding, x
+                                    ),
+                                    dummy_batch_raw,
+                                )
+                            else:
+                                dummy_batch = jax.tree.map(
+                                    lambda x: jax.device_put(x, data_sharding),
+                                    dummy_batch_raw,
+                                )
                             # Get model dtype for proper mixed precision handling
                             model_dtype = getattr(model, "dtype", jnp.float32)
                             conditioning = state_utils.get_conditioning_from_batch(
