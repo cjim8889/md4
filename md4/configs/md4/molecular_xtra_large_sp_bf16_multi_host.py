@@ -61,13 +61,13 @@ def get_config() -> config_dict.ConfigDict:
     config.fp_bits = 4096
     config.fingerprint_dim = 4096
 
-    config.feature_dim = 128
+    config.feature_dim = 256
     config.n_layers = 20
     config.dropout_rate = 0.0
     config.multiple_of = 32
 
-    config.num_heads = 16
-    config.n_kv_heads = 16
+    config.num_heads = 8
+    config.n_kv_heads = 4
     config.mlp_type = "glu"
     config.depth_scaled_init = True
     config.cond_type = "adaln_zero"
@@ -75,24 +75,24 @@ def get_config() -> config_dict.ConfigDict:
     # Cross-attention configuration
     config.use_cross_attention = True  # Set to True to enable cross-attention
     config.cross_attention_layers = 8  # None for all layers, or number for first N layers
-    config.cross_attention_proj_dim = 128
+    config.cross_attention_proj_dim = 256
     config.cross_conditioning_seq_length = 16  # Sequence length for cross-conditioning reshape
 
     config.learning_rate = 2e-4
     config.learning_rate_schedule = "cosine"
     config.warmup_steps = 2000
-    config.weight_decay = 1e-6
+    config.weight_decay = 1e-2
     config.clip = 0.0
     config.b2 = 0.999
     config.num_epochs = -1
     config.ema_rate = 0.
     # If num_train_steps==-1 then the number of training steps is calculated from
     # num_epochs.
-    config.num_train_steps = 2_000_000
+    config.num_train_steps = 500_000
     # Evaluates for a full epoch if num_eval_steps==-1.
     config.num_eval_steps = 1000
-    config.batch_size = 2880
-    config.num_microbatches = 6
+    config.batch_size = 6912
+    config.num_microbatches = 3
     config.per_device_batch_size = -1
     # If batches should be added to evaluate the entire dataset.
     config.eval_pad_last_batch = False
@@ -106,13 +106,13 @@ def get_config() -> config_dict.ConfigDict:
     # for topp sampler
     config.topp = 0.98
 
-    config.log_loss_every_steps = 1000
+    config.log_loss_every_steps = 500
     config.eval_every_steps = 10000
     config.checkpoint_every_steps = 10000
     config.checkpoint_keep_period = 200000
     
     # Checkpoint directory configuration
-    config.checkpoint_dir = "gs://metal-repeater-411410-tpu-checkpoints/0_5B_3000_vocab_linear_bf16_expt/checkpoints"
+    config.checkpoint_dir = "gs://metal-repeater-411410-tpu-checkpoints/1B_3000_vocab_linear_glu_bf16_expt/checkpoints"
 
     # Single integer or tuple. If None will use (XManager ID, work unit).
     config.seed = 88
@@ -121,7 +121,7 @@ def get_config() -> config_dict.ConfigDict:
     
     # Device mesh configuration for distributed training
     config.mesh_config = config_dict.ConfigDict()
-    config.mesh_config.mesh_shape = (2, 8)  # Mesh shape, e.g., (2, 4) for 8 devices
+    config.mesh_config.mesh_shape = (32, )  # Mesh shape, e.g., (2, 4) for 8 devices
     config.mesh_config.mesh_axis_names = ("model", "data")  # Names for mesh axes
     
     # Global array multiplier for make_global_array function
@@ -136,9 +136,9 @@ def get_config() -> config_dict.ConfigDict:
     config.logical_axis_rules = [
         ('batch', 'data'),           # Batch dimension -> data parallel
         # ('hidden', 'model'),         # Hidden/embedding dimensions -> model parallel
-        ('attn_qkv', 'model'),      # Attention Q/K/V projections -> model parallel
-        ('attn_o', 'model'),        # Attention output projection -> model parallel
-        ('ff_mlp', 'model'),        # Feed-forward MLP layers -> model parallel
+        # ('attn_qkv', 'model'),      # Attention Q/K/V projections -> model parallel
+        # ('attn_o', 'model'),        # Attention output projection -> model parallel
+        # ('ff_mlp', 'model'),        # Feed-forward MLP layers -> model parallel
         # ('embed_vocab', 'model'),   # Vocabulary embeddings -> model parallel
         # ('input_embed', 'model'),   # Input embeddings -> model parallel
         # ('cross_attn', 'model'),    # Cross-attention projections -> model parallel
