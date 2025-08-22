@@ -514,6 +514,9 @@ def train_and_evaluate(
 
                 with jax.profiler.StepTraceAnnotation("train", step_num=step):
                     batch_raw = next(train_iter)
+
+                    logging.info("Raw batch shape=%s", jax.tree_util.tree_map(lambda x: x.shape, batch_raw))
+                    return
                     # Apply sharding to batch data with multi-host support
                     if config.get("initialize_multihost", False):
                         # Use process-local data and create global arrays for multi-host
