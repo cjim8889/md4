@@ -270,26 +270,16 @@ def make_global_array(data: jax.Array, global_shape: tuple, data_sharding: Named
     if not is_multihost:
         return jax.device_put(data, data_sharding)
 
-    # Calculate the number of devices on the data axis specifically
-    # If mesh has both data and model axes, we need to consider only the data axis size
     mesh = data_sharding.mesh
-    data_axis_size = 1
     
-    # Find the data axis in the mesh and get its size
-    if hasattr(data_sharding, 'spec') and data_sharding.spec is not None:
-        # Get the partition spec to understand which axis is the data axis
-        pspec = data_sharding.spec
-        if len(pspec) > 0 and pspec[0] == 'data':
-            # Find the 'data' axis in the mesh
-            if 'data' in mesh.axis_names:
-                data_axis_index = mesh.axis_names.index('data')
-                data_axis_size = mesh.shape[data_axis_index]
+    # Calculate per_device_batch considering model axis replication
+    # When mesh has model axis, data is replicated across model devices
+    model_axis_size = 1
+    if 'model' in mesh.axis_names:
+        model_axis_index = mesh.axis_names.index('model')
+        model_axis_size = mesh.shape[model_axis_index]
     
-    # If we couldn't determine the data axis size, fall back to local device count
-    if data_axis_size == 1:
-        data_axis_size = jax.local_device_count()
-    
-    per_device_batch = data.shape[0] // data_axis_size
+    per_device_batch = (data.shape[0] // jax.local_device_count()) * model_axis_size
 
     local_arrays = [
         jax.device_put(
