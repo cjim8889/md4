@@ -31,10 +31,6 @@ def _parse_tfexample_fn(tfrecord, fp_bits=2048):
     # Parse the input tf.train.Example proto using the dictionary above
     example = tf.io.parse_single_example(tfrecord, feature_description)
     
-    # Convert sparse tensor to dense for SMILES
-    # example['smiles'] = tf.sparse.to_dense(example['smiles'], default_value='')
-    # example['smiles'] = tf.squeeze(example['smiles'])  # Remove extra dimensions
-    
     # Convert fingerprint from int64 to int8 to match expected format
     example['fingerprint'] = tf.cast(example['fingerprint'], tf.int8)
     
@@ -79,7 +75,8 @@ def find_data_files(data_file_pattern):
 
 
 def preprocess_or_load_pubchem(
-    data_dir,
+    tfrecord_dir,
+    parquet_dir,
     version="1.0.3",
     fp_radius=2,
     fp_bits=2048,
@@ -92,7 +89,8 @@ def preprocess_or_load_pubchem(
     """Load and preprocess PubChem dataset with SAFE encoding and tokenizer training.
 
     Args:
-        data_dir: Directory to store the dataset
+        tfrecord_dir: Directory to store/read TFRecord files
+        parquet_dir: Directory containing parquet files
         fp_radius: Morgan fingerprint radius
         fp_bits: Number of bits for fingerprint
         pad_to_length: Length to pad atom types to
@@ -101,10 +99,10 @@ def preprocess_or_load_pubchem(
     """
     # Import heavy modules only when needed
 
-    if not os.path.exists(data_dir):
-        os.makedirs(data_dir)
+    if not os.path.exists(tfrecord_dir):
+        os.makedirs(tfrecord_dir)
 
-    tfds_data_dir = Path(data_dir) / version
+    tfds_data_dir = Path(tfrecord_dir) / version
     try:
         # Check if dataset already exists
         pubchem_builder = tfds.builder_from_directory(tfds_data_dir)
@@ -116,7 +114,7 @@ def preprocess_or_load_pubchem(
 
         print("Loading full dataset without streaming...")
         ds_full = pl.read_parquet(
-            find_data_files("data/pubchem_large/data/train-*.parquet")
+            find_data_files(os.path.join(parquet_dir, "train-*.parquet"))
         )
         print(f"Loaded {len(ds_full)} samples")
         train_size = int(len(ds_full) * 0.98)
@@ -257,8 +255,13 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
     # Use preprocess_pubchem to get the dataset builder
     num_processes = config.get("num_processes", 64)
     include_formula = config.get("include_formula", False)
+    # Get data directories from config or use defaults
+    tfrecord_dir = config.get("tfrecord_data_dir", "./data/pubchem_large_text")
+    parquet_dir = config.get("parquet_data_dir", "data/pubchem_large/data")
+    
     pubchem_builder = preprocess_or_load_pubchem(
-        data_dir=os.path.join("./data", "pubchem_large_text"),
+        tfrecord_dir=tfrecord_dir,
+        parquet_dir=parquet_dir,
         max_length=max_length,
         version=config.get("version", "1.0.0"),
         fp_radius=fp_radius,
@@ -273,7 +276,7 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
     vocab_size = tokenizer.vocab_size
 
     # Create high-entropy datasets using TFRecord pattern loading
-    tfds_data_dir = Path("./data/pubchem_large_text") / config.get("version", "1.0.0")
+    tfds_data_dir = Path(tfrecord_dir) / config.get("version", "1.0.0")
     
     # Define TFRecord patterns for train and validation splits (matching pubchem_worker.py naming)
     train_pattern = str(tfds_data_dir / "pubchem_large-train.tfrecord-?????-of-?????")
@@ -414,6 +417,9 @@ if __name__ == "__main__":
                 "validation_shards": 4,
                 "num_processes": 128,
                 "include_formula": True,  # Set to True to include molecular formulas
+                # Data directory configuration
+                "tfrecord_data_dir": "./data/pubchem_large_text",
+                "parquet_data_dir": "data/pubchem_large/data",
                 # High-entropy loading configuration
                 "cycle_length": 16,  # Number of files to interleave concurrently
                 "block_length": 4,   # Number of consecutive elements from each file
