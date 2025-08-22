@@ -84,10 +84,6 @@ class MD4(nn.Module):
     n_kv_heads: int = 12
     antithetic_time_sampling: bool = True
     n_layers: int = 32
-    n_dit_layers: int = 0
-    dit_num_heads: int = 12
-    dit_hidden_size: int = 768
-    ch_mult: Sequence[int] = (1,)
     vocab_size: int = 256
     noise_schedule_type: str = "linear"
     dropout_rate: float = 0.0
@@ -108,7 +104,6 @@ class MD4(nn.Module):
     fingerprint_adapter: bool = False
     only_adapter: bool = False
     raw_fingerprint_dim: int = 0
-    atom_type_size: int = 0
     fingerprint_mlp_layers: Sequence[int] = ()
     multiple_of: int = 64
     dtype: jnp.dtype = jnp.float32
@@ -132,10 +127,6 @@ class MD4(nn.Module):
 
         self.classifier = backward.DiscreteClassifier(
             n_layers=self.n_layers,
-            n_dit_layers=self.n_dit_layers,
-            dit_num_heads=self.dit_num_heads,
-            dit_hidden_size=self.dit_hidden_size,
-            ch_mult=self.ch_mult,
             feature_dim=self.feature_dim,
             num_heads=self.num_heads,
             n_kv_heads=self.n_kv_heads,

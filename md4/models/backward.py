@@ -84,10 +84,6 @@ class DiscreteClassifier(nn.Module):
     """Discrete input classifier implementation."""
 
     n_layers: int = 12
-    n_dit_layers: int = 0
-    dit_num_heads: int = 12
-    dit_hidden_size: int = 768
-    ch_mult: Sequence[int] = (1,)
     feature_dim: int = 64
     num_heads: int = 12
     n_kv_heads: int = 12

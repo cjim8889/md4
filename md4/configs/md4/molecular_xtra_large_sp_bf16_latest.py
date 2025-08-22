@@ -44,8 +44,6 @@ def get_config() -> config_dict.ConfigDict:
     config.tokenizer = "data/sentencepiece_tokenizer_bpe_3000_newcorpus.model"
 
     config.min_frequency = 200
-    config.pad_to_length = 128  # Not used
-    config.atom_type_size = 0  # Not used
 
     config.task_type = "text"  # text or image
     config.model_type = "md4"
@@ -64,10 +62,6 @@ def get_config() -> config_dict.ConfigDict:
 
     config.feature_dim = 256
     config.n_layers = 20
-    config.ch_mult = (1,)  # not used
-    config.n_dit_layers = 0  # not used
-    config.dit_num_heads = 12  # not used
-    config.dit_hidden_size = 768  # not used
     config.dropout_rate = 0.0
     config.multiple_of = 256
 
