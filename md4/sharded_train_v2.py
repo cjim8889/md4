@@ -5,6 +5,7 @@ from typing import Any
 import flax.linen as nn
 import grain.python as grain
 import jax
+import flax
 import jax.numpy as jnp
 import ml_collections
 import numpy as np
@@ -240,6 +241,7 @@ def _process_metrics(batch_metrics, matrics_class):
     return final_metrics
 
 
+@flax.struct.dataclass
 class EvalMetrics(metrics.Collection):
     eval_loss = metrics.Average.from_output("loss")
     eval_loss_diff = metrics.Average.from_output("loss_diff")
