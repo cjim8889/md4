@@ -61,10 +61,10 @@ def get_config() -> config_dict.ConfigDict:
     config.fp_bits = 4096
     config.fingerprint_dim = 4096
 
-    config.feature_dim = 256
+    config.feature_dim = 128
     config.n_layers = 20
     config.dropout_rate = 0.0
-    config.multiple_of = 256
+    config.multiple_of = 32
 
     config.num_heads = 8
     config.n_kv_heads = 4
@@ -75,7 +75,7 @@ def get_config() -> config_dict.ConfigDict:
     # Cross-attention configuration
     config.use_cross_attention = True  # Set to True to enable cross-attention
     config.cross_attention_layers = 8  # None for all layers, or number for first N layers
-    config.cross_attention_proj_dim = 256
+    config.cross_attention_proj_dim = 128
     config.cross_conditioning_seq_length = 16  # Sequence length for cross-conditioning reshape
 
     config.learning_rate = 2e-4
@@ -112,7 +112,7 @@ def get_config() -> config_dict.ConfigDict:
     config.checkpoint_keep_period = 200000
     
     # Checkpoint directory configuration
-    config.checkpoint_dir = "gs://metal-repeater-411410-tpu-checkpoints/1B_3000_vocab_linear_bf16_expt/checkpoints"
+    config.checkpoint_dir = "gs://metal-repeater-411410-tpu-checkpoints/0_5B_3000_vocab_linear_bf16_expt/checkpoints"
 
     # Single integer or tuple. If None will use (XManager ID, work unit).
     config.seed = 88
