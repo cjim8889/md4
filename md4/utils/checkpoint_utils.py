@@ -3,25 +3,22 @@ from etils import epath
 from orbax import checkpoint as orbax_checkpoint
 
 
-def _get_checkpoint_manager(
+def get_checkpoint_manager(
     config: ml_collections.ConfigDict,
     workdir: epath.PathLike,
     create: bool = True,
 ) -> orbax_checkpoint.CheckpointManager:
-    """Loads the orbax checkpoint manager for train state."""
+    """Create a checkpoint manager with preemption tolerance."""
     checkpoint_dir = epath.Path(workdir) / "checkpoints"
     
-    # Since we're only checkpointing train_state, use single-item checkpointing
-    # which is simpler with the new API
     return orbax_checkpoint.CheckpointManager(
         checkpoint_dir,
         options=orbax_checkpoint.CheckpointManagerOptions(
             create=create,
-            best_fn=lambda x: x["validation_loss"]
-            if "validation_loss" in x
-            else x["loss"],
+            best_fn=lambda x: x.get("validation_loss", x.get("loss", float('inf'))),
             best_mode="min",
             max_to_keep=20,
+            save_interval_steps=config.get("checkpoint_every_steps", 10000),
         ),
     )
 
@@ -31,7 +28,7 @@ def get_checkpoint_managers(
     workdir: epath.PathLike,
     olddir: epath.PathLike | None = None,
 ) -> tuple[orbax_checkpoint.CheckpointManager, orbax_checkpoint.CheckpointManager]:
-    """Get save and load checkpoint managers.
+    """Get save and load checkpoint managers with preemption tolerance.
 
     Args:
         config: Configuration to use.
@@ -43,13 +40,13 @@ def get_checkpoint_managers(
         A tuple of (save_manager, load_manager).
     """
     # Create checkpoint manager for saving (new checkpoints)
-    save_checkpoint_manager = _get_checkpoint_manager(
+    save_checkpoint_manager = get_checkpoint_manager(
         config, workdir, create=True
     )
 
     # Create checkpoint manager for loading (old checkpoints if olddir is provided)
     if olddir is not None:
-        load_checkpoint_manager = _get_checkpoint_manager(
+        load_checkpoint_manager = get_checkpoint_manager(
             config, olddir, create=False
         )
     else:

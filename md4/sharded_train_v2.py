@@ -17,6 +17,7 @@ from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 from orbax import checkpoint as orbax_checkpoint
 
+
 from md4 import (
     input_pipeline,
     sampling,
@@ -376,25 +377,28 @@ def train_and_evaluate(
             )
         )
 
-    # Set up checkpointing of the model and the input pipeline.
-    # Get both save and load checkpoint managers
-    save_checkpoint_manager, load_checkpoint_manager = (
+    # Set up checkpointing with preemption tolerance
+    checkpoint_manager, load_checkpoint_manager = (
         checkpoint_utils.get_checkpoint_managers(
             config, workdir, olddir
         )
     )
 
-    # Retrieve data from previous checkpoints if possible.
+    # Restore from checkpoint if available
+    start_step = 0
     if load_checkpoint_manager.latest_step() is not None:
+        start_step = load_checkpoint_manager.latest_step()
+        logging.info(f"Restoring from step {start_step}")
+        
         # Check if we should use partial loading
         if partial_load_utils.should_use_partial_loading(config):
             logging.error("Partial Loading is not supported for fsdp")
             raise NotImplementedError()
         else:
-            # Standard checkpoint loading with new Orbax API
+            # Standard checkpoint loading
             train_state = partial_load_utils.standard_checkpoint_loading(
                 train_state=train_state,
-                train_iter=None,  # No train_iter since not using grain
+                train_iter=None,
                 checkpoint_manager=load_checkpoint_manager,
                 state_sharding=state_sharding
             )
@@ -462,8 +466,8 @@ def train_and_evaluate(
         ]
     train_metrics = []
 
-    # With FSDP/jit, we don't need to unreplicate
-    initial_step = int(train_state.step)
+    # Use the restored step or start from 0
+    initial_step = max(int(train_state.step), start_step if start_step is not None else 0)
     eval_metrics_cpu = None
 
     # Run training within mesh context
@@ -577,18 +581,23 @@ def train_and_evaluate(
                                 except Exception as e:
                                     logging.error("Error decoding texts: %s", e)
 
-                if step % config.checkpoint_every_steps == 0 or is_last_step:
-                    with report_progress.timed("checkpoint"):
-                        # Use new Orbax API for single-item checkpointing
-                        save_checkpoint_manager.save(
-                            step,
-                            args=orbax_checkpoint.args.StandardSave(train_state),
-                            metrics=jax.tree_util.tree_map(
-                                lambda x: x.item() if hasattr(x, "item") else x,
-                                eval_metrics_cpu
-                                if eval_metrics_cpu is not None
-                                else {},
-                            ),
-                        )
+                # Save checkpoint with preemption tolerance
+                with report_progress.timed("checkpoint"):
+                    checkpoint_manager.save(
+                        step,
+                        args=orbax_checkpoint.args.StandardSave(train_state),
+                        metrics=jax.tree_util.tree_map(
+                            lambda x: x.item() if hasattr(x, "item") else x,
+                            eval_metrics_cpu if eval_metrics_cpu is not None else {},
+                        ),
+                        force=is_last_step,
+                    )
+                
+                # Check for preemption and handle gracefully
+                if checkpoint_manager.reached_preemption(step):
+                    logging.info(f"Preemption detected at step {step}. Waiting for checkpointing to finish.")
+                    checkpoint_manager.wait_until_finished()
+                    logging.info("Checkpointing completed. Exiting gracefully.")
+                    return
 
     logging.info("Finishing training at step %d", num_train_steps)
