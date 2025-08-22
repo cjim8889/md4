@@ -583,10 +583,11 @@ def train_and_evaluate(
                                 conditioning,
                             )
 
-                            # With FSDP, samples are already gathered
-                            all_samples = samples
+                            # Get samples to CPU for decoding - samples are already global arrays in multi-host
+                            all_samples = jax.device_get(samples)
 
-                            if config.task_type == "text":
+                            # Only decode and calculate metrics on the main process to avoid redundant work
+                            if config.task_type == "text" and jax.process_index() == 0:
                                 tokenizer = dataset_info["tokenizer"]
                                 texts = None
                                 try:
