@@ -27,7 +27,7 @@ Use these commands:
     - `uv add package-name --script script.py`
     - `uv remove package-name --script script.py`
 
-After modifying individual python file always use the command `uvx ty check <filepath> --output-format concise` to consider any typing issues to follow the best practices. ONLY use --output-format full when you don't know what to do next. Documentation of uvx ty type checker is the following:
+After modifying individual python file always use the command `uvx ty check <filepath> --output-format concise` to consider any typing issues to follow the best practices. FIX ALL Type issues if they are in our control, i.e. not result of external libraries. ONLY use --output-format full when you don't know what to do next. Documentation of uvx ty type checker is the following:
 
 uvx ty check --help
 Check a project for type errors

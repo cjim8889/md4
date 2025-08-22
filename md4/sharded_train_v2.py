@@ -2,7 +2,6 @@ import functools
 from collections.abc import Callable, Mapping
 from typing import Any
 
-import flax
 import flax.linen as nn
 import grain.python as grain
 import jax
@@ -133,7 +132,6 @@ def train_step(
             train_state.params,
             train_state.state,
             rng,
-            model,
             batch,
         )
     else:
@@ -175,13 +173,12 @@ def train_step(
             loss_acc    = loss_acc + loss
             return (loop_rng, state_new, grad_acc, metrics_acc, loss_acc), None
 
-        (rng_after, new_state, grad_sum_f32, metrics_sum, loss_sum), _ = jax.lax.scan(
+        (_, new_state, grad_sum_f32, metrics_sum, loss_sum), _ = jax.lax.scan(
             body, (rng, train_state.state, grad_acc0, metrics0, loss0), batch_mb, unroll=1
         )
-        _ = rng_after
 
         inv = 1.0 / float(num_microbatches)
-        loss = loss_sum * inv
+        _ = loss_sum * inv  # loss used for gradient computation
         metrics_dict = jax.tree.map(lambda x: x * inv, metrics_sum)
         # average grads, then cast back to param dtype for the optimizer step
         grads = jax.tree.map(lambda p, g: (g * inv).astype(p.dtype), train_state.params, grad_sum_f32)
@@ -200,7 +197,7 @@ def train_step(
     else:
         new_ema_params = None
 
-    new_train_state = train_state.replace(
+    new_train_state = train_state.replace(  # type: ignore[attr-defined]
         step=train_state.step + 1,
         rng=new_rng,
         params=new_params,
@@ -242,12 +239,11 @@ def _process_metrics(batch_metrics, matrics_class):
     return final_metrics
 
 
-@flax.struct.dataclass
 class EvalMetrics(metrics.Collection):
-    eval_loss: metrics.Average.from_output("loss")
-    eval_loss_diff: metrics.Average.from_output("loss_diff")
-    eval_loss_prior: metrics.Average.from_output("loss_prior")
-    eval_loss_recon: metrics.Average.from_output("loss_recon")
+    eval_loss = metrics.Average.from_output("loss")
+    eval_loss_diff = metrics.Average.from_output("loss_diff")
+    eval_loss_prior = metrics.Average.from_output("loss_prior")
+    eval_loss_recon = metrics.Average.from_output("loss_recon")
 
 
 def evaluate(
@@ -256,7 +252,7 @@ def evaluate(
     train_state: state_utils.TrainState,
     eval_loader: grain.DataLoader,
     num_eval_steps: int = -1,
-    data_sharding: NamedSharding = None,
+    data_sharding: NamedSharding | None = None,
 ):
     """Evaluate the model on the given dataset (legacy pmap version)."""
     logging.info("Starting evaluation.")
@@ -384,7 +380,7 @@ def train_and_evaluate(
     # Get both save and load checkpoint managers
     save_checkpoint_manager, load_checkpoint_manager = (
         checkpoint_utils.get_checkpoint_managers(
-            config, workdir, olddir, is_grain_loader=False  # Not using grain anymore
+            config, workdir, olddir
         )
     )
 
