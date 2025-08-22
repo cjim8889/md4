@@ -19,7 +19,7 @@ def get_config() -> config_dict.ConfigDict:
     config.start_profiler = False
     
     # Multi-host configuration
-    config.initialize_multihost = False  # Enable multi-host JAX initialization
+    config.initialize_multihost = True  # Enable multi-host JAX initialization
 
     # dataset configs
     config.vocab_size = 3000
@@ -92,7 +92,7 @@ def get_config() -> config_dict.ConfigDict:
     # Evaluates for a full epoch if num_eval_steps==-1.
     config.num_eval_steps = 1000
     config.batch_size = 1920
-    config.num_microbatches = 3
+    config.num_microbatches = 12
     config.per_device_batch_size = -1
     # If batches should be added to evaluate the entire dataset.
     config.eval_pad_last_batch = False
@@ -121,7 +121,7 @@ def get_config() -> config_dict.ConfigDict:
     
     # Device mesh configuration for distributed training
     config.mesh_config = config_dict.ConfigDict()
-    config.mesh_config.mesh_shape = (8, )  # Mesh shape, e.g., (2, 4) for 8 devices
+    config.mesh_config.mesh_shape = (16, )  # Mesh shape, e.g., (2, 4) for 8 devices
     config.mesh_config.mesh_axis_names = ("data",)  # Names for mesh axes
 
     # Logical sharding configuration
