@@ -4,6 +4,7 @@ import multiprocessing as mp
 import os
 from pathlib import Path
 
+import jax
 import numpy as np
 import polars as pl
 import tensorflow as tf
@@ -239,14 +240,20 @@ def preprocess_or_load_pubchem(
 
 def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
     """Create PubChem datasets with SAFE encoding and molecular features."""
-    # Import heavy modules only when needed
-
     # Molecular dataset with SAFE, SMILES and Morgan fingerprints
     fp_radius = config.get("fp_radius", 2)
     fp_bits = config.get("fp_bits", 2048)
     max_length = config.get("max_length", 160)
     tokenizer_path = config.get("tokenizer", _SENTENCEPIECE_TOKENIZER)
     batch_size = config.get("batch_size", 512)
+    
+    # Adjust batch size for multi-host environments
+    if config.get("initialize_multihost", False):
+        # In multi-host mode, each process should handle batch_size // num_processes
+        process_batch_size = batch_size // jax.process_count()
+        print(f"Multi-host detected: using process batch size {process_batch_size} (total: {batch_size})")
+    else:
+        process_batch_size = batch_size
 
     tokenizer = SentencePieceTokenizer(
         model_path=tokenizer_path,
@@ -313,15 +320,23 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
             record_shuffle_buffer=config.get("record_shuffle_buffer", 10000)
         )
         
+        # Add process-specific data sharding for multi-host
+        if config.get("initialize_multihost", False):
+            # Shard the dataset across processes
+            train_dataset = train_dataset.shard(
+                num_shards=jax.process_count(),
+                index=jax.process_index()
+            )
+        
         train_dataset = train_dataset.map(
             _tokenize_and_truncate,
             num_parallel_calls=tf.data.AUTOTUNE,
         )
 
         # Apply multiple levels of shuffling and batching for maximum entropy
-        train_dataset = train_dataset.shuffle(batch_size * 16, reshuffle_each_iteration=True)  # Large shuffle buffer
+        train_dataset = train_dataset.shuffle(process_batch_size * 16, reshuffle_each_iteration=True)  # Large shuffle buffer
         train_dataset = train_dataset.repeat()  # Repeat for continuous training
-        train_dataset = train_dataset.batch(batch_size, drop_remainder=True)
+        train_dataset = train_dataset.batch(process_batch_size, drop_remainder=True)
         train_dataset = train_dataset.shuffle(config.get("batch_shuffle_buffer", 50), reshuffle_each_iteration=True)  # Batch-level shuffling
         train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
         train_dataset = train_dataset.as_numpy_iterator()
@@ -336,13 +351,21 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
             record_shuffle_buffer=config.get("record_shuffle_buffer", 2000)
         )
         
+        # Add process-specific data sharding for multi-host
+        if config.get("initialize_multihost", False):
+            # Shard the dataset across processes
+            eval_dataset = eval_dataset.shard(
+                num_shards=jax.process_count(),
+                index=jax.process_index()
+            )
+        
         eval_dataset = eval_dataset.map(
             _tokenize_and_truncate,
             num_parallel_calls=tf.data.AUTOTUNE,
         )
-        eval_dataset = eval_dataset.shuffle(batch_size * 8, reshuffle_each_iteration=True)  # Shuffle with larger buffer
+        eval_dataset = eval_dataset.shuffle(process_batch_size * 8, reshuffle_each_iteration=True)  # Shuffle with larger buffer
         eval_dataset = eval_dataset.repeat()  # Repeat for continuous evaluation
-        eval_dataset = eval_dataset.batch(batch_size, drop_remainder=True)
+        eval_dataset = eval_dataset.batch(process_batch_size, drop_remainder=True)
         eval_dataset = eval_dataset.shuffle(config.get("batch_shuffle_buffer", 20), reshuffle_each_iteration=True)  # Batch-level shuffling
         eval_dataset = eval_dataset.prefetch(tf.data.AUTOTUNE)
         eval_dataset = eval_dataset.as_numpy_iterator()
