@@ -284,7 +284,7 @@ def evaluate(
             if config and config.get("initialize_multihost", False):
                 # Use process-local data and create global arrays for multi-host
                 batch = jax.tree.map(
-                    lambda x: jax.make_array_from_process_local_data(data_sharding, x),
+                    lambda x: jax.make_array_from_process_local_data(data_sharding, x, global_shape=(config.batch_size, x.shape[-1])),
                     batch_raw,
                 )
             else:
@@ -519,7 +519,7 @@ def train_and_evaluate(
                         # Use process-local data and create global arrays for multi-host
                         batch = jax.tree.map(
                             lambda x: jax.make_array_from_process_local_data(
-                                data_sharding, x
+                                data_sharding, x, global_shape=(config.batch_size, x.shape[-1])
                             ),
                             batch_raw,
                         )
@@ -579,7 +579,7 @@ def train_and_evaluate(
                             if config.get("initialize_multihost", False):
                                 dummy_batch = jax.tree.map(
                                     lambda x: jax.make_array_from_process_local_data(
-                                        data_sharding, x
+                                        data_sharding, x, global_shape=(config.batch_size, x.shape[-1])
                                     ),
                                     dummy_batch_raw,
                                 )
