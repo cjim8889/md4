@@ -1,5 +1,3 @@
-from collections import abc
-
 import jax.numpy as jnp
 from ml_collections import config_dict
 
@@ -19,6 +17,9 @@ def get_config() -> config_dict.ConfigDict:
 
     # profiler
     config.start_profiler = False
+    
+    # Multi-host configuration
+    config.initialize_multihost = True  # Enable multi-host JAX initialization
 
     # dataset configs
     config.vocab_size = 3000
