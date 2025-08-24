@@ -238,32 +238,34 @@ def preprocess_or_load_pubchem(
 
         return pubchem_builder
     
-def random_pad_after_first_sep(
+def random_pad_after_first_sep_ratio(
     tokens: tf.Tensor,     # 1D int tensor, UNPADDED, length L <= max_length
     sep_id: int,           # tokenizer.sep_id
     pad_id: int,           # tokenizer.pad_id
     max_length: int,
-    end_pad_min: int = 0,  # min trailing pads at the very end
-    end_pad_max: int | None = None,  # max trailing pads (None -> up to all)
+    interior_frac: float = 0.5,    # fraction of total PADs to move after [SEP]
+    stochastic: bool = True,       # if True, sample Binomial(P, interior_frac)
+    min_end_pad: int = 0,          # optional: enforce >= this many at very end
+    max_end_pad: int | None = None # optional: enforce <= this many at very end
 ) -> tf.Tensor:
-    """Randomly interleave PADs only after the first [SEP]; preserve prefix exactly."""
+    """Insert a fraction of PADs randomly after the first [SEP]; leave prefix intact."""
     tokens = tf.convert_to_tensor(tokens)
     pad_id = tf.cast(pad_id, tokens.dtype)
     L = tf.shape(tokens)[0]
     P = tf.maximum(max_length - L, 0)  # total pads needed
 
-    # If nothing to pad, return as-is
+    # If nothing to pad, return as-is (will be trimmed or already exact length)
     def no_pad():
         out = tokens[:max_length]
         out = tf.ensure_shape(out, [max_length])
         return out
 
-    # Find first [SEP]
+    # Find first [SEP]; if none, keep standard end padding
     sep_mask = tf.equal(tokens, tf.cast(sep_id, tokens.dtype))
-    sep_pos_all = tf.where(sep_mask)  # shape [?, 1]
+    sep_pos_all = tf.where(sep_mask)  # [?,1]
     has_sep = tf.shape(sep_pos_all)[0] > 0
 
-    def only_trailing():  # No [SEP] present → all pads at the end
+    def only_trailing():
         out = tf.concat([tokens, tf.fill([P], pad_id)], axis=0)
         out = out[:max_length]
         out = tf.ensure_shape(out, [max_length])
@@ -271,43 +273,56 @@ def random_pad_after_first_sep(
 
     def with_sep():
         sep_pos = tf.reduce_min(tf.reshape(sep_pos_all, [-1]))  # first [SEP]
-        pre = tokens[:sep_pos + 1]          # includes the [SEP]
-        post = tokens[sep_pos + 1:]         # tokens after [SEP]
-        L2 = tf.shape(post)[0]
+        pre  = tokens[:sep_pos + 1]   # includes [SEP]
+        post = tokens[sep_pos + 1:]   # strictly after [SEP]
+        L2   = tf.shape(post)[0]
 
-        # Decide how many pads to keep at the very end
-        ep_max = P if end_pad_max is None else tf.minimum(tf.cast(end_pad_max, tf.int32), P)
-        ep_min = tf.minimum(tf.cast(end_pad_min, tf.int32), P)
-        ep_max = tf.maximum(ep_max, ep_min)
-        end_pad = tf.cond(
-            tf.equal(ep_min, ep_max),
-            lambda: ep_min,
-            lambda: tf.random.uniform([], minval=ep_min, maxval=ep_max + 1, dtype=tf.int32)
-        )
-        interior = P - end_pad
+        # Decide how many interior pads to insert based on fraction
+        frac = tf.clip_by_value(tf.cast(interior_frac, tf.float32), 0.0, 1.0)
 
-        # If no interior pads, just append trailing pads
+        def interior_from_frac_round():
+            return tf.cast(tf.round(tf.cast(P, tf.float32) * frac), tf.int32)
+
+        def interior_from_frac_binom():
+            # Binomial(P, frac) via sum of Uniform(0,1) < frac (P <= ~max_length, cheap)
+            if isinstance(P, int):
+                shape = [P]
+            else:
+                shape = tf.stack([P])
+            draws = tf.random.uniform(shape) < frac
+            return tf.cast(tf.reduce_sum(tf.cast(draws, tf.int32)), tf.int32)
+
+        interior = tf.cond(stochastic, interior_from_frac_binom, interior_from_frac_round)
+
+        # Clamp to obey min/max trailing PADs if provided
+        if max_end_pad is not None:
+            interior = tf.maximum(interior, P - tf.cast(max_end_pad, tf.int32))
+        interior = tf.minimum(interior, tf.maximum(P - tf.cast(min_end_pad, tf.int32), 0))
+        interior = tf.clip_by_value(interior, 0, P)
+
+        end_pad = P - interior
+
+        # If no interior pads (or nothing after [SEP]), just append trailing pads
         def no_interior():
             out = tf.concat([tokens, tf.fill([end_pad], pad_id)], axis=0)
             out = out[:max_length]
             out = tf.ensure_shape(out, [max_length])
             return out
 
-        # Randomly place interior pads in the post-SEP region (including right-after-[SEP])
         def yes_interior():
-            n_total_post = L2 + interior  # slots after SEP before the final trailing pads
-            # Choose positions for the L2 post tokens among these slots
-            perm = tf.random.shuffle(tf.range(n_total_post, dtype=tf.int32))
+            n_total_post = L2 + interior  # slots after [SEP] (before final end_pad)
+            # Place the L2 post tokens among these slots (order-preserving via sorted positions)
+            perm    = tf.random.shuffle(tf.range(n_total_post, dtype=tf.int32))
             tok_pos = tf.sort(perm[:L2])
-            base = tf.fill([n_total_post], pad_id)
-            region = tf.tensor_scatter_nd_update(base, tf.expand_dims(tok_pos, 1), post)
+            base    = tf.fill([n_total_post], pad_id)
+            region  = tf.tensor_scatter_nd_update(base, tf.expand_dims(tok_pos, 1), post)
 
             out = tf.concat([pre, region, tf.fill([end_pad], pad_id)], axis=0)
             out = out[:max_length]
             out = tf.ensure_shape(out, [max_length])
             return out
 
-        return tf.cond(interior <= 0, no_interior, yes_interior)
+        return tf.cond(tf.logical_or(interior <= 0, L2 <= 0), no_interior, yes_interior)
 
     return tf.cond(P <= 0, no_pad, lambda: tf.cond(has_sep, with_sep, only_trailing))
 
@@ -372,13 +387,15 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
     def _tokenize_and_truncate(x):
         toks = tokenizer.encode(x["smiles"])
         toks = tf.cast(toks, tf.int32)
-        x["smiles"] = random_pad_after_first_sep(
+        x["smiles"] = random_pad_after_first_sep_ratio(
             tokens=toks,
             sep_id=int(tokenizer.sep_id),
             pad_id=int(tokenizer.pad_id),
             max_length=max_length,
-            end_pad_min=0,     # e.g., keep 0–8 pads at the very end
-            end_pad_max=8,
+            interior_frac=0.25,
+            stochastic=True,
+            min_end_pad=0,     # e.g., keep 0–8 pads at the very end
+            max_end_pad=None,
         )
 
         return x
