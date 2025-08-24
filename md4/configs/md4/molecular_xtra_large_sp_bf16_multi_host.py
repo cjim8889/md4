@@ -82,14 +82,14 @@ def get_config() -> config_dict.ConfigDict:
     config.learning_rate = 3e-4
     config.learning_rate_schedule = "cosine"
     config.warmup_steps = 2000
-    config.weight_decay = 1e-4
+    config.weight_decay = 1e-3
     config.clip = 0.0
     config.b2 = 0.999
     config.num_epochs = -1
     config.ema_rate = 0.
     # If num_train_steps==-1 then the number of training steps is calculated from
     # num_epochs.
-    config.num_train_steps = 500_000
+    config.num_train_steps = 600_000
     # Evaluates for a full epoch if num_eval_steps==-1.
     config.num_eval_steps = 1000
     config.batch_size = 3456
