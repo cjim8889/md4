@@ -32,8 +32,8 @@ def get_config() -> config_dict.ConfigDict:
     # Data directory configuration
     config.parquet_data_dir = "data/pubchem_large/data"  # Directory containing train-*.parquet files
     config.tfrecord_data_dir = "/mnt/data/pubchem_large_text"  # Directory to read/write TFRecord files
-    config.interior_frac = 0.1
-    
+    config.interior_frac = 0.
+
     # High-entropy data loading configuration for maximum diversity between epochs
     config.cycle_length = 16  # Number of TFRecord files to interleave concurrently
     config.block_length = 4   # Number of consecutive elements to take from each file
