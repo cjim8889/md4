@@ -102,7 +102,7 @@ def get_config() -> config_dict.ConfigDict:
     # ancestral, mean, or topp
     config.sampler = "topp"
     # uniform, cosine
-    config.sampling_grid = "uniform"
+    config.sampling_grid = "cosine"
     # for topp sampler
     config.topp = 0.98
 
