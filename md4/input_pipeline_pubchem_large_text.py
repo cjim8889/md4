@@ -237,6 +237,79 @@ def preprocess_or_load_pubchem(
         pubchem_builder = tfds.builder_from_directory(tfds_data_dir)
 
         return pubchem_builder
+    
+def random_pad_after_first_sep(
+    tokens: tf.Tensor,     # 1D int tensor, UNPADDED, length L <= max_length
+    sep_id: int,           # tokenizer.sep_id
+    pad_id: int,           # tokenizer.pad_id
+    max_length: int,
+    end_pad_min: int = 0,  # min trailing pads at the very end
+    end_pad_max: int | None = None,  # max trailing pads (None -> up to all)
+) -> tf.Tensor:
+    """Randomly interleave PADs only after the first [SEP]; preserve prefix exactly."""
+    tokens = tf.convert_to_tensor(tokens)
+    pad_id = tf.cast(pad_id, tokens.dtype)
+    L = tf.shape(tokens)[0]
+    P = tf.maximum(max_length - L, 0)  # total pads needed
+
+    # If nothing to pad, return as-is
+    def no_pad():
+        out = tokens[:max_length]
+        out = tf.ensure_shape(out, [max_length])
+        return out
+
+    # Find first [SEP]
+    sep_mask = tf.equal(tokens, tf.cast(sep_id, tokens.dtype))
+    sep_pos_all = tf.where(sep_mask)  # shape [?, 1]
+    has_sep = tf.shape(sep_pos_all)[0] > 0
+
+    def only_trailing():  # No [SEP] present → all pads at the end
+        out = tf.concat([tokens, tf.fill([P], pad_id)], axis=0)
+        out = out[:max_length]
+        out = tf.ensure_shape(out, [max_length])
+        return out
+
+    def with_sep():
+        sep_pos = tf.reduce_min(tf.reshape(sep_pos_all, [-1]))  # first [SEP]
+        pre = tokens[:sep_pos + 1]          # includes the [SEP]
+        post = tokens[sep_pos + 1:]         # tokens after [SEP]
+        L2 = tf.shape(post)[0]
+
+        # Decide how many pads to keep at the very end
+        ep_max = P if end_pad_max is None else tf.minimum(tf.cast(end_pad_max, tf.int32), P)
+        ep_min = tf.minimum(tf.cast(end_pad_min, tf.int32), P)
+        ep_max = tf.maximum(ep_max, ep_min)
+        end_pad = tf.cond(
+            tf.equal(ep_min, ep_max),
+            lambda: ep_min,
+            lambda: tf.random.uniform([], minval=ep_min, maxval=ep_max + 1, dtype=tf.int32)
+        )
+        interior = P - end_pad
+
+        # If no interior pads, just append trailing pads
+        def no_interior():
+            out = tf.concat([tokens, tf.fill([end_pad], pad_id)], axis=0)
+            out = out[:max_length]
+            out = tf.ensure_shape(out, [max_length])
+            return out
+
+        # Randomly place interior pads in the post-SEP region (including right-after-[SEP])
+        def yes_interior():
+            n_total_post = L2 + interior  # slots after SEP before the final trailing pads
+            # Choose positions for the L2 post tokens among these slots
+            perm = tf.random.shuffle(tf.range(n_total_post, dtype=tf.int32))
+            tok_pos = tf.sort(perm[:L2])
+            base = tf.fill([n_total_post], pad_id)
+            region = tf.tensor_scatter_nd_update(base, tf.expand_dims(tok_pos, 1), post)
+
+            out = tf.concat([pre, region, tf.fill([end_pad], pad_id)], axis=0)
+            out = out[:max_length]
+            out = tf.ensure_shape(out, [max_length])
+            return out
+
+        return tf.cond(interior <= 0, no_interior, yes_interior)
+
+    return tf.cond(P <= 0, no_pad, lambda: tf.cond(has_sep, with_sep, only_trailing))
 
 
 def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
@@ -297,15 +370,17 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
     )
     
     def _tokenize_and_truncate(x):
-        x["smiles"] = tokenizer.encode(x["smiles"])
-        x["smiles"] = x["smiles"][:max_length]
-        # Pad to max_length with tokenizer.pad_id
-        current_length = tf.shape(x["smiles"])[0]
-        padding_length = max_length - current_length
-        pad_id_int = tf.cast(tokenizer.pad_id, tf.int32)
-        x["smiles"] = tf.pad(
-            x["smiles"], [[0, padding_length]], constant_values=pad_id_int
+        toks = tokenizer.encode(x["smiles"])
+        toks = tf.cast(toks, tf.int32)
+        x["smiles"] = random_pad_after_first_sep(
+            tokens=toks,
+            sep_id=int(tokenizer.sep_id),
+            pad_id=int(tokenizer.pad_id),
+            max_length=max_length,
+            end_pad_min=0,     # e.g., keep 0–8 pads at the very end
+            end_pad_max=8,
         )
+
         return x
 
     if use_high_entropy_loading:
