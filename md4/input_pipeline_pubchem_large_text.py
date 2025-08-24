@@ -517,7 +517,7 @@ if __name__ == "__main__":
                 "num_processes": 128,
                 "include_formula": True,  # Set to True to include molecular formulas
                 # Data directory configuration
-                "tfrecord_data_dir": "./data/pubchem_large_text",
+                "tfrecord_data_dir": "/mnt/data/pubchem_large_text",
                 "parquet_data_dir": "data/pubchem_large/data",
                 # High-entropy loading configuration
                 "cycle_length": 16,  # Number of files to interleave concurrently
