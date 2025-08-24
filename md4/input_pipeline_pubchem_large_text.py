@@ -363,7 +363,7 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
             sep_id=int(tokenizer.sep_id),
             pad_id=int(tokenizer.pad_id),
             max_length=max_length,
-            interior_frac=0.25,
+            interior_frac=config.get("interior_frac", 0.1),
         )
 
         return x
