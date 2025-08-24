@@ -78,7 +78,7 @@ def get_config() -> config_dict.ConfigDict:
     config.cross_attention_proj_dim = 256
     config.cross_conditioning_seq_length = 16  # Sequence length for cross-conditioning reshape
 
-    config.learning_rate = 2e-4
+    config.learning_rate = 3e-4
     config.learning_rate_schedule = "cosine"
     config.warmup_steps = 2000
     config.weight_decay = 1e-2
