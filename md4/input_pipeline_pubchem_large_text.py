@@ -239,88 +239,72 @@ def preprocess_or_load_pubchem(
         return pubchem_builder
     
 def random_pad_after_first_sep_ratio(
-    tokens: tf.Tensor,     # 1D int tensor, UNPADDED, length L <= max_length
-    sep_id: int,           # tokenizer.sep_id
-    pad_id: int,           # tokenizer.pad_id
+    tokens: tf.Tensor,   # 1D int tensor (unpad/truncated), length L <= max_length
+    sep_id: int,
+    pad_id: int,
     max_length: int,
-    interior_frac: float = 0.5,     # fraction of total PADs to move after [SEP]
-    stochastic: bool = True,        # sample Binomial(P, interior_frac) if True; else round()
-    min_end_pad: int = 0,           # clamp: >= this many trailing PADs
-    max_end_pad: int | None = None  # clamp: <= this many trailing PADs
+    interior_frac: float = 0.5,  # % of total PADs "stolen" from end and inserted after [SEP]
 ) -> tf.Tensor:
     tokens = tf.convert_to_tensor(tokens)
     dtype  = tokens.dtype
-    pad_id = tf.cast(pad_id, dtype)
     sep_id = tf.cast(sep_id, dtype)
+    pad_id = tf.cast(pad_id, dtype)
 
     L = tf.shape(tokens)[0]
-    P = tf.maximum(max_length - L, 0)  # total pads needed
+    P = tf.maximum(max_length - L, 0)  # total PADs needed
 
     def no_pad():
         out = tokens[:max_length]
-        out = tf.ensure_shape(out, [max_length])
+        out.set_shape([max_length])
         return out
 
-    # find first [SEP]
-    sep_pos_all = tf.where(tf.equal(tokens, sep_id))  # [?, 1]
+    # locate first [SEP]
+    sep_pos_all = tf.where(tf.equal(tokens, sep_id))  # [?,1]
     has_sep = tf.shape(sep_pos_all)[0] > 0
 
     def only_trailing():
         out = tf.concat([tokens, tf.fill([P], pad_id)], axis=0)
         out = out[:max_length]
-        out = tf.ensure_shape(out, [max_length])
+        out.set_shape([max_length])
         return out
 
     def with_sep():
         sep_pos = tf.reduce_min(tf.reshape(sep_pos_all, [-1]))
-        pre  = tokens[:sep_pos + 1]   # includes [SEP]
-        post = tokens[sep_pos + 1:]   # strictly after [SEP]
+        pre  = tokens[:sep_pos + 1]     # includes [SEP]
+        post = tokens[sep_pos + 1:]     # strictly after [SEP]
         L2   = tf.shape(post)[0]
 
-        # how many interior pads to “steal” from the end
+        # sample interior ~ Binomial(P, interior_frac)
         frac = tf.clip_by_value(tf.cast(interior_frac, tf.float32), 0.0, 1.0)
-
-        def interior_from_frac_round():
-            return tf.cast(tf.round(tf.cast(P, tf.float32) * frac), tf.int32)
-
-        def interior_from_frac_binom():
-            # Binomial(P, frac) via summing Bernoulli(frac) draws
-            shape = tf.stack([P])  # 1-D int32 tensor [P]
-            draws = tf.random.uniform(shape) < frac
-            return tf.cast(tf.reduce_sum(tf.cast(draws, tf.int32)), tf.int32)
-
-        stoch_t = tf.convert_to_tensor(stochastic, dtype=tf.bool)
-        interior = tf.cond(stoch_t, interior_from_frac_binom, interior_from_frac_round)
-
-        # clamp to respect trailing-PAD guardrails
-        max_end = tf.where(max_end_pad is None, P, tf.minimum(tf.cast(max_end_pad, tf.int32), P))
-        min_end = tf.minimum(tf.cast(min_end_pad, tf.int32), P)
-        interior = tf.maximum(interior, P - max_end)                           # ensure end_pad <= max_end
-        interior = tf.minimum(interior, tf.maximum(P - min_end, 0))            # ensure end_pad >= min_end
-        interior = tf.clip_by_value(interior, 0, P)
-
-        end_pad = P - interior
+        bern  = tf.random.uniform(tf.expand_dims(P, 0)) < frac       # shape [P]
+        interior = tf.cast(tf.reduce_sum(tf.cast(bern, tf.int32)), tf.int32)
+        end_pad  = P - interior
 
         def no_interior():
             out = tf.concat([tokens, tf.fill([end_pad], pad_id)], axis=0)
             out = out[:max_length]
-            out = tf.ensure_shape(out, [max_length])
+            out.set_shape([max_length])
             return out
 
         def yes_interior():
-            n_total_post = L2 + interior  # slots before final trailing pads
-            # place L2 post tokens among these slots; keep order via sorted positions
-            perm    = tf.random.shuffle(tf.range(n_total_post, dtype=tf.int32))
-            tok_pos = tf.sort(perm[:L2])
-            base    = tf.fill([n_total_post], pad_id)
-            region  = tf.tensor_scatter_nd_update(base, tf.expand_dims(tok_pos, 1), post)
+            n_total_post = L2 + interior  # slots before trailing end_pad
+            def region_when_tokens():
+                perm    = tf.random.shuffle(tf.range(n_total_post, dtype=tf.int32))
+                tok_pos = tf.sort(perm[:L2])
+                base    = tf.fill([n_total_post], pad_id)
+                return tf.tensor_scatter_nd_update(base, tf.expand_dims(tok_pos, 1), post)
+
+            def region_when_no_tokens():
+                return tf.fill([interior], pad_id)
+
+            region = tf.cond(L2 > 0, region_when_tokens, region_when_no_tokens)
 
             out = tf.concat([pre, region, tf.fill([end_pad], pad_id)], axis=0)
             out = out[:max_length]
-            out = tf.ensure_shape(out, [max_length])
+            out.set_shape([max_length])
             return out
 
-        return tf.cond(tf.logical_or(interior <= 0, L2 <= 0), no_interior, yes_interior)
+        return tf.cond(interior <= 0, no_interior, yes_interior)
 
     return tf.cond(P <= 0, no_pad, lambda: tf.cond(has_sep, with_sep, only_trailing))
 
@@ -391,9 +375,6 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
             pad_id=int(tokenizer.pad_id),
             max_length=max_length,
             interior_frac=0.25,
-            stochastic=True,
-            min_end_pad=0,     # e.g., keep 0–8 pads at the very end
-            max_end_pad=None,
         )
 
         return x
