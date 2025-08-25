@@ -109,8 +109,8 @@ def get_config() -> config_dict.ConfigDict:
     config.topp = 0.98
 
     config.log_loss_every_steps = 500
-    config.eval_every_steps = 10000
-    config.checkpoint_every_steps = 10000
+    config.eval_every_steps = 5000
+    config.checkpoint_every_steps = 5000
     config.checkpoint_keep_period = 200000
     
     # Checkpoint directory configuration
