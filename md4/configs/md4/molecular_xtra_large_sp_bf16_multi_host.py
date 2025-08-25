@@ -82,7 +82,8 @@ def get_config() -> config_dict.ConfigDict:
     config.learning_rate = 3e-4
     config.learning_rate_schedule = "cosine"
     config.warmup_steps = 2000
-    config.weight_decay = 1e-3
+    config.weight_decay = 1e-2
+    config.scale_by_muon = True
     config.clip = 0.0
     config.b2 = 0.999
     config.num_epochs = -1
