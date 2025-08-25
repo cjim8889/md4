@@ -294,6 +294,7 @@ def create_sharded_train_state(
     optimizer = optax.chain(
         optax.clip(config.clip) if config.clip > 0.0 else optax.identity(),
         adam,
+        optax.contrib.scale_by_muon() if config.get("scale_by_muon", False) else optax.identity(),
         # optax.zero_nans(), # This is more tricky to use when fsdp is enabled
     )
 
