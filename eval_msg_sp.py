@@ -564,13 +564,22 @@ class MolecularEvaluator:
         print(f"Successfully processed {processed_count}/{total_count} molecules")
 
 
-    def _generate_samples(
+    def _generate_tensor_samples(
         self,
         predicted_fingerprints: np.ndarray,
         original_fingerprints: np.ndarray,
         smiles_list: Optional[List[str]] = None,
-    ) -> List[List[str]]:
-        """Unified generation method that handles both single and multi-device scenarios."""
+    ) -> Tuple[jnp.ndarray, int]:
+        """Generate raw tensor samples using the model.
+        
+        Args:
+            predicted_fingerprints: Predicted fingerprints from the model
+            original_fingerprints: Original fingerprints from the data
+            smiles_list: Optional list of SMILES for conditional initialization
+            
+        Returns:
+            Tuple of (generated samples tensor, batch_size)
+        """
         # Ensure fingerprints are 2D (batch_size, fingerprint_dim)
         if predicted_fingerprints.ndim == 1:
             predicted_fingerprints = predicted_fingerprints[None, :]
@@ -633,7 +642,23 @@ class MolecularEvaluator:
         
         if isinstance(samples, tuple):
             samples = samples[0]
+            
+        return samples, batch_size
+    
+    def _process_tensor_samples_to_smiles(
+        self,
+        samples: jnp.ndarray,
+        batch_size: int,
+    ) -> List[List[str]]:
+        """Process generated tensor samples into SMILES strings.
         
+        Args:
+            samples: Generated samples tensor
+            batch_size: Original batch size
+            
+        Returns:
+            List of lists containing decoded SMILES strings
+        """
         # Ensure samples is properly shaped
         if samples.ndim == 2:  # (total_samples, max_length)
             # Reshape to (batch_size, num_samples_per_input, max_length)
@@ -669,7 +694,6 @@ class MolecularEvaluator:
             batch_results.append(sample_list)
 
         return batch_results
-
 
     def _save_batch_results(
         self,
@@ -707,14 +731,13 @@ class MolecularEvaluator:
         # print(f"Saved batch {batch_idx} results to {batch_file}")
 
 
-    def _process_and_save_batch(
+    def _prepare_batch_for_generation(
         self,
         batch_data: List[Tuple[int, str, str, np.ndarray, np.ndarray]],
-        batch_idx: int,
-    ):
-        """Process a single batch of molecules and save results."""
+    ) -> Tuple[List[int], List[str], List[str], np.ndarray, np.ndarray]:
+        """Prepare batch data for tensor generation."""
         if not batch_data:
-            return
+            return [], [], [], np.array([]), np.array([])
 
         # Unpack batch data
         (
@@ -724,31 +747,18 @@ class MolecularEvaluator:
             batch_predicted_fingerprints,
             batch_original_fingerprints,
         ) = zip(*batch_data)
-        batch_predicted_fingerprints = np.array(batch_predicted_fingerprints)
-        batch_original_fingerprints = np.array(batch_original_fingerprints)
-
-        # print(f"Processing batch {batch_idx} with {len(batch_data)} molecules...")
-
-        # Generate samples for batch
-        batch_generated = self._generate_samples(
-            batch_predicted_fingerprints,
-            batch_original_fingerprints,
-            list(batch_smiles) if self.args.use_conditional_init else None,
-        )
-
-        # Save batch results
-        self._save_batch_results(
-            batch_idx,
+        
+        return (
             list(batch_eval_ids),
             list(batch_smiles),
-            batch_predicted_fingerprints,
-            batch_generated,
             list(batch_inchi),
+            np.array(batch_predicted_fingerprints),
+            np.array(batch_original_fingerprints),
         )
 
     def run(self):
-        """Run evaluation using streaming processing."""
-        print("=== Processing full dataset with streaming ===")
+        """Run evaluation using streaming processing with overlapped tensor generation and processing."""
+        print("=== Processing full dataset with streaming and overlapped processing ===")
 
         eval_df = self._load_eval_data()
         batch_size = self.config.batch_size
@@ -756,10 +766,16 @@ class MolecularEvaluator:
         print(f"Batch size: {batch_size}")
         print(f"Intermediate results will be saved to: {self.intermediate_dir}")
 
-        # Collect molecules into batches and process them as they become available
+        # Collect molecules into batches and process them with overlap
         current_batch = []
         batch_idx = 0
         total_processed = 0
+
+        # Storage for previous batch's generated tensors and metadata
+        prev_tensors = None
+        prev_batch_size = None
+        prev_batch_data = None
+        prev_batch_idx = None
 
         molecule_iterator = self._prepare_molecular_data_iterator(eval_df)
 
@@ -783,12 +799,74 @@ class MolecularEvaluator:
 
                 # Process batch when full
                 if len(current_batch) == batch_size:
-                    self._process_and_save_batch(current_batch, batch_idx)
-                    total_processed += len(current_batch)
+                    # Prepare current batch data
+                    (
+                        batch_eval_ids,
+                        batch_smiles,
+                        batch_inchi,
+                        batch_predicted_fingerprints,
+                        batch_original_fingerprints,
+                    ) = self._prepare_batch_for_generation(current_batch)
+
+                    # Generate tensors for current batch
+                    curr_tensors, curr_batch_size = self._generate_tensor_samples(
+                        batch_predicted_fingerprints,
+                        batch_original_fingerprints,
+                        batch_smiles if self.args.use_conditional_init else None,
+                    )
+
+                    # If we have a previous batch, process and save it while current is generating
+                    if prev_tensors is not None and prev_batch_data is not None:
+                        # Process previous batch tensors to SMILES
+                        prev_generated = self._process_tensor_samples_to_smiles(
+                            prev_tensors, prev_batch_size
+                        )
+                        
+                        # Save previous batch results
+                        prev_eval_ids, prev_smiles, prev_inchi, prev_pred_fp, prev_orig_fp = prev_batch_data
+                        self._save_batch_results(
+                            prev_batch_idx,
+                            prev_eval_ids,
+                            prev_smiles,
+                            prev_pred_fp,
+                            prev_generated,
+                            prev_inchi,
+                        )
+                        total_processed += len(prev_eval_ids)
+
+                    # Store current batch for processing in next iteration
+                    prev_tensors = curr_tensors
+                    prev_batch_size = curr_batch_size
+                    prev_batch_data = (
+                        batch_eval_ids,
+                        batch_smiles,
+                        batch_inchi,
+                        batch_predicted_fingerprints,
+                        batch_original_fingerprints,
+                    )
+                    prev_batch_idx = batch_idx
+                    
                     batch_idx += 1
                     current_batch = []
 
-            # Process remaining incomplete batch if any
+            # Process the final batch if it exists
+            if prev_tensors is not None and prev_batch_data is not None:
+                # Process and save the last full batch
+                prev_generated = self._process_tensor_samples_to_smiles(
+                    prev_tensors, prev_batch_size
+                )
+                prev_eval_ids, prev_smiles, prev_inchi, prev_pred_fp, prev_orig_fp = prev_batch_data
+                self._save_batch_results(
+                    prev_batch_idx,
+                    prev_eval_ids,
+                    prev_smiles,
+                    prev_pred_fp,
+                    prev_generated,
+                    prev_inchi,
+                )
+                total_processed += len(prev_eval_ids)
+
+            # Handle remaining incomplete batch if any
             if current_batch:
                 print(
                     f"Dropping final incomplete batch of {len(current_batch)} molecules"
