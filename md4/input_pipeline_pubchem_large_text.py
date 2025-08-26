@@ -39,9 +39,53 @@ def _parse_tfexample_fn(tfrecord, fp_bits=2048):
     return example
 
 
+def _parse_smiles_with_rdkit(smiles_bytes):
+    """Parse SMILES string using RDKit and return processed string.
+    
+    Args:
+        smiles_bytes: SMILES string as bytes from TensorFlow
+        
+    Returns:
+        Processed SMILES string as bytes
+    """
+    try:
+        # Decode bytes to string
+        smiles_str = smiles_bytes.numpy().decode('utf-8') if hasattr(smiles_bytes, 'numpy') else smiles_bytes.decode('utf-8')
+        
+        # TODO: Add RDKit processing here
+        # Example placeholder - you can fill this in:
+        # from rdkit import Chem
+        mol = Chem.MolFromSmiles(smiles_str)
+        if mol is not None:
+            randomized_smiles = Chem.MolToSmiles(mol, doRandom=True)
+            return randomized_smiles.encode('utf-8')
+
+        # For now, just return the original SMILES
+        return smiles_str.encode('utf-8')
+    except Exception as e:
+        # Return original on error
+        return smiles_bytes if isinstance(smiles_bytes, bytes) else smiles_bytes.numpy()
+
+
+def _apply_rdkit_parsing(example):
+    """Apply RDKit parsing to SMILES field using tf.py_function."""
+    # Apply RDKit parsing to the SMILES string
+    parsed_smiles = tf.py_function(
+        func=_parse_smiles_with_rdkit,
+        inp=[example['smiles']],
+        Tout=tf.string
+    )
+    # Set shape since py_function loses shape information
+    parsed_smiles.set_shape([])
+    
+    # Update the example with parsed SMILES
+    example['smiles'] = parsed_smiles
+    return example
+
+
 def create_high_entropy_dataset(tfrecord_pattern, fp_bits=2048, cycle_length=10, block_length=1, 
                                file_shuffle_buffer=1000, record_shuffle_buffer=2000,
-                               batch_shuffle_buffer=20):
+                               batch_shuffle_buffer=20, use_rdkit_parsing=True):
     """Create a high-entropy dataset from TFRecord files with multiple levels of shuffling."""
     # First, list all file paths to the sharded tfrecord dataset
     dataset = tf.data.Dataset.list_files(tfrecord_pattern, shuffle=True)
@@ -63,6 +107,13 @@ def create_high_entropy_dataset(tfrecord_pattern, fp_bits=2048, cycle_length=10,
         functools.partial(_parse_tfexample_fn, fp_bits=fp_bits),
         num_parallel_calls=tf.data.AUTOTUNE
     )
+    
+    # Apply RDKit parsing if enabled
+    if use_rdkit_parsing:
+        dataset = dataset.map(
+            _apply_rdkit_parsing,
+            num_parallel_calls=tf.data.AUTOTUNE
+        )
     
     # Add record-level shuffling for maximum entropy
     dataset = dataset.shuffle(record_shuffle_buffer, reshuffle_each_iteration=True)
@@ -378,7 +429,8 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
             cycle_length=config.get("cycle_length", 16),
             block_length=config.get("block_length", 4),
             file_shuffle_buffer=config.get("file_shuffle_buffer", 1000),
-            record_shuffle_buffer=config.get("record_shuffle_buffer", 10000)
+            record_shuffle_buffer=config.get("record_shuffle_buffer", 10000),
+            use_rdkit_parsing=config.get("use_rdkit_parsing", False)
         )
         
         # Add process-specific data sharding for multi-host
@@ -409,7 +461,8 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
             cycle_length=config.get("cycle_length", 8),
             block_length=config.get("block_length", 2),
             file_shuffle_buffer=config.get("file_shuffle_buffer", 200),
-            record_shuffle_buffer=config.get("record_shuffle_buffer", 2000)
+            record_shuffle_buffer=config.get("record_shuffle_buffer", 2000),
+            use_rdkit_parsing=config.get("use_rdkit_parsing", False)
         )
         
         # Add process-specific data sharding for multi-host
@@ -502,7 +555,7 @@ if __name__ == "__main__":
                 "num_processes": 128,
                 "include_formula": True,  # Set to True to include molecular formulas
                 # Data directory configuration
-                "tfrecord_data_dir": "/mnt/data/pubchem_large_text",
+                "tfrecord_data_dir": "./data/pubchem_large_text",
                 "parquet_data_dir": "data/pubchem_large/data",
                 # High-entropy loading configuration
                 "cycle_length": 16,  # Number of files to interleave concurrently
@@ -510,6 +563,7 @@ if __name__ == "__main__":
                 "file_shuffle_buffer": 1000,  # File-level shuffle buffer
                 "record_shuffle_buffer": 10000,  # Record-level shuffle buffer
                 "batch_shuffle_buffer": 50,  # Batch-level shuffle buffer
+                "use_rdkit_parsing": False,
             }
         ),
         seed=42,
