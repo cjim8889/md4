@@ -274,6 +274,8 @@ def make_global_array_data_only(
 
     return jax.make_array_from_process_local_data(data_sharding, data, global_shape)
 
+    # # NOTE: Host-local is not actually implemented as it's more complex and not needed now.
+
     # pspec = data_sharding.spec
     # # --- Contract: only 'data' or None appear in the PartitionSpec ---
     # if any(ax not in (None, 'data') for ax in pspec):
@@ -288,7 +290,6 @@ def make_global_array_data_only(
     # if data_is_global:
     #     return jax.device_put(data, data_sharding)
 
-    raise NotImplementedError("Host-local sharding not implemented.")
     # # Host-local path: use the index map for this host's addressable devices.
     # idx_map = data_sharding.addressable_devices_indices_map(global_shape)
 
