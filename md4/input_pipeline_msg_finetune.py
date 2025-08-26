@@ -2,7 +2,7 @@
 
 Memory Optimizations:
 - Worker functions moved to separate minimal module to avoid loading heavy dependencies
-- Heavy imports (tensorflow_datasets, transformers, polars, grain) are now conditional
+- Heavy imports (tensorflow_datasets, transformers, polars) are now conditional
 - Worker processes only load numpy, shared_memory, and rdkit_utils (when needed)
 - This reduces worker memory footprint by avoiding unnecessary module imports
 """

@@ -5,7 +5,6 @@ from typing import Any
 import flax
 import flax.jax_utils as flax_utils
 import flax.linen as nn
-import grain.python as grain
 import jax
 import jax.numpy as jnp
 import ml_collections
@@ -236,7 +235,7 @@ def evaluate(
     p_eval_step: Any,
     rng: jnp.ndarray,
     train_state: state_utils.TrainState,
-    eval_loader: grain.DataLoader,
+    eval_loader: Any,
     num_eval_steps: int = -1,
 ):
     """Evaluate the model on the given dataset."""
@@ -329,10 +328,8 @@ def train_and_evaluate(
         config, data_seed
     )
 
-    # Determine if we need to create an iterator based on loader type
-    # Grain loaders are DataLoader instances and need iter(), while TF iterators are already iterators
-    is_grain_loader = isinstance(train_loader, grain.DataLoader)
-    train_iter = iter(train_loader) if is_grain_loader else train_loader
+    # Train loader is already an iterator from the input pipeline
+    train_iter = train_loader
 
     # Initialize model.
     rng, model_rng = jax.random.split(rng)
@@ -359,7 +356,7 @@ def train_and_evaluate(
     # Get both save and load checkpoint managers
     save_checkpoint_manager, load_checkpoint_manager = (
         checkpoint_utils.get_checkpoint_managers(
-            config, workdir, olddir, is_grain_loader=is_grain_loader
+            config, workdir, olddir
         )
     )
 
@@ -371,7 +368,7 @@ def train_and_evaluate(
                 train_state, _ = partial_load_utils.partial_load_checkpoint(
                     config=config,
                     train_state=train_state,
-                    train_iter=train_iter if is_grain_loader else None,
+                    train_iter=None,
                     checkpoint_manager=load_checkpoint_manager,
                     create_train_state_fn=state_utils.create_train_state,
                     schedule_fn=schedule_fn,
@@ -385,7 +382,7 @@ def train_and_evaluate(
             # Standard checkpoint loading
             train_state, _ = partial_load_utils.standard_checkpoint_loading(
                 train_state=train_state,
-                train_iter=train_iter if is_grain_loader else None,
+                train_iter=None,
                 checkpoint_manager=load_checkpoint_manager,
             )
 
@@ -560,10 +557,6 @@ def train_and_evaluate(
                             np.array, flax_utils.unreplicate(train_state)
                         ),
                     )
-
-                    # Only include train_iter for grain loaders
-                    if is_grain_loader:
-                        checkpoint_items["train_iter"] = train_iter
 
                     save_checkpoint_manager.save(
                         step,
