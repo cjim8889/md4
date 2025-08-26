@@ -50,6 +50,9 @@ def get_config() -> config_dict.ConfigDict:
     config.task_type = "text"  # text or image
     config.model_type = "md4"
     config.data_shape = (config.max_length,)
+    
+    # SMILES validity calculation for molecular datasets
+    config.calculate_smiles_validity = True
 
     # timesteps: int or None
     config.timesteps = 500

@@ -261,19 +261,18 @@ class EvalMetrics(metrics.Collection):
     eval_loss_prior = metrics.Average.from_output("loss_prior")
     eval_loss_recon = metrics.Average.from_output("loss_recon")
 
+
 def make_global_array_data_only(
-    data,                                   # numpy/jax array (global or host-local)
+    data,  # numpy/jax array (global or host-local)
     global_shape: tuple[int, ...],
     data_sharding: NamedSharding | None,
     *,
-    data_is_global: bool = True,            # set False if `data` is already host-sharded
+    data_is_global: bool = True,  # set False if `data` is already host-sharded
 ) -> jax.Array:
     if data_sharding is None:
         return data
-    
-    return jax.make_array_from_process_local_data(
-        data_sharding, data, global_shape
-    )
+
+    return jax.make_array_from_process_local_data(data_sharding, data, global_shape)
 
     # pspec = data_sharding.spec
     # # --- Contract: only 'data' or None appear in the PartitionSpec ---
@@ -309,6 +308,7 @@ def make_global_array_data_only(
     #     arrays=local_arrays,
     # )
 
+
 def evaluate(
     jit_eval_step: Any,
     rng: jax.Array,
@@ -328,8 +328,12 @@ def evaluate(
 
             batch = jax.tree.map(
                 lambda x: make_global_array_data_only(
-                    x, global_shape=(config.batch_size, *x.shape[1:]), data_sharding=data_sharding, data_is_global=True
-                ), batch_raw
+                    x,
+                    global_shape=(config.batch_size, *x.shape[1:]),
+                    data_sharding=data_sharding,
+                    data_is_global=True,
+                ),
+                batch_raw,
             )
 
             metrics_update = jit_eval_step(sub_rng, train_state, batch)
@@ -551,8 +555,12 @@ def train_and_evaluate(
 
                     batch = jax.tree.map(
                         lambda x: make_global_array_data_only(
-                            x, global_shape=(config.batch_size, *x.shape[1:]), data_sharding=data_sharding, data_is_global=True
-                        ), batch_raw
+                            x,
+                            global_shape=(config.batch_size, *x.shape[1:]),
+                            data_sharding=data_sharding,
+                            data_is_global=True,
+                        ),
+                        batch_raw,
                     )
 
                     if config.check_nans:
@@ -601,13 +609,17 @@ def train_and_evaluate(
                             _, sample_rng = jax.random.split(rng)
                             dummy_loader = train_loader
                             dummy_batch_raw = next(iter(dummy_loader))
-                            
+
                             dummy_batch = jax.tree.map(
                                 lambda x: make_global_array_data_only(
-                                    x, global_shape=(config.batch_size, *x.shape[1:]), data_sharding=data_sharding, data_is_global=True
-                                ), dummy_batch_raw
+                                    x,
+                                    global_shape=(config.batch_size, *x.shape[1:]),
+                                    data_sharding=data_sharding,
+                                    data_is_global=True,
+                                ),
+                                dummy_batch_raw,
                             )
-                            
+
                             # Get model dtype for proper mixed precision handling
                             model_dtype = getattr(model, "dtype", jnp.float32)
                             conditioning = state_utils.get_conditioning_from_batch(
@@ -623,11 +635,7 @@ def train_and_evaluate(
                             # Get samples to CPU for decoding - handle multi-host properly
                             if config.get("initialize_multihost", False):
                                 # In multi-host mode, use process_allgather to collect samples from all processes
-                                all_samples = (
-                                    multihost_utils.process_allgather(
-                                        samples
-                                    )
-                                )
+                                all_samples = multihost_utils.process_allgather(samples)
                             else:
                                 # Single-host: use regular device_get
                                 all_samples = jax.device_get(samples)
@@ -644,14 +652,9 @@ def train_and_evaluate(
                                     )
                                     # writer.write_texts(step, {"samples": texts})
 
-                                    # Calculate SMILES validity for pubchem_large dataset
+                                    # Calculate SMILES validity if enabled in config
                                     if (
-                                        config.dataset
-                                        in [
-                                            "pubchem_large",
-                                            "msg_finetune",
-                                            "pubchem_large_text",
-                                        ]
+                                        config.get("calculate_smiles_validity", False)
                                         and texts is not None
                                     ):
                                         validity_metrics = (

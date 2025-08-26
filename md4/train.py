@@ -524,14 +524,9 @@ def train_and_evaluate(
                                 )
                                 # writer.write_texts(step, {"samples": texts})
 
-                                # Calculate SMILES validity for pubchem_large dataset
+                                # Calculate SMILES validity if enabled in config
                                 if (
-                                    config.dataset
-                                    in [
-                                        "pubchem_large",
-                                        "msg_finetune",
-                                        "pubchem_large_text",
-                                    ]
+                                    config.get("calculate_smiles_validity", False)
                                     and texts is not None
                                 ):
                                     validity_metrics = (
