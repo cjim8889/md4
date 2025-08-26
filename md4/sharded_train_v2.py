@@ -525,7 +525,7 @@ def train_and_evaluate(
             use_conditional_init=False,
         ),
         in_shardings=(None, state_sharding, data_sharding),
-        out_shardings=(None),
+        out_shardings=(data_sharding),
     )
 
     hooks = []
