@@ -85,13 +85,13 @@ def _apply_rdkit_parsing(example):
 
 def create_high_entropy_dataset(tfrecord_pattern, fp_bits=2048, cycle_length=10, block_length=1, 
                                file_shuffle_buffer=1000, record_shuffle_buffer=2000,
-                               batch_shuffle_buffer=20, use_rdkit_parsing=True):
+                               batch_shuffle_buffer=20, use_rdkit_parsing=True, seed=None):
     """Create a high-entropy dataset from TFRecord files with multiple levels of shuffling."""
     # First, list all file paths to the sharded tfrecord dataset
-    dataset = tf.data.Dataset.list_files(tfrecord_pattern, shuffle=True)
+    dataset = tf.data.Dataset.list_files(tfrecord_pattern, shuffle=True, seed=seed)
     
     # Make sure to fully shuffle the list of tfrecord files
-    dataset = dataset.shuffle(buffer_size=file_shuffle_buffer, reshuffle_each_iteration=True)
+    dataset = dataset.shuffle(buffer_size=file_shuffle_buffer, reshuffle_each_iteration=True, seed=seed)
     
     # Preprocesses files concurrently and interleaves records from each file into a single, unified dataset
     dataset = dataset.interleave(
@@ -116,7 +116,7 @@ def create_high_entropy_dataset(tfrecord_pattern, fp_bits=2048, cycle_length=10,
         )
     
     # Add record-level shuffling for maximum entropy
-    dataset = dataset.shuffle(record_shuffle_buffer, reshuffle_each_iteration=True)
+    dataset = dataset.shuffle(record_shuffle_buffer, reshuffle_each_iteration=True, seed=seed)
     
     return dataset
 
@@ -295,6 +295,7 @@ def random_pad_after_first_sep_ratio(
     pad_id: int,
     max_length: int,
     interior_frac: float = 0.5,  # upper bound fraction of P moved after [SEP]
+    seed: int | None = None,
 ) -> tf.Tensor:
     tokens = tf.convert_to_tensor(tokens)
     dtype  = tokens.dtype
@@ -330,7 +331,7 @@ def random_pad_after_first_sep_ratio(
         interior_max = tf.cast(tf.floor(tf.cast(P, tf.float32) * frac), tf.int32)
         interior = tf.cond(
             tf.greater(interior_max, 0),
-            lambda: tf.random.uniform([], minval=0, maxval=interior_max + 1, dtype=tf.int32),
+            lambda: tf.random.uniform([], minval=0, maxval=interior_max + 1, dtype=tf.int32, seed=seed),
             lambda: tf.zeros([], tf.int32),
         )
         end_pad = P - interior
@@ -338,7 +339,7 @@ def random_pad_after_first_sep_ratio(
         # build the post-[SEP] region by placing the L2 tokens into (L2+interior) slots
         n_total_post = L2 + interior
         base    = tf.fill([n_total_post], pad_id)
-        perm    = tf.random.shuffle(tf.range(n_total_post, dtype=tf.int32))
+        perm    = tf.random.shuffle(tf.range(n_total_post, dtype=tf.int32), seed=seed)
         tok_pos = tf.sort(perm[:L2])                           # preserves token order
         region  = tf.tensor_scatter_nd_update(base, tf.expand_dims(tok_pos, 1), post)
 
@@ -415,6 +416,7 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
             pad_id=int(tokenizer.pad_id),
             max_length=max_length,
             interior_frac=config.get("interior_frac", 0.1),
+            seed=seed,
         )
 
         return x
@@ -430,7 +432,8 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
             block_length=config.get("block_length", 4),
             file_shuffle_buffer=config.get("file_shuffle_buffer", 1000),
             record_shuffle_buffer=config.get("record_shuffle_buffer", 10000),
-            use_rdkit_parsing=config.get("use_rdkit_parsing", False)
+            use_rdkit_parsing=config.get("use_rdkit_parsing", False),
+            seed=seed
         )
         
         # Add process-specific data sharding for multi-host
@@ -447,10 +450,10 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         )
 
         # Apply multiple levels of shuffling and batching for maximum entropy
-        train_dataset = train_dataset.shuffle(process_batch_size * 16, reshuffle_each_iteration=True)  # Large shuffle buffer
+        train_dataset = train_dataset.shuffle(process_batch_size * 16, reshuffle_each_iteration=True, seed=seed)  # Large shuffle buffer
         train_dataset = train_dataset.repeat()  # Repeat for continuous training
         train_dataset = train_dataset.batch(process_batch_size, drop_remainder=True)
-        train_dataset = train_dataset.shuffle(config.get("batch_shuffle_buffer", 50), reshuffle_each_iteration=True)  # Batch-level shuffling
+        train_dataset = train_dataset.shuffle(config.get("batch_shuffle_buffer", 50), reshuffle_each_iteration=True, seed=seed + 1 if seed is not None else None)  # Batch-level shuffling
         train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
         train_dataset = train_dataset.as_numpy_iterator()
 
@@ -462,7 +465,8 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
             block_length=config.get("block_length", 2),
             file_shuffle_buffer=config.get("file_shuffle_buffer", 200),
             record_shuffle_buffer=config.get("record_shuffle_buffer", 2000),
-            use_rdkit_parsing=config.get("use_rdkit_parsing", False)
+            use_rdkit_parsing=config.get("use_rdkit_parsing", False),
+            seed=seed + 2 if seed is not None else None
         )
         
         # Add process-specific data sharding for multi-host
@@ -477,10 +481,10 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
             _tokenize_and_truncate,
             num_parallel_calls=tf.data.AUTOTUNE,
         )
-        eval_dataset = eval_dataset.shuffle(process_batch_size * 8, reshuffle_each_iteration=True)  # Shuffle with larger buffer
+        eval_dataset = eval_dataset.shuffle(process_batch_size * 8, reshuffle_each_iteration=True, seed=seed + 3 if seed is not None else None)  # Shuffle with larger buffer
         eval_dataset = eval_dataset.repeat()  # Repeat for continuous evaluation
         eval_dataset = eval_dataset.batch(process_batch_size, drop_remainder=True)
-        eval_dataset = eval_dataset.shuffle(config.get("batch_shuffle_buffer", 20), reshuffle_each_iteration=True)  # Batch-level shuffling
+        eval_dataset = eval_dataset.shuffle(config.get("batch_shuffle_buffer", 20), reshuffle_each_iteration=True, seed=seed + 4 if seed is not None else None)  # Batch-level shuffling
         eval_dataset = eval_dataset.prefetch(tf.data.AUTOTUNE)
         eval_dataset = eval_dataset.as_numpy_iterator()
         
@@ -500,9 +504,9 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         )
 
         train_dataset = train_dataset.repeat()  # Repeat for continuous training
-        train_dataset = train_dataset.shuffle(batch_size * 64, reshuffle_each_iteration=True)  # Enhanced shuffle buffer
+        train_dataset = train_dataset.shuffle(batch_size * 64, reshuffle_each_iteration=True, seed=seed)  # Enhanced shuffle buffer
         train_dataset = train_dataset.batch(batch_size, drop_remainder=True)
-        train_dataset = train_dataset.shuffle(config.get("batch_shuffle_buffer", 50), reshuffle_each_iteration=True)  # Batch-level shuffling
+        train_dataset = train_dataset.shuffle(config.get("batch_shuffle_buffer", 50), reshuffle_each_iteration=True, seed=seed + 1 if seed is not None else None)  # Batch-level shuffling
         train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
         train_dataset = train_dataset.as_numpy_iterator()
 
@@ -516,9 +520,9 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
             num_parallel_calls=tf.data.AUTOTUNE,
         )
         eval_dataset = eval_dataset.repeat()  # Repeat for continuous evaluation
-        eval_dataset = eval_dataset.shuffle(batch_size * 8, reshuffle_each_iteration=True)  # Enhanced shuffle buffer
+        eval_dataset = eval_dataset.shuffle(batch_size * 8, reshuffle_each_iteration=True, seed=seed + 2 if seed is not None else None)  # Enhanced shuffle buffer
         eval_dataset = eval_dataset.batch(batch_size, drop_remainder=True)
-        eval_dataset = eval_dataset.shuffle(config.get("batch_shuffle_buffer", 20), reshuffle_each_iteration=True)  # Batch-level shuffling
+        eval_dataset = eval_dataset.shuffle(config.get("batch_shuffle_buffer", 20), reshuffle_each_iteration=True, seed=seed + 3 if seed is not None else None)  # Batch-level shuffling
         eval_dataset = eval_dataset.prefetch(tf.data.AUTOTUNE)
         eval_dataset = eval_dataset.as_numpy_iterator()
 

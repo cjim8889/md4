@@ -181,7 +181,7 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         shuffle_files=True,
     )
     train_dataset = train_dataset.repeat()  # Repeat for continuous training
-    train_dataset = train_dataset.shuffle(batch_size * 8)  # Shuffle with larger buffer
+    train_dataset = train_dataset.shuffle(batch_size * 8, seed=seed)  # Shuffle with larger buffer
     train_dataset = train_dataset.batch(batch_size, drop_remainder=True)
     train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
     train_dataset = train_dataset.as_numpy_iterator()
@@ -192,7 +192,7 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         shuffle_files=True,
     )
     eval_dataset = eval_dataset.repeat()  # Repeat for continuous evaluation
-    eval_dataset = eval_dataset.shuffle(batch_size * 8)  # Shuffle with larger buffer
+    eval_dataset = eval_dataset.shuffle(batch_size * 8, seed=seed + 1 if seed is not None else None)  # Shuffle with larger buffer
     eval_dataset = eval_dataset.batch(batch_size, drop_remainder=True)
     eval_dataset = eval_dataset.prefetch(tf.data.AUTOTUNE)
     eval_dataset = eval_dataset.as_numpy_iterator()
