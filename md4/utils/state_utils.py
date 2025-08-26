@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import flax.core
+import flax.linen as nn
 import flax.struct
 import jax
 import jax.numpy as jnp
@@ -13,33 +14,32 @@ import ml_collections
 import optax
 from absl import logging
 from clu import metrics, parameter_overview
+from flax import traverse_util
 from jax.experimental import multihost_utils
-import flax.linen as nn
-
 
 from md4.models import utils as model_utils
 
 
 def get_default_logical_axis_rules():
     """Get default logical axis rules for model sharding.
-    
+
     Returns:
         List of tuples mapping logical axis names to physical mesh axis names.
     """
     return [
-        ('batch', 'data'),
-        ('hidden', 'model'),
-        ('attn_qkv', 'model'),
-        ('attn_o', 'model'),
-        ('ff_mlp', 'model'),
-        ('embed_vocab', 'model'),
-        ('input_embed', 'model'),
-        ('cross_attn', 'model'),
-        ('cond', 'model'),
-        ('cond_input', 'model'),
-        ('cond_hidden', 'model'),
-        ('cond_output', 'model'),
-        ('vocab', 'model'),
+        ("batch", "data"),
+        ("hidden", "model"),
+        ("attn_qkv", "model"),
+        ("attn_o", "model"),
+        ("ff_mlp", "model"),
+        ("embed_vocab", "model"),
+        ("input_embed", "model"),
+        ("cross_attn", "model"),
+        ("cond", "model"),
+        ("cond_input", "model"),
+        ("cond_hidden", "model"),
+        ("cond_output", "model"),
+        ("vocab", "model"),
         # leave sequence/time unsharded
     ]
 
@@ -242,11 +242,13 @@ def create_train_metrics_class():
     logging.info("metric_keys: %s", metric_keys)
     return create_train_metrics_class_from_keys(metric_keys)
 
+
 def show_pspec(name, x):
     try:
         print(name, getattr(x, "sharding", None))
     except:
         pass
+
 
 def create_sharded_train_state(
     config: ml_collections.ConfigDict,
@@ -306,13 +308,17 @@ def create_sharded_train_state(
     )
 
     # Get logical axis rules from config, with fallback to defaults
-    logical_axis_rules = getattr(config, 'logical_axis_rules', get_default_logical_axis_rules())
+    logical_axis_rules = getattr(
+        config, "logical_axis_rules", get_default_logical_axis_rules()
+    )
 
     # ---- trace shapes and derive sharding under mesh + rules ----
     with mesh, nn.logical_axis_rules(logical_axis_rules):
         logical_abstract_state = jax.eval_shape(
             functools.partial(_init_fn, model=model, optimizer=optimizer),
-            rng, dummy_input, conditioning
+            rng,
+            dummy_input,
+            conditioning,
         )
         logical_state_pspec = nn.get_partition_spec(logical_abstract_state)
         state_sharding = nn.logical_to_mesh_sharding(
@@ -325,11 +331,15 @@ def create_sharded_train_state(
             in_shardings=(None, x_sharding, x_sharding),
             out_shardings=state_sharding,
         )
-        initialized_state = jitted_init_fn(rng, dummy_input, conditioning, model, optimizer)
+        initialized_state = jitted_init_fn(
+            rng, dummy_input, conditioning, model, optimizer
+        )
 
     initialized_state = nn.meta.unbox(initialized_state)
     parameter_overview.log_parameter_overview(
-        initialized_state.state, msg="############# state #############", jax_logging_process=0
+        initialized_state.state,
+        msg="############# state #############",
+        jax_logging_process=0,
     )
 
     gathered_params = multihost_utils.process_allgather(initialized_state.params)
@@ -339,22 +349,7 @@ def create_sharded_train_state(
 
     metrics_class = create_train_metrics_class()
 
-    # jax.tree_util.tree_map_with_path(
-    #     lambda p, v: show_pspec("/".join(map(str, p)), v),
-    #     initialized_state.params
-    # )
-    # jax.tree_util.tree_map_with_path(
-    #     lambda p, v: show_pspec("/".join(map(str, p)), v),
-    #     initialized_state.opt_state
-    # )
-
-    return (
-        model,
-        optimizer,
-        initialized_state,
-        metrics_class,
-        state_sharding
-    )
+    return (model, optimizer, initialized_state, metrics_class, state_sharding)
 
 
 def create_train_state(
@@ -403,10 +398,11 @@ def create_train_state(
     )
     parameter_overview.log_parameter_overview(
         jax.tree.map(
-            lambda x: x.unbox() if isinstance(x, nn.LogicallyPartitioned) else x, 
+            lambda x: x.unbox() if isinstance(x, nn.LogicallyPartitioned) else x,
             params,
-            is_leaf=lambda k: isinstance(k, nn.LogicallyPartitioned)
-        ), msg="############# params #############"
+            is_leaf=lambda k: isinstance(k, nn.LogicallyPartitioned),
+        ),
+        msg="############# params #############",
     )
 
     # Initialize adapter weights if specified

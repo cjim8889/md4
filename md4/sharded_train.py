@@ -24,7 +24,6 @@ from md4 import (
 from md4.utils import (
     checkpoint_utils,
     learning_rate,
-    partial_load_utils,
     rdkit_utils,
     state_utils,
     utils,
@@ -461,16 +460,14 @@ def train_and_evaluate(
         logging.info(f"Restoring from step {start_step}")
 
         # Check if we should use partial loading
-        if partial_load_utils.should_use_partial_loading(config):
+        if checkpoint_utils.should_use_partial_loading(config):
             logging.error("Partial Loading is not supported for fsdp")
             raise NotImplementedError()
         else:
             # Standard checkpoint loading
-            train_state = partial_load_utils.standard_checkpoint_loading(
+            train_state = checkpoint_utils.standard_checkpoint_loading(
                 train_state=train_state,
-                train_iter=None,
                 checkpoint_manager=load_checkpoint_manager,
-                state_sharding=state_sharding,
             )
 
     logging.info("Batch Size: %s", config.batch_size)

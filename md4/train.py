@@ -19,7 +19,7 @@ from md4 import (
     input_pipeline,
     sampling,
 )
-from md4.utils import checkpoint_utils, learning_rate, partial_load_utils, rdkit_utils, state_utils, utils, wandb_writer
+from md4.utils import checkpoint_utils, learning_rate, rdkit_utils, state_utils, utils, wandb_writer
 
 
 def merge_batch_stats(
@@ -363,9 +363,9 @@ def train_and_evaluate(
     # Retrieve data from previous checkpoints if possible.
     if load_checkpoint_manager.latest_step() is not None:
         # Check if we should use partial loading
-        if partial_load_utils.should_use_partial_loading(config):
+        if checkpoint_utils.should_use_partial_loading(config):
             try:
-                train_state, _ = partial_load_utils.partial_load_checkpoint(
+                train_state, _ = checkpoint_utils.partial_load_checkpoint(
                     config=config,
                     train_state=train_state,
                     train_iter=None,
@@ -380,9 +380,8 @@ def train_and_evaluate(
                 raise
         else:
             # Standard checkpoint loading
-            train_state, _ = partial_load_utils.standard_checkpoint_loading(
+            train_state = checkpoint_utils.standard_checkpoint_loading(
                 train_state=train_state,
-                train_iter=None,
                 checkpoint_manager=load_checkpoint_manager,
             )
 
