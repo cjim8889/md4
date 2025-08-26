@@ -54,7 +54,7 @@ except ImportError:
 FLAGS = flags.FLAGS
 flags.DEFINE_string("output_dir", "./results/", "Directory containing results files and where analysis will be saved")
 flags.DEFINE_string("results_file", "", "Path to specific evaluation results file (CSV or parquet) - if empty, auto-detects in output_dir")
-flags.DEFINE_string("intermediate_dir", "", "Subdirectory name containing intermediate batch CSV files (relative to output_dir)")
+flags.DEFINE_string("intermediate_dir", "intermediate", "Subdirectory name containing intermediate batch CSV files (relative to output_dir)")
 flags.DEFINE_string("overlapping_prefixes_file", "", "Path to CSV file containing overlapping InChI key prefixes to filter out")
 flags.DEFINE_bool("plot_figures", True, "Whether to generate plots")
 flags.DEFINE_bool("molecular_grid", True, "Whether to generate molecular structure grid")

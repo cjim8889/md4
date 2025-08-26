@@ -86,9 +86,9 @@ def simple_generate(
     rng,
     train_state,
     conditioning,
-    batch_size,
+    dummy_inputs,
     model,
-    dummy_inputs=None,
+    batch_size: int = 32,
     use_conditional_init: bool = False,
 ):
     """Generate samples from the diffusion model."""

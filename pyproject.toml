@@ -31,6 +31,7 @@ dependencies = [
     "xprof>=2.20.5",
     "wandb>=0.21.0",
     "flax>=0.10.7",
+    "etils[epath]>=1.13.0",
 ]
 
 
