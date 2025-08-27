@@ -222,47 +222,49 @@ def preprocess_or_load_pubchem(
                 "fingerprint": tfds.features.Tensor(shape=(fp_bits,), dtype=np.int8),
             }
         )
-
+        
         if not tfds_data_dir.exists():
             tfds_data_dir.mkdir(parents=True, exist_ok=True)
 
-        valid_training_counts = process_map(
+        # Create partially applied function with fixed arguments for training
+        process_training_shard = functools.partial(
             process_and_write_shard_tfrecord,
+            total_shards=training_shards,
+            split="train",
+            output_dir=tfds_data_dir,
+            features=features,
+            fp_bits=fp_bits,
+            tokenizer=None,
+            max_length=max_length,
+            include_formula=include_formula
+        )
+
+        valid_training_counts = process_map(
+            process_training_shard,
             [
-                (
-                    i,
-                    len(training_shards_tasks),
-                    shard,
-                    "train",
-                    tfds_data_dir,
-                    features,
-                    fp_bits,
-                    None,
-                    max_length,
-                    include_formula,
-                    training_formula_shards[i],
-                )
+                (i, shard, training_formula_shards[i])
                 for i, shard in enumerate(training_shards_tasks)
             ],
             max_workers=_num_workers,
         )
 
-        valid_validation_counts = process_map(
+        # Create partially applied function with fixed arguments for validation
+        process_validation_shard = functools.partial(
             process_and_write_shard_tfrecord,
+            total_shards=validation_shards,
+            split="validation",
+            output_dir=tfds_data_dir,
+            features=features,
+            fp_bits=fp_bits,
+            tokenizer=None,
+            max_length=max_length,
+            include_formula=include_formula
+        )
+        
+        valid_validation_counts = process_map(
+            process_validation_shard,
             [
-                (
-                    i,
-                    len(validation_shards_tasks),
-                    shard,
-                    "validation",
-                    tfds_data_dir,
-                    features,
-                    fp_bits,
-                    None,
-                    max_length,
-                    include_formula,
-                    validation_formula_shards[i],
-                )
+                (i, shard, validation_formula_shards[i])
                 for i, shard in enumerate(validation_shards_tasks)
             ],
             max_workers=_num_workers,

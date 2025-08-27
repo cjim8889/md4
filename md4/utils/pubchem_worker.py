@@ -46,25 +46,35 @@ def process_and_write_shard(args):
     return written_count
 
 
-def process_and_write_shard_tfrecord(args):
-    """Process a shard of SMILES and write results to shared memory.
+def process_and_write_shard_tfrecord(
+    shard_index: int,
+    shard,
+    formula_shard = None,
+    *,
+    total_shards: int,
+    split: str,
+    output_dir: str,
+    features,
+    fp_bits: int,
+    tokenizer,
+    max_length: int,
+    include_formula: bool = False
+):
+    """Process a shard of SMILES and write results to TFRecord.
 
     Args:
-        args: Tuple of (shard_index, total_shards, shard, split, output_dir, features, fp_bits, tokenizer, max_length, include_formula, formula_shard)
+        shard_index: Index of the current shard
+        shard: SMILES data for this shard
+        formula_shard: Formula data for this shard (if include_formula=True)
+        total_shards: Total number of shards
+        split: Dataset split name ('train', 'validation', etc.)
+        output_dir: Directory to write TFRecord files
+        features: TensorFlow features specification
+        fp_bits: Number of bits for fingerprint
+        tokenizer: Tokenizer for SMILES encoding
+        max_length: Maximum sequence length
+        include_formula: Whether to include molecular formulas
     """
-    (
-        shard_index,
-        total_shards,
-        shard,
-        split,
-        output_dir,
-        features,
-        fp_bits,
-        tokenizer,
-        max_length,
-    ) = args[:9]
-    include_formula = args[9] if len(args) > 9 else False
-    formula_shard = args[10] if len(args) > 10 else None
 
     import tensorflow as tf
     from .rdkit_utils import process_smiles
