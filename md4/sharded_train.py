@@ -123,6 +123,7 @@ def train_step(
     train_metrics_class: metrics.Collection,
     ema_rate: float = 0.0,
     num_microbatches: int | None = None,
+    mesh: jax.sharding.Mesh | None = None,
 ) -> tuple[state_utils.TrainState, metrics.Collection]:
     """Perform a single training step."""
     logging.info("train_step(batch=%s)", batch)
@@ -154,21 +155,18 @@ def train_step(
 
         # 2) Build zeroed templates (dtype/shape match grads & metrics) using eval_shape on one microbatch.
         mb0 = jax.tree.map(lambda x: x[0], batch_mb)
-        # Shape-only trace; NOTE: model is not an argument here.
-        (out_avals, _grads_avals) = jax.eval_shape(
-            grad_fn, train_state.params, train_state.state, rng, mb0
-        )
-        loss_aval, (_state_aval, metrics_avals) = out_avals
 
-        # FP32 gradient accumulator (same tree as params)
-        grad_acc0 = jax.tree.map(
-            lambda p: jnp.zeros(p.shape, jnp.float32), train_state.params
-        )
-        metrics0 = jax.tree.map(lambda a: jnp.zeros(a.shape, a.dtype), metrics_avals)
-        loss0 = jnp.zeros(loss_aval.shape, loss_aval.dtype)
+        # Shape-only trace; NOTE: model is not an argument here.
+        out_avals, _ = jax.eval_shape(grad_fn, train_state.params, train_state.state, rng, mb0)
+        loss_aval, (_, metrics_avals) = out_avals
+
+        grad_acc0 = jax.tree.map(lambda p: jnp.zeros(p.shape, jnp.float32), train_state.params)
+        metrics0  = jax.tree.map(lambda a: jnp.zeros(a.shape, a.dtype), metrics_avals)
+        loss0     = jnp.zeros(loss_aval.shape, loss_aval.dtype)
+
 
         def body(carry, mb):
-            loop_rng, state, grad_acc, metrics_acc, loss_acc = carry
+            loop_rng, params, state, grad_acc, metrics_acc, loss_acc = carry
             loop_rng, mbrng = jax.random.split(loop_rng)
             (loss, (state_new, mdict)), grads_param_dtype = grad_fn(
                 train_state.params, state, mbrng, mb
@@ -178,22 +176,44 @@ def train_step(
             )
             metrics_acc = jax.tree.map(lambda a, b: a + b, metrics_acc, mdict)
             loss_acc = loss_acc + loss
-            return (loop_rng, state_new, grad_acc, metrics_acc, loss_acc), None
+            return (loop_rng, params, state_new, grad_acc, metrics_acc, loss_acc), None
 
-        (_, new_state, grad_sum_f32, metrics_sum, loss_sum), _ = jax.lax.scan(
-            body,
-            (rng, train_state.state, grad_acc0, metrics0, loss0),
-            batch_mb,
-            unroll=1,
+        # 5) Wrap the scan in shard_map to guarantee no communication across microbatches.
+        #    Specs: train_state pieces replicated; batch_mb has P(None, 'data', ...).
+        state_specs = jax.tree.map(lambda _: P(), train_state.state)
+        params_specs = jax.tree.map(lambda _: P(), train_state.params)
+        batch_specs = jax.tree.map(
+            lambda x: P(None, 'data', *([None] * (x.ndim - 2))), batch_mb
         )
 
-        inv = 1.0 / float(num_microbatches)
-        _ = loss_sum * inv  # loss used for gradient computation
+        @functools.partial(
+            jax.shard_map,
+            mesh=mesh,
+            in_specs=(params_specs, state_specs, P(), batch_specs),
+            out_specs=(state_specs,  # new_state (replicated after psum)
+                       jax.tree.map(lambda _: P(), grad_acc0),  # grads replicated after psum
+                       jax.tree.map(lambda _: P(), metrics0),   # metrics replicated after psum
+                       P()),                                    # loss replicated after psum
+        )
+        def per_shard_scan(params, state, rng_in, batch_mb_local):
+            (_, _, new_state, grad_sum_f32, metrics_sum, loss_sum), _ = jax.lax.scan(
+                body, (rng_in, params, state, grad_acc0, metrics0, loss0), batch_mb_local, unroll=True
+            )
+            # >>> SINGLE COMMUNICATION POINT <<<
+            grad_sum_f32 = jax.tree.map(lambda g: jax.lax.psum(g, 'data'), grad_sum_f32)
+            metrics_sum  = jax.tree.map(lambda m: jax.lax.psum(m, 'data'), metrics_sum)
+            loss_sum     = jax.lax.psum(loss_sum, 'data')
+            return new_state, grad_sum_f32, metrics_sum, loss_sum
+
+        new_state, grad_sum_f32, metrics_sum, _ = per_shard_scan(
+            train_state.params, train_state.state, rng, batch_mb
+        )
+
+        data_axis_size = mesh.shape['data']
+        inv = 1.0 / float(num_microbatches * data_axis_size)
+        grads = jax.tree.map(lambda p, g: (g * inv).astype(p.dtype),
+                             train_state.params, grad_sum_f32)
         metrics_dict = jax.tree.map(lambda x: x * inv, metrics_sum)
-        # average grads, then cast back to param dtype for the optimizer step
-        grads = jax.tree.map(
-            lambda p, g: (g * inv).astype(p.dtype), train_state.params, grad_sum_f32
-        )
 
     # 4) Optimizer + (optional) EMA
     updates, new_opt_state = optimizer.update(
@@ -489,6 +509,7 @@ def train_and_evaluate(
         learning_rate_fn=schedule_fn,
         ema_rate=config.ema_rate,
         num_microbatches=config.get("num_microbatches", None),
+        mesh=mesh,
     )
 
     if config.check_nans:
