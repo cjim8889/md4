@@ -20,18 +20,18 @@ from md4.utils.pubchem_worker import process_and_write_shard_tfrecord
 _SENTENCEPIECE_TOKENIZER = "data/sentencepiece_tokenizer.model"
 
 
-def _parse_tfexample_fn(tfrecord, fp_bits=2048):
+def _parse_tfexample_fn(tfrecord, fp_bits=2048, num_variants=1):
     """Parse a single TFRecord example."""
     # Define feature description based on the features used in dataset creation
     # Note: fingerprint might be stored as int64 in TFRecord but we want int8
-    # SMILES could be either string (raw SMILES) or tokenized integers depending on tokenizer usage
+    # SMILES is now a sequence of variants
     feature_description = {
         "smiles": tf.io.FixedLenFeature(
-            [], tf.string
-        ),  # Use VarLenFeature to handle both cases
+            [num_variants], tf.string
+        ),  # Fixed length sequence of SMILES variants
         "fingerprint": tf.io.FixedLenFeature(
             [fp_bits], tf.int64
-        ),  # Read as int8 directly
+        ),  # Read as int64, convert to int8
     }
 
     # Parse the input tf.train.Example proto using the dictionary above
@@ -42,62 +42,44 @@ def _parse_tfexample_fn(tfrecord, fp_bits=2048):
 
     return example
 
-
-def _parse_smiles_with_rdkit(smiles_bytes):
-    """Parse SMILES string using RDKit and return processed string.
-
-    Args:
-        smiles_bytes: SMILES string as bytes from TensorFlow
-
-    Returns:
-        Processed SMILES string as bytes
-    """
-    try:
-        # Decode bytes to string
-        smiles_str = (
-            smiles_bytes.numpy().decode("utf-8")
-            if hasattr(smiles_bytes, "numpy")
-            else smiles_bytes.decode("utf-8")
-        )
-
-        # TODO: Add RDKit processing here
-        # Example placeholder - you can fill this in:
-        # from rdkit import Chem
-        mol = Chem.MolFromSmiles(smiles_str)
-        if mol is not None:
-            randomized_smiles = Chem.MolToSmiles(mol, doRandom=True)
-            return randomized_smiles.encode("utf-8")
-
-        # For now, just return the original SMILES
-        return smiles_str.encode("utf-8")
-    except Exception as e:
-        # Return original on error
-        return smiles_bytes if isinstance(smiles_bytes, bytes) else smiles_bytes.numpy()
+def _choose_random_variant(seed=None):
+    def _f(ex):
+        n = tf.shape(ex["smiles"])[0]
+        idx = tf.random.uniform([], 0, n, dtype=tf.int32, seed=seed)
+        out = {"smiles": ex["smiles"][idx], "fingerprint": ex["fingerprint"]}
+        # Set static shapes:
+        out["smiles"].set_shape([])
+        out["fingerprint"].set_shape(ex["fingerprint"].shape)  # [fp_bits]
+        return out
+    return _f
 
 
-def _apply_rdkit_parsing(example):
-    """Apply RDKit parsing to SMILES field using tf.py_function."""
-    # Apply RDKit parsing to the SMILES string
-    parsed_smiles = tf.py_function(
-        func=_parse_smiles_with_rdkit, inp=[example["smiles"]], Tout=tf.string
-    )
-    # Set shape since py_function loses shape information
-    parsed_smiles.set_shape([])
-
-    # Update the example with parsed SMILES
-    example["smiles"] = parsed_smiles
-    return example
+def _expand_variants_to_pairs(example):
+    """Expand SMILES variants to create separate fingerprint-SMILES pairs."""
+    # Get the number of variants
+    num_variants = tf.shape(example["smiles"])[0]
+    
+    # Repeat fingerprint for each variant
+    fingerprints = tf.tile(tf.expand_dims(example["fingerprint"], 0), [num_variants, 1])
+    
+    # Create dataset from variants
+    variant_dataset = tf.data.Dataset.from_tensor_slices({
+        "smiles": example["smiles"],
+        "fingerprint": fingerprints
+    })
+    
+    return variant_dataset
 
 
 def create_high_entropy_dataset(
     tfrecord_pattern,
     fp_bits=2048,
+    num_variants=1,
     cycle_length=10,
     block_length=1,
     file_shuffle_buffer=1000,
     record_shuffle_buffer=2000,
     batch_shuffle_buffer=20,
-    use_rdkit_parsing=True,
     seed=None,
 ):
     """Create a high-entropy dataset from TFRecord files with multiple levels of shuffling."""
@@ -120,13 +102,11 @@ def create_high_entropy_dataset(
 
     # Parse raw protobufs into structs
     dataset = dataset.map(
-        functools.partial(_parse_tfexample_fn, fp_bits=fp_bits),
+        functools.partial(_parse_tfexample_fn, fp_bits=fp_bits, num_variants=num_variants),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
 
-    # Apply RDKit parsing if enabled
-    if use_rdkit_parsing:
-        dataset = dataset.map(_apply_rdkit_parsing, num_parallel_calls=tf.data.AUTOTUNE)
+    dataset = dataset.map(_choose_random_variant(seed), num_parallel_calls=tf.data.AUTOTUNE)
 
     # Add record-level shuffling for maximum entropy
     dataset = dataset.shuffle(
@@ -150,20 +130,31 @@ def preprocess_or_load_pubchem(
     fp_bits=2048,
     training_shards=16,
     validation_shards=4,
-    max_length=160,
+    num_variants=1,
     num_workers=None,
     include_formula=False,
+    canonical=True,
+    randomize=True,
+    isomeric=False,
+    use_safe=False,
 ):
     """Load and preprocess PubChem dataset with SAFE encoding and tokenizer training.
 
     Args:
         tfrecord_dir: Directory to store/read TFRecord files
         parquet_dir: Directory containing parquet files
+        version: Dataset version string
         fp_radius: Morgan fingerprint radius
         fp_bits: Number of bits for fingerprint
-        pad_to_length: Length to pad atom types to
-        chunk_size: Chunk size for multiprocessing (default: 1000)
-        num_processes: Number of processes to use (default: min(cpu_count(), 8))
+        training_shards: Number of training shards
+        validation_shards: Number of validation shards
+        num_variants: Number of SMILES variants per molecule
+        num_workers: Number of processes to use (default: cpu_count())
+        include_formula: Whether to include molecular formulas
+        canonical: Whether to canonicalize SMILES
+        randomize: Whether to randomize SMILES output
+        isomeric: Whether to include stereochemistry
+        use_safe: Whether to use SAFE encoding for SMILES
     """
     # Import heavy modules only when needed
 
@@ -233,7 +224,7 @@ def preprocess_or_load_pubchem(
 
         features = tfds.features.FeaturesDict(
             {
-                "smiles": tfds.features.Text(),
+                "smiles": tfds.features.Sequence(tfds.features.Text(), length=num_variants),
                 "fingerprint": tfds.features.Tensor(shape=(fp_bits,), dtype=np.int8),
             }
         )
@@ -250,10 +241,12 @@ def preprocess_or_load_pubchem(
             features=features,
             fp_bits=fp_bits,
             fp_radius=fp_radius,
-            canonical=config.get("canonical", True),
-            randomize=config.get("randomize", True),
-            isomeric=config.get("isomeric", False),
+            canonical=canonical,
+            randomize=randomize,
+            isomeric=isomeric,
+            num_variants=num_variants,
             include_formula=include_formula,
+            use_safe=use_safe,
         )
 
         valid_training_counts = process_map(
@@ -274,10 +267,12 @@ def preprocess_or_load_pubchem(
             features=features,
             fp_bits=fp_bits,
             fp_radius=fp_radius,
-            canonical=config.get("canonical", True),
-            randomize=config.get("randomize", True),
-            isomeric=config.get("isomeric", False),
+            canonical=canonical,
+            randomize=randomize,
+            isomeric=isomeric,
+            num_variants=num_variants,
             include_formula=include_formula,
+            use_safe=use_safe,
         )
 
         valid_validation_counts = process_map(
@@ -302,7 +297,7 @@ def preprocess_or_load_pubchem(
                     num_bytes=0,
                 ),
             ],
-            description="PubChem dataset with SMILES, Morgan fingerprints (radius={fp_radius}, bits={fp_bits})",
+            description="PubChem dataset with SMILES (Safe: {use_safe}), Morgan fingerprints (radius={fp_radius}, bits={fp_bits})",
             check_data=False,
         )
 
@@ -410,7 +405,6 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
     pubchem_builder = preprocess_or_load_pubchem(
         tfrecord_dir=tfrecord_dir,
         parquet_dir=parquet_dir,
-        max_length=max_length,
         version=config.get("version", "1.0.0"),
         fp_radius=fp_radius,
         fp_bits=fp_bits,
@@ -418,6 +412,11 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         validation_shards=config.get("validation_shards", 2),
         num_workers=num_processes,
         include_formula=include_formula,
+        canonical=config.get("canonical", True),
+        randomize=config.get("randomize", True),
+        isomeric=config.get("isomeric", False),
+        num_variants=config.get("num_variants", 1),
+        use_safe=config.get("use_safe", False),
     )
 
     # Load SMILES tokenizer
@@ -438,6 +437,7 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
     )
 
     def _tokenize_and_truncate(x):
+        # x["smiles"] is now a single string (not a list) after expansion
         toks = tokenizer.encode(x["smiles"])
         toks = tf.cast(toks, tf.int32)
         x["smiles"] = random_pad_after_first_sep_ratio(
@@ -458,11 +458,11 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         train_dataset = create_high_entropy_dataset(
             train_pattern,
             fp_bits=fp_bits,
+            num_variants=config.get("num_variants", 1),
             cycle_length=config.get("cycle_length", 16),
             block_length=config.get("block_length", 4),
             file_shuffle_buffer=config.get("file_shuffle_buffer", 1000),
             record_shuffle_buffer=config.get("record_shuffle_buffer", 10000),
-            use_rdkit_parsing=config.get("use_rdkit_parsing", False),
             seed=seed,
         )
 
@@ -496,11 +496,11 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         eval_dataset = create_high_entropy_dataset(
             validation_pattern,
             fp_bits=fp_bits,
+            num_variants=config.get("num_variants", 1),
             cycle_length=config.get("cycle_length", 8),
             block_length=config.get("block_length", 2),
             file_shuffle_buffer=config.get("file_shuffle_buffer", 200),
             record_shuffle_buffer=config.get("record_shuffle_buffer", 2000),
-            use_rdkit_parsing=config.get("use_rdkit_parsing", False),
             seed=seed + 2 if seed is not None else None,
         )
 
@@ -611,17 +611,18 @@ if __name__ == "__main__":
                 "max_length": 128,
                 "tokenizer": "data/sentencepiece_tokenizer_bpe_3000_newcorpus.model",
                 "batch_size": 512,
-                "version": "1.1.0",
-                "training_shards": 128,
-                "validation_shards": 4,
-                "num_processes": 128,
+                "version": "1.2.0",
+                "training_shards": 160,
+                "validation_shards": 6,
+                "num_processes": 160,
                 "include_formula": True,  # Set to True to include molecular formulas
                 # SMILES processing configuration
                 "canonical": True,  # Whether to canonicalize SMILES
                 "randomize": True,  # Whether to randomize SMILES output
                 "isomeric": False,  # Whether to include stereochemistry
+                "num_variants": 2,  # Number of SMILES variants per molecule
                 # Data directory configuration
-                "tfrecord_data_dir": "./data/pubchem_large_text",
+                "tfrecord_data_dir": "/mnt/data/pubchem_large_text",
                 "parquet_data_dir": "data/pubchem_large/data",
                 # High-entropy loading configuration
                 "cycle_length": 16,  # Number of files to interleave concurrently
@@ -629,7 +630,7 @@ if __name__ == "__main__":
                 "file_shuffle_buffer": 1000,  # File-level shuffle buffer
                 "record_shuffle_buffer": 10000,  # Record-level shuffle buffer
                 "batch_shuffle_buffer": 50,  # Batch-level shuffle buffer
-                "use_rdkit_parsing": False,
+                "use_safe": True,
             }
         ),
         seed=42,
