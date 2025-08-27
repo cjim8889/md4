@@ -4,7 +4,8 @@ This module contains only the essential imports and functions needed
 for multiprocessing workers to avoid loading heavy dependencies.
 """
 
-from typing import List, Tuple, Any
+from typing import Any, List, Tuple
+
 import numpy as np
 
 
@@ -16,9 +17,11 @@ def process_and_write_shard(args):
     """
     shard_index, total_shards, shard, split, output_dir, features, fp_bits = args[:7]
 
-    from array_record.python import array_record_module as array_record
-    from .rdkit_utils import process_smiles
     import os
+
+    from array_record.python import array_record_module as array_record
+
+    from .rdkit_utils import process_smiles
 
     shard_filename = os.path.join(
         output_dir,
@@ -49,16 +52,18 @@ def process_and_write_shard(args):
 def process_and_write_shard_tfrecord(
     shard_index: int,
     shard,
-    formula_shard = None,
+    formula_shard=None,
     *,
     total_shards: int,
     split: str,
     output_dir: str,
     features,
     fp_bits: int,
-    tokenizer,
-    max_length: int,
-    include_formula: bool = False
+    fp_radius: int = 2,
+    canonical: bool = True,
+    randomize: bool = True,
+    isomeric: bool = False,
+    include_formula: bool = False,
 ):
     """Process a shard of SMILES and write results to TFRecord.
 
@@ -71,14 +76,18 @@ def process_and_write_shard_tfrecord(
         output_dir: Directory to write TFRecord files
         features: TensorFlow features specification
         fp_bits: Number of bits for fingerprint
-        tokenizer: Tokenizer for SMILES encoding
-        max_length: Maximum sequence length
+        fp_radius: Morgan fingerprint radius
+        canonical: Whether to canonicalize SMILES
+        randomize: Whether to randomize SMILES output
+        isomeric: Whether to include stereochemistry in output SMILES
         include_formula: Whether to include molecular formulas
     """
 
-    import tensorflow as tf
-    from .rdkit_utils import process_smiles
     import os
+
+    import tensorflow as tf
+
+    from .rdkit_utils import process_smiles
 
     shard_filename = os.path.join(
         output_dir,
@@ -92,15 +101,20 @@ def process_and_write_shard_tfrecord(
         with tf.io.TFRecordWriter(shard_filename) as writer:
             written_count = 0
             for i, smi in enumerate(shard):
-                result = process_smiles(smi, fp_radius=2, fp_bits=fp_bits)
+                result = process_smiles(
+                    smi,
+                    fp_radius=fp_radius,
+                    fp_bits=fp_bits,
+                    canonical=canonical,
+                    randomize=randomize,
+                    isomeric=isomeric,
+                )
                 if result is not None:
                     _fp, _smiles = result
 
-                    # Prepare input for tokenizer - either just SMILES or [formula, SMILES]
-                    text = None
-                    text_pair = None
+                    # Prepare SMILES string - either just SMILES or [formula, SMILES]
                     if include_formula and formula_shard is not None:
-                        # Use formula and SMILES as text pair for tokenizer
+                        # Use formula and SMILES as combined text
                         formula = formula_shard[i]
 
                         # Handle missing or invalid formulas
@@ -121,48 +135,25 @@ def process_and_write_shard_tfrecord(
                             ):
                                 continue
 
-                            text = formula_str
-                            text_pair = smi_str
+                            smiles = f"{formula_str}[SEP]{smi_str}"
                         except (ValueError, TypeError):
                             # Skip entries with conversion errors
                             continue
                     else:
-                        # Backward compatibility: just use SMILES
+                        # Just use SMILES
                         try:
-                            text = str(_smiles).strip()
-                            text_pair = None
+                            smi_str = str(_smiles).strip()
                             # Validate that text is a non-empty string
-                            if not text or text.lower() in ["nan", "none", "null"]:
+                            if not smi_str or smi_str.lower() in [
+                                "nan",
+                                "none",
+                                "null",
+                            ]:
                                 continue
+                            smiles = smi_str
                         except (ValueError, TypeError):
                             # Skip entries with conversion errors
                             continue
-
-                    if tokenizer is not None:
-                        try:
-                            smiles = (
-                                tokenizer.encode(
-                                    text=text,
-                                    text_pair=text_pair,
-                                    add_special_tokens=True,
-                                    padding="max_length",
-                                    truncation=True,
-                                    max_length=max_length,
-                                    return_tensors="np",
-                                )
-                                .reshape(-1)
-                                .astype(np.int32)
-                            )
-                        except Exception as e:
-                            # Skip entries that cause tokenization errors
-                            print(
-                                f"Tokenization error for shard {shard_index}, entry {i}: {e}"
-                            )
-                            print(f"  Text: {repr(text)}")
-                            print(f"  Text_pair: {repr(text_pair)}")
-                            continue
-                    else:
-                        smiles = f"{text}[SEP]{text_pair}"
 
                     serialised = features.serialize_example(
                         {
@@ -191,6 +182,10 @@ def process_and_write_msg_tfrecord(
     tokenizer: Any,
     max_length: int,
     fp_bits: int = 2048,
+    fp_radius: int = 2,
+    canonical: bool = True,
+    randomize: bool = True,
+    isomeric: bool = False,
 ) -> int:
     """Process MSG finetune data (INCHI + fingerprints) and write to TFRecord.
 
@@ -208,9 +203,10 @@ def process_and_write_msg_tfrecord(
     Returns:
         Number of successfully written entries
     """
+    import os
+
     import tensorflow as tf
     from rdkit.Chem import MolFromInchi, MolToSmiles, rdFingerprintGenerator
-    import os
 
     shard_filename = os.path.join(
         output_dir,
@@ -218,7 +214,7 @@ def process_and_write_msg_tfrecord(
     )
 
     # Create Morgan fingerprint generator with configurable fp_bits (modern approach)
-    mfpgen = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=fp_bits)
+    mfpgen = rdFingerprintGenerator.GetMorganGenerator(radius=fp_bits, fpSize=fp_bits)
 
     written_count = 0
     skipped_count = 0
@@ -233,9 +229,12 @@ def process_and_write_msg_tfrecord(
                     skipped_count += 1
                     continue
 
-                # Generate canonical SMILES (no stereochemistry, standardized)
+                # Generate SMILES with specified options
                 canonical_smiles = MolToSmiles(
-                    mol, isomericSmiles=False, canonical=True
+                    mol,
+                    isomericSmiles=isomeric,
+                    canonical=canonical,
+                    doRandom=randomize,
                 )
                 if not canonical_smiles:
                     skipped_count += 1
