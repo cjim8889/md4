@@ -60,6 +60,7 @@ def process_and_write_shard_tfrecord(
     features,
     fp_bits: int,
     fp_radius: int = 2,
+    num_variants: int = 1,
     canonical: bool = True,
     randomize: bool = True,
     isomeric: bool = False,
@@ -108,61 +109,72 @@ def process_and_write_shard_tfrecord(
                     canonical=canonical,
                     randomize=randomize,
                     isomeric=isomeric,
+                    num_variants=num_variants,
                 )
                 if result is not None:
-                    _fp, _smiles = result
+                    _fp, _smiles_list = result
 
-                    # Prepare SMILES string - either just SMILES or [formula, SMILES]
-                    if include_formula and formula_shard is not None:
-                        # Use formula and SMILES as combined text
-                        formula = formula_shard[i]
+                    # Process each SMILES variant
+                    _processed_smiles_list = []
+                    for _smiles in _smiles_list:
+                        # Prepare SMILES string - either just SMILES or [formula, SMILES]
+                        if include_formula and formula_shard is not None:
+                            # Use formula and SMILES as combined text
+                            formula = formula_shard[i]
 
-                        # Handle missing or invalid formulas
-                        if formula is None:
-                            # Skip this entry if formula is missing
-                            continue
-
-                        # Convert to string and validate
-                        try:
-                            formula_str = str(formula).strip()
-                            smi_str = str(_smiles).strip()
-
-                            # Skip if either is empty after conversion
-                            if (
-                                not formula_str
-                                or not smi_str
-                                or formula_str.lower() in ["nan", "none", "null"]
-                            ):
+                            # Handle missing or invalid formulas
+                            if formula is None:
+                                # Skip this variant if formula is missing
                                 continue
 
-                            smiles = f"{formula_str}[SEP]{smi_str}"
-                        except (ValueError, TypeError):
-                            # Skip entries with conversion errors
-                            continue
-                    else:
-                        # Just use SMILES
-                        try:
-                            smi_str = str(_smiles).strip()
-                            # Validate that text is a non-empty string
-                            if not smi_str or smi_str.lower() in [
-                                "nan",
-                                "none",
-                                "null",
-                            ]:
+                            # Convert to string and validate
+                            try:
+                                formula_str = str(formula).strip()
+                                smi_str = str(_smiles).strip()
+
+                                # Skip if either is empty after conversion
+                                if (
+                                    not formula_str
+                                    or not smi_str
+                                    or formula_str.lower() in ["nan", "none", "null"]
+                                ):
+                                    continue
+
+                                smiles = f"{formula_str}[SEP]{smi_str}"
+                            except (ValueError, TypeError):
+                                # Skip entries with conversion errors
                                 continue
-                            smiles = smi_str
-                        except (ValueError, TypeError):
-                            # Skip entries with conversion errors
-                            continue
+                        else:
+                            # Just use SMILES
+                            try:
+                                smi_str = str(_smiles).strip()
+                                # Validate that text is a non-empty string
+                                if not smi_str or smi_str.lower() in [
+                                    "nan",
+                                    "none",
+                                    "null",
+                                ]:
+                                    continue
+                                smiles = smi_str
+                            except (ValueError, TypeError):
+                                # Skip entries with conversion errors
+                                continue
+
+                        _processed_smiles_list.append(smiles)
+                        txt_file.write(f"{smiles}\n")
+
+
+                    if not _processed_smiles_list:
+                        # Skip writing if no valid SMILES variants
+                        continue
 
                     serialised = features.serialize_example(
                         {
-                            "smiles": smiles,
+                            "smiles": _processed_smiles_list,
                             "fingerprint": _fp,
                         }
                     )
                     writer.write(serialised)
-                    txt_file.write(f"{smiles}\n")
 
                     written_count += 1
 
@@ -186,6 +198,7 @@ def process_and_write_msg_tfrecord(
     canonical: bool = True,
     randomize: bool = True,
     isomeric: bool = False,
+    num_variants: int = 1,
 ) -> int:
     """Process MSG finetune data (INCHI + fingerprints) and write to TFRecord.
 

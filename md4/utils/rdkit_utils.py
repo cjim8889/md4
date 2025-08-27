@@ -147,7 +147,7 @@ def get_generator(fp_radius=2, fp_bits=2048):
 
 
 def process_smiles(
-    smi, fp_radius=2, fp_bits=2048, canonical=True, randomize=True, isomeric=False
+    smi, fp_radius=2, fp_bits=2048, canonical=True, randomize=True, isomeric=False, num_variants=1
 ):
     """Process SMILES string with filtering and configurable output format.
 
@@ -158,19 +158,41 @@ def process_smiles(
         canonical: Whether to canonicalize SMILES (default: True)
         randomize: Whether to randomize SMILES output (default: True, ignored if canonical=False)
         isomeric: Whether to include stereochemistry in output SMILES (default: False)
+        num_variants: Number of SMILES variants to generate (default: 1)
 
     Returns:
-        Tuple of (fingerprint, smiles) or None if processing fails
+        Tuple of (fingerprint, smiles_list) or None if processing fails
+        - fingerprint: numpy array of Morgan fingerprint
+        - smiles_list: list of SMILES strings
+          If canonical=True: first element is canonical, rest are randomized
+          If canonical=False: all elements are original SMILES (repeated)
     """
     try:
         mol = Chem.MolFromSmiles(smi)
         if filter_molecule(mol):
             fingerprint = get_generator(fp_radius, fp_bits).GetFingerprintAsNumPy(mol)
-            smiles = Chem.MolToSmiles(
-                mol, isomericSmiles=isomeric, doRandom=randomize, canonical=canonical
-            )
+            
+            smiles_list = []
+            
+            if canonical:
+                # First variant: canonical (non-randomized)
+                canonical_smiles = Chem.MolToSmiles(
+                    mol, isomericSmiles=isomeric, doRandom=False, canonical=True
+                )
+                smiles_list.append(canonical_smiles)
+            else:
+                # No canonicalization, use original SMILES
+                smiles_list.append(smi)
+                
+            # Additional variants: randomized if requested
+            if randomize and num_variants > 1:
+                for _ in range(num_variants - 1):
+                    randomized_smiles = Chem.MolToSmiles(
+                        mol, isomericSmiles=isomeric, doRandom=True, canonical=False
+                    )
+                    smiles_list.append(randomized_smiles)
 
-            return np.asarray(fingerprint, dtype=np.int8), smiles
+            return np.asarray(fingerprint, dtype=np.int8), smiles_list
     except Exception:
         pass
     return None
