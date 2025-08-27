@@ -50,9 +50,7 @@ def process_and_write_shard(args):
 
 
 def process_and_write_shard_tfrecord(
-    shard_index: int,
-    shard,
-    formula_shard=None,
+    args: tuple,
     *,
     total_shards: int,
     split: str,
@@ -65,6 +63,7 @@ def process_and_write_shard_tfrecord(
     randomize: bool = True,
     isomeric: bool = False,
     include_formula: bool = False,
+    use_safe: bool = False,
 ):
     """Process a shard of SMILES and write results to TFRecord.
 
@@ -82,7 +81,10 @@ def process_and_write_shard_tfrecord(
         randomize: Whether to randomize SMILES output
         isomeric: Whether to include stereochemistry in output SMILES
         include_formula: Whether to include molecular formulas
+        use_safe: Whether to use SAFE encoding for SMILES
     """
+
+    shard_index, shard, formula_shard = args
 
     import os
 
@@ -98,6 +100,14 @@ def process_and_write_shard_tfrecord(
         output_dir, f"pubchem_large-{split}-{shard_index:05d}-of-{total_shards:05d}.txt"
     )
 
+    safe_encoder = None
+    if use_safe:
+        from .safe_utils import SAFEConverter
+
+        safe_encoder = SAFEConverter(
+            slicer="brics", require_hs=False, ignore_stereo=True
+        )
+
     with open(shard_txt_filename, "w") as txt_file:
         with tf.io.TFRecordWriter(shard_filename) as writer:
             written_count = 0
@@ -110,6 +120,7 @@ def process_and_write_shard_tfrecord(
                     randomize=randomize,
                     isomeric=isomeric,
                     num_variants=num_variants,
+                    safe_encoder=safe_encoder,
                 )
                 if result is not None:
                     _fp, _smiles_list = result
