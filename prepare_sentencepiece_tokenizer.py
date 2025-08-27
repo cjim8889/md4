@@ -183,7 +183,7 @@ def _train_sentencepiece(
             f"--model_prefix={model_fp.name}",
             f"--model_type={model_type}",
             f"--user_defined_symbols={','.join(user_defined_symbols)}",
-            "--input_sentence_size=80000000",
+            "--input_sentence_size=100000000",
             "--add_dummy_prefix=false",
             "--num_threads=128",
             "--unk_piece=[UNK]",
