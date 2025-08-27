@@ -7,6 +7,8 @@ import numpy as np
 from rdkit import Chem, RDLogger
 from rdkit.Chem import Descriptors, rdFingerprintGenerator, rdMolDescriptors
 
+from .safe_utils import SAFEConverter
+
 # Set random seed and suppress RDKit warnings
 random.seed(42)
 lg = RDLogger.logger()
@@ -147,7 +149,7 @@ def get_generator(fp_radius=2, fp_bits=2048):
 
 
 def process_smiles(
-    smi, fp_radius=2, fp_bits=2048, canonical=True, randomize=True, isomeric=False, num_variants=1
+    smi, fp_radius=2, fp_bits=2048, canonical=True, randomize=True, isomeric=False, num_variants=1, safe_encoder: SAFEConverter | None = None
 ):
     """Process SMILES string with filtering and configurable output format.
 
@@ -176,20 +178,28 @@ def process_smiles(
             
             if canonical:
                 # First variant: canonical (non-randomized)
-                canonical_smiles = Chem.MolToSmiles(
-                    mol, isomericSmiles=isomeric, doRandom=False, canonical=True
-                )
+                if safe_encoder is not None:
+                    # Use SAFE encoding for canonical SMILES
+                    canonical_smiles = safe_encoder.encoder(mol, canonical=True, randomize=False)
+                else:
+                    canonical_smiles = Chem.MolToSmiles(
+                        mol, isomericSmiles=isomeric, doRandom=False, canonical=True
+                    )
                 smiles_list.append(canonical_smiles)
             else:
                 # No canonicalization, use original SMILES
-                smiles_list.append(smi)
-                
+                smiles_list.append(safe_encoder.encoder(mol, canonical=False, randomize=False))
+
             # Additional variants: randomized if requested
             if randomize and num_variants > 1:
                 for _ in range(num_variants - 1):
-                    randomized_smiles = Chem.MolToSmiles(
-                        mol, isomericSmiles=isomeric, doRandom=True, canonical=False
-                    )
+                    if safe_encoder is not None:
+                        # Use SAFE encoding for randomized SMILES
+                        randomized_smiles = safe_encoder.encoder(mol, canonical=False, randomize=True)
+                    else:
+                        randomized_smiles = Chem.MolToSmiles(
+                            mol, isomericSmiles=isomeric, doRandom=True, canonical=False
+                        )
                     smiles_list.append(randomized_smiles)
 
             return np.asarray(fingerprint, dtype=np.int8), smiles_list
