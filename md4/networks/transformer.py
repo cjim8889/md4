@@ -248,10 +248,8 @@ class Attention(nn.Module):
         xk = xk.swapaxes(1, 2)
         xv = xv.swapaxes(1, 2)
 
-        xk_transposed = xk.swapaxes(2, 3)
-        scores = jnp.matmul(
-            xq.astype(jnp.float32), xk_transposed.astype(jnp.float32)
-        ) / math.sqrt(self.head_dim)
+        scores = jnp.einsum("b h t d, b h s d -> b h t s", xq.astype(jnp.float32), xk.astype(jnp.float32)) / math.sqrt(self.head_dim)
+
         if self.causal:
             mask = jnp.full((1, 1, seqlen, seqlen), -jnp.inf, dtype=jnp.float32)
             mask = jnp.triu(mask, k=1)
@@ -261,7 +259,7 @@ class Attention(nn.Module):
         scores = nn.softmax(scores, axis=-1).astype(self.dtype)
         if self.dropout_rate > 0.0:
             scores = self.attn_dropout(scores, deterministic=not train)
-        output = jnp.matmul(scores, xv)  # (bs, n_heads, seqlen, head_dim)
+        output = jnp.einsum("b h t s, b h s d -> b h t d", scores, xv)
 
         # restore time as batch dimension and concat heads
         output = output.swapaxes(1, 2).reshape(bsz, seqlen, -1)
