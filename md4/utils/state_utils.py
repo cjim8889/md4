@@ -287,20 +287,27 @@ def create_sharded_train_state(
 
         return state
 
-    adam = optax.adamw(
-        schedule_fn,
-        b1=0.9,
-        b2=config.b2,
-        weight_decay=config.weight_decay,
-    )
+    if config.get("scale_by_muon", False):
+        adam = optax.contrib.muon(
+            schedule_fn,
+            adam_b1=0.9,
+            adam_b2=config.b2,
+            weight_decay=config.weight_decay,
+        )
+    else:
+        adam = optax.adamw(
+            schedule_fn,
+            b1=0.9,
+            b2=config.b2,
+            weight_decay=config.weight_decay,
+        )
+
+
 
     chains = [
         optax.clip(config.clip) if config.clip > 0.0 else optax.identity(),
         adam,
     ]
-
-    if config.get("scale_by_muon", False):
-        chains.append(optax.contrib.scale_by_muon())
 
     optimizer = optax.chain(
         *chains,
