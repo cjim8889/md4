@@ -6,13 +6,19 @@ fingerprints predicted from MS/MS spectra with the MIST model**.*
 
 ---
 
-## 🛠️ Installation
+## Prerequisite
 
-Create a fresh environment (GPU example shown):
+Create a fresh environment (with libtpu):
 
 ```bash
 uv sync
 ```
+
+## Overview
+
+  - Large scale, Multihost training capable
+  - DDP, FSDP, TP implemented using jax manual parallelism
+  - Zero 0 for the moment, Zero 1 and 2 planned (should be easy to do) 
 
 
 ---
