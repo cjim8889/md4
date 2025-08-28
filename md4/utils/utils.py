@@ -26,7 +26,6 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
 from absl import logging
 from clu import platform
 from orbax import checkpoint as orbax_checkpoint
@@ -250,30 +249,6 @@ def plot_embeddings(step, workdir, embeddings, annotations=None):
     embedding_plot = workdir / "embedding_{}.png".format(step)
     with embedding_plot.open("wb") as f:
         fig.savefig(f)
-
-
-def plot_heatmap(step, workdir, emb_gram_matrix, token_labels=None):
-    """Helper function to plot embeddings."""
-    fig, ax = plt.subplots()
-    assert emb_gram_matrix.ndim == 2
-    if token_labels:
-        _ = sns.heatmap(
-            emb_gram_matrix,
-            linewidth=0.5,
-            ax=ax,
-            xticklabels=token_labels,
-            yticklabels=token_labels,
-        )
-    else:
-        _ = sns.heatmap(emb_gram_matrix, linewidth=0.5, ax=ax)
-
-    plt.xticks(rotation=90)
-    plt.yticks(rotation=0)
-
-    heatmap_plot = workdir / "embedding_heatmap_{}.png".format(step)
-    with heatmap_plot.open("wb") as f:
-        fig.savefig(f)
-
 
 def generate_image_grids(images):
     """Simple helper to generate a single image from a mini batch."""

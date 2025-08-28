@@ -190,16 +190,37 @@ def train_step(
             jax.shard_map,
             mesh=mesh,
             in_specs=(params_specs, state_specs, P(), batch_specs),
-            out_specs=(state_specs,  # new_state (replicated after psum)
-                       jax.tree.map(lambda _: P(), grad_acc0),  # grads replicated after psum
-                       jax.tree.map(lambda _: P(), metrics0),   # metrics replicated after psum
-                       P()),                                    # loss replicated after psum
+            out_specs=(state_specs,
+                       jax.tree.map(lambda _: P(), grad_acc0),
+                       jax.tree.map(lambda _: P(), metrics0),
+                       P()),
         )
         def per_shard_scan(params, state, rng_in, batch_mb_local):
-            (_, _, new_state, grad_sum_f32, metrics_sum, loss_sum), _ = jax.lax.scan(
-                body, (rng_in, params, state, grad_acc0, metrics0, loss0), batch_mb_local, unroll=True
+            # --- IMPORTANT: annotate initial carry as varying along 'data' ---
+            grad0    = jax.tree.map(lambda x: jax.lax.pvary(x, ('data',)), grad_acc0)
+            metrics0v = jax.tree.map(lambda x: jax.lax.pvary(x, ('data',)), metrics0)
+            loss0v   = jax.lax.pvary(loss0, ('data',))
+
+            def body(carry, mb):
+                loop_rng, params_c, state_c, grad_acc, metrics_acc, loss_acc = carry
+                loop_rng, mbrng = jax.random.split(loop_rng)
+                # use params from carry:
+                (loss, (state_new, mdict)), grads_param_dtype = grad_fn(
+                    params_c, state_c, mbrng, mb
+                )
+                grad_acc   = jax.tree.map(lambda a, g: a + g.astype(jnp.float32), grad_acc, grads_param_dtype)
+                metrics_acc = jax.tree.map(lambda a, b: a + b, metrics_acc, mdict)
+                loss_acc   = loss_acc + loss
+                return (loop_rng, params_c, state_new, grad_acc, metrics_acc, loss_acc), None
+
+            ( _, _, new_state, grad_sum_f32, metrics_sum, loss_sum), _ = jax.lax.scan(
+                body,
+                (rng_in, params, state, grad0, metrics0v, loss0v),
+                batch_mb_local,
+                unroll=True
             )
-            # >>> SINGLE COMMUNICATION POINT <<<
+
+            # single communication point after the scan:
             grad_sum_f32 = jax.tree.map(lambda g: jax.lax.psum(g, 'data'), grad_sum_f32)
             metrics_sum  = jax.tree.map(lambda m: jax.lax.psum(m, 'data'), metrics_sum)
             loss_sum     = jax.lax.psum(loss_sum, 'data')

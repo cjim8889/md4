@@ -36,7 +36,7 @@ from absl import app, flags, logging
 from clu import platform
 from ml_collections import config_flags
 
-from md4 import sharded_train_v2, train
+from md4 import sharded_train, train
 
 FLAGS = flags.FLAGS
 
@@ -64,7 +64,7 @@ def main(argv):
     )
 
     if FLAGS.sharded:
-        sharded_train_v2.train_and_evaluate(FLAGS.config, FLAGS.workdir, FLAGS.olddir)
+        sharded_train.train_and_evaluate(FLAGS.config, FLAGS.workdir, FLAGS.olddir)
     else:
         train.train_and_evaluate(FLAGS.config, FLAGS.workdir, FLAGS.olddir)
 
