@@ -49,8 +49,8 @@ def get_config() -> config_dict.ConfigDict:
     config.only_adapter = True
     config.raw_fingerprint_dim = 4096
     config.old_config = "md4/configs/md4/molecular_xtra_large.py"
-    config.frozen = True
-    config.partial_load = True
+    config.frozen = False
+    config.partial_load = False
 
     # Frozen parameter configuration
     # Note: paths are matched using 'in' operator against the parameter path tuple
@@ -117,11 +117,23 @@ def get_config() -> config_dict.ConfigDict:
     # Single integer or tuple. If None will use (XManager ID, work unit).
     config.seed = 88
 
-    # Number of workers for Grain loaders.
-    config.grain_num_workers = 15
-    config.grain_num_read_threads = 4
-    config.grain_prefetch_buffer_size = 128
+    #
 
-    config.trial = 0  # Dummy for repeated runs.
-    config.test_in_colab = False
+    config.logical_axis_rules = [
+        ('batch', 'data'),           # Batch dimension -> data parallel
+        # ('hidden', 'model'),         # Hidden/embedding dimensions -> model parallel
+        # ('attn_qkv', 'model'),      # Attention Q/K/V projections -> model parallel
+        # ('attn_o', 'model'),        # Attention output projection -> model parallel
+        # ('ff_mlp', 'model'),        # Feed-forward MLP layers -> model parallel
+        # ('embed_vocab', 'model'),   # Vocabulary embeddings -> model parallel
+        # ('input_embed', 'model'),   # Input embeddings -> model parallel
+        # ('cross_attn', 'model'),    # Cross-attention projections -> model parallel
+        # ('cond', 'model'),          # Conditioning layers -> model parallel
+        # ('cond_input', 'model'),    # Conditioning input layers -> model parallel
+        # ('cond_hidden', 'model'),   # Conditioning hidden layers -> model parallel
+        # ('cond_output', 'model'),   # Conditioning output layers -> model parallel
+        # ('vocab', 'model'),         # Vocabulary output layers -> model parallel
+        # Sequence/time dimensions are left unsharded for efficiency
+    ]
+
     return config

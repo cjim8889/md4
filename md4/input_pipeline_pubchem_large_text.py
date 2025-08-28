@@ -53,24 +53,6 @@ def _choose_random_variant(seed=None):
         return out
     return _f
 
-
-def _expand_variants_to_pairs(example):
-    """Expand SMILES variants to create separate fingerprint-SMILES pairs."""
-    # Get the number of variants
-    num_variants = tf.shape(example["smiles"])[0]
-    
-    # Repeat fingerprint for each variant
-    fingerprints = tf.tile(tf.expand_dims(example["fingerprint"], 0), [num_variants, 1])
-    
-    # Create dataset from variants
-    variant_dataset = tf.data.Dataset.from_tensor_slices({
-        "smiles": example["smiles"],
-        "fingerprint": fingerprints
-    })
-    
-    return variant_dataset
-
-
 def create_high_entropy_dataset(
     tfrecord_pattern,
     fp_bits=2048,
@@ -609,7 +591,7 @@ if __name__ == "__main__":
                 "fp_radius": 2,
                 "fp_bits": 4096,
                 "max_length": 128,
-                "tokenizer": "data/sentencepiece_tokenizer_bpe_3000_newcorpus.model",
+                "tokenizer": "data/sentencepiece_tokenizer_bpe_3000_newcorpus.model", # Path to your tokenizer model
                 "batch_size": 512,
                 "version": "1.2.0",
                 "training_shards": 160,
@@ -622,15 +604,15 @@ if __name__ == "__main__":
                 "isomeric": False,  # Whether to include stereochemistry
                 "num_variants": 2,  # Number of SMILES variants per molecule
                 # Data directory configuration
-                "tfrecord_data_dir": "/mnt/data/pubchem_large_text",
-                "parquet_data_dir": "data/pubchem_large/data",
+                "tfrecord_data_dir": "/mnt/data/pubchem_large_text", # Directory to read/write TFRecord files
+                "parquet_data_dir": "data/pubchem_large/data", # Directory containing train-*.parquet files
                 # High-entropy loading configuration
                 "cycle_length": 16,  # Number of files to interleave concurrently
                 "block_length": 4,  # Number of consecutive elements from each file
                 "file_shuffle_buffer": 1000,  # File-level shuffle buffer
                 "record_shuffle_buffer": 10000,  # Record-level shuffle buffer
                 "batch_shuffle_buffer": 50,  # Batch-level shuffle buffer
-                "use_safe": True,
+                "use_safe": True, # Whether to use SAFE encoding for SMILES
             }
         ),
         seed=42,
