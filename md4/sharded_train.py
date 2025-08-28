@@ -178,8 +178,7 @@ def train_step(
             in_specs=(params_specs, state_specs, P(), batch_specs),
             out_specs=(state_specs,
                        jax.tree.map(lambda _: P(), grad_acc0),
-                       jax.tree.map(lambda _: P(), metrics0),
-                       P()),
+                       jax.tree.map(lambda _: P(), metrics0)),
         )
         def per_shard_scan(params, state, rng_in, batch_mb_local):
             # --- IMPORTANT: annotate initial carry as varying along 'data' ---
