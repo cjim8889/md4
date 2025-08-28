@@ -8,18 +8,18 @@ def get_config() -> config_dict.ConfigDict:
     config = config_dict.ConfigDict()
 
     # wandb configs
-    config.enable_wandb = True
+    config.enable_wandb = True # Enable Weights & Biases logging
     config.wandb_project = "md4"
 
     # mixed precision configs
-    config.dtype = jnp.bfloat16
-    config.param_dtype = jnp.float32
+    config.dtype = jnp.bfloat16 # dtype for computations
+    config.param_dtype = jnp.float32 # dtype for parameters
 
-    # profiler
+    # profiler configs
     config.start_profiler = False
     
     # Multi-host configuration
-    config.initialize_multihost = False  # Enable multi-host JAX initialization
+    config.initialize_multihost = True  # Enable multi-host JAX initialization
 
     # dataset configs
     config.vocab_size = 3000
@@ -31,8 +31,9 @@ def get_config() -> config_dict.ConfigDict:
     
     # Data directory configuration
     config.parquet_data_dir = "data/pubchem_large/data"  # Directory containing train-*.parquet files
-    config.tfrecord_data_dir = "./data/pubchem_large_text"  # Directory to read/write TFRecord files
-    
+    config.tfrecord_data_dir = "/mnt/data/pubchem_large_text"  # Directory to read/write TFRecord files
+    config.interior_frac = 0.2 # Fraction of random padding tokens to be interior
+
     # High-entropy data loading configuration for maximum diversity between epochs
     config.cycle_length = 16  # Number of TFRecord files to interleave concurrently
     config.block_length = 4   # Number of consecutive elements to take from each file
@@ -41,15 +42,15 @@ def get_config() -> config_dict.ConfigDict:
     config.batch_shuffle_buffer = 50       # Batch-level shuffle buffer size
 
     config.classes = -1
-    config.max_length = 128
+    config.max_length = 128 # Maximum sequence length
     config.tokenizer = "data/sentencepiece_tokenizer_bpe_3000_newcorpus.model"
 
     config.min_frequency = 200
 
-    config.task_type = "text"  # text or image
+    config.task_type = "text"  # text
     config.model_type = "md4"
     config.data_shape = (config.max_length,)
-
+    
     # SMILES validity calculation for molecular datasets
     config.calculate_smiles_validity = True
 
@@ -61,19 +62,19 @@ def get_config() -> config_dict.ConfigDict:
     # t or none (removes time dependence)
     config.time_features = "t"
     config.cont_time = True
-    config.fp_bits = 4096
-    config.fingerprint_dim = 4096
+    config.fp_bits = 4096 # Fingerprint bits
+    config.fingerprint_dim = 4096 # Fingerprint embedding dimension
 
-    config.feature_dim = 256
-    config.n_layers = 20
-    config.dropout_rate = 0.0
-    config.multiple_of = 256
+    config.feature_dim = 256 # Model feature dimension
+    config.n_layers = 20 # Number of transformer layers
+    config.dropout_rate = 0.0 # Dropout rate
+    config.multiple_of = 32 # Ensure layer dimensions are multiples of this value
 
-    config.num_heads = 8
-    config.n_kv_heads = 4
-    config.mlp_type = "swiglu"
+    config.num_heads = 8 # Number of attention heads
+    config.n_kv_heads = 4 # Number of key/value heads (can be different from num_heads)
+    config.mlp_type = "glu" # MLP activation type: "geglu", "glu", "swiglu"
     config.depth_scaled_init = True
-    config.cond_type = "adaln_zero"
+    config.cond_type = "adaln_zero" 
     
     # Cross-attention configuration
     config.use_cross_attention = True  # Set to True to enable cross-attention
@@ -81,21 +82,22 @@ def get_config() -> config_dict.ConfigDict:
     config.cross_attention_proj_dim = 256
     config.cross_conditioning_seq_length = 16  # Sequence length for cross-conditioning reshape
 
-    config.learning_rate = 2e-4
+    config.learning_rate = 3e-4
     config.learning_rate_schedule = "cosine"
     config.warmup_steps = 2000
-    config.weight_decay = 1e-6
+    config.weight_decay = 1e-2
+    config.scale_by_muon = False # Whether to scale gradients by muon
     config.clip = 0.0
     config.b2 = 0.999
     config.num_epochs = -1
     config.ema_rate = 0.
     # If num_train_steps==-1 then the number of training steps is calculated from
     # num_epochs.
-    config.num_train_steps = 2_000_000
+    config.num_train_steps = 600_000
     # Evaluates for a full epoch if num_eval_steps==-1.
     config.num_eval_steps = 1000
-    config.batch_size = 1920
-    config.num_microbatches = 3
+    config.batch_size = 8192
+    config.num_microbatches = 4 # Number of microbatches for gradient accumulation
     config.per_device_batch_size = -1
     # If batches should be added to evaluate the entire dataset.
     config.eval_pad_last_batch = False
@@ -109,13 +111,13 @@ def get_config() -> config_dict.ConfigDict:
     # for topp sampler
     config.topp = 0.98
 
-    config.log_loss_every_steps = 1000
-    config.eval_every_steps = 10000
-    config.checkpoint_every_steps = 10000
+    config.log_loss_every_steps = 500
+    config.eval_every_steps = 5000
+    config.checkpoint_every_steps = 5000
     config.checkpoint_keep_period = 200000
     
-    # Checkpoint directory configuration
-    config.checkpoint_dir = "gs://metal-repeater-411410-tpu-checkpoints/1B_3000_vocab_linear_bf16_expt/checkpoints"
+    # Checkpoint directory configuration, it doesn't need to be set, will default to checkpoints in the workdir
+    config.checkpoint_dir = "gs://metal-repeater-411410-tpu-checkpoints/1B_3000_vocab_linear_glu_bf16_expt/checkpoints"
 
     # Single integer or tuple. If None will use (XManager ID, work unit).
     config.seed = 88
@@ -124,8 +126,12 @@ def get_config() -> config_dict.ConfigDict:
     
     # Device mesh configuration for distributed training
     config.mesh_config = config_dict.ConfigDict()
-    config.mesh_config.mesh_shape = (8, )  # Mesh shape, e.g., (2, 4) for 8 devices
-    config.mesh_config.mesh_axis_names = ("data",)  # Names for mesh axes
+    config.mesh_config.mesh_shape = (16, )  # Mesh shape, e.g., (2, 4) for 8 devices
+    config.mesh_config.mesh_axis_names = ("data", )  # Names for mesh axes
+    
+    # Global array multiplier for make_global_array function
+    # This should be the size of the model axis (first dimension in mesh_shape)
+    config.global_array_multiplier = config.mesh_config.mesh_shape[0]  # model axis size = 2
 
     # Logical sharding configuration
     # Maps logical axis names (used in nn.with_logical_partitioning) to physical mesh axes

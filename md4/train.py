@@ -5,7 +5,6 @@ from typing import Any
 import flax
 import flax.jax_utils as flax_utils
 import flax.linen as nn
-import grain.python as grain
 import jax
 import jax.numpy as jnp
 import ml_collections
@@ -20,7 +19,7 @@ from md4 import (
     input_pipeline,
     sampling,
 )
-from md4.utils import checkpoint_utils, partial_load_utils, rdkit_utils, state_utils, utils, wandb_writer
+from md4.utils import checkpoint_utils, learning_rate, rdkit_utils, state_utils, utils, wandb_writer
 
 
 def merge_batch_stats(
@@ -36,109 +35,6 @@ def merge_batch_stats(
         return replicated_state
 
 
-def cosine_decay(
-    lr: Any, current_step: Any, total_steps: Any
-) -> Any:  # pytype: disable=invalid-annotation
-    """Cosine decay that accepts Python scalars or JAX arrays."""
-    current_step = jnp.asarray(current_step, dtype=jnp.float32)
-    total_steps = jnp.maximum(1.0, jnp.asarray(total_steps, dtype=jnp.float32))
-    lr = jnp.asarray(lr, dtype=jnp.float32)
-    ratio = jnp.maximum(0.0, current_step / total_steps)
-    mult = 0.5 * (1.0 + jnp.cos(jnp.pi * ratio))
-    return mult * lr  # pytype: disable=bad-return-type  # jax-types
-
-
-def get_learning_rate(
-    step: int,
-    *,
-    base_learning_rate: float,
-    num_steps: int,
-    warmup_steps: int | None = None,
-    schedule_type: str = "cosine",
-) -> Any:  # pytype: disable=invalid-annotation
-    """Learning rate schedule helper.
-
-    Supports:
-      - "cosine": single cosine decay with (optional) warmup.
-      - "constant": constant LR after warmup.
-      - "cyclic_cosine": cosine annealing with warm restarts (cyclic cosine).
-
-    The cyclic variant optionally allows inline parameter overrides encoded in
-    the schedule_type string, e.g.:
-        "cyclic_cosine;cycle_length=1000;min_lr=1e-5"
-    Parameters (all optional) for cyclic_cosine:
-        cycle_length:   Number of steps per cycle (default: num_steps // 10, >=1).
-        min_lr:         Minimum LR at the end of each cycle (default: 0.0).
-        decay_factor:   Multiplicative factor applied to base LR after each cycle
-                        restart (default: 1.0, i.e., no decay of peaks).
-    Warmup (if warmup_steps provided) is applied only to the very beginning of
-    training (first warmup_steps) scaling the scheduled LR linearly.
-    """
-    logging.info(
-        "get_learning_rate(step=%s, base_learning_rate=%s, num_steps=%s, schedule_type=%s)",
-        step,
-        base_learning_rate,
-        num_steps,
-        schedule_type,
-    )
-
-    # Handle warmup (gracefully if warmup_steps is None or 0).
-    if warmup_steps is None or warmup_steps <= 0:
-        warmup = 1.0
-        effective_step = step
-        effective_total = num_steps
-    else:
-        warmup = jnp.minimum(1.0, step / warmup_steps)
-        effective_step = jnp.maximum(0, step - warmup_steps)
-        effective_total = jnp.maximum(1, num_steps - warmup_steps)
-
-    # Allow parameter overrides for cyclic cosine via semi-colon separated kv pairs.
-    schedule_base = schedule_type.split(";")[0]
-    extra_params = schedule_type.split(";")[1:]
-    parsed: dict[str, str] = {}
-    for kv in extra_params:
-        if "=" in kv:
-            k, v = kv.split("=", 1)
-            parsed[k.strip()] = v.strip()
-
-    if schedule_base == "cosine":
-        lr = cosine_decay(base_learning_rate, effective_step, effective_total)
-    elif schedule_base == "constant":
-        lr = base_learning_rate
-    elif schedule_base == "cyclic_cosine":
-        # Derive cycle_length (at least 1) and other params.
-        default_cycle = max(1, num_steps // 10)
-        try:
-            cycle_length = int(parsed.get("cycle_length", default_cycle))
-        except ValueError:  # Fall back to default if parsing fails.
-            cycle_length = default_cycle
-        cycle_length = max(1, cycle_length)
-
-        try:
-            min_lr = float(parsed.get("min_lr", 0.0))
-        except ValueError:
-            min_lr = 0.0
-        try:
-            decay_factor = float(parsed.get("decay_factor", 1.0))
-        except ValueError:
-            decay_factor = 1.0
-
-        # Position within current cycle (after warmup region).
-        cycle_index = jnp.floor_divide(effective_step, cycle_length)
-        pos_in_cycle = jnp.mod(effective_step, cycle_length)
-
-        # Optionally decay the peak LR each cycle.
-        peak_lr = base_learning_rate * (decay_factor**cycle_index)
-
-        # Cosine within the cycle from peak_lr down to min_lr.
-        cosine_ratio = pos_in_cycle / cycle_length
-        lr = min_lr + 0.5 * (peak_lr - min_lr) * (1.0 + jnp.cos(jnp.pi * cosine_ratio))
-    else:
-        raise NotImplementedError(f"Unknown schedule type: {schedule_type}")
-
-    return jnp.asarray(
-        lr * warmup, dtype=jnp.float32
-    )  # pytype: disable=bad-return-type  # jax-types
 
 
 def loss_fn(params, state, rng, model, batch, train=False):
@@ -339,7 +235,7 @@ def evaluate(
     p_eval_step: Any,
     rng: jnp.ndarray,
     train_state: state_utils.TrainState,
-    eval_loader: grain.DataLoader,
+    eval_loader: Any,
     num_eval_steps: int = -1,
 ):
     """Evaluate the model on the given dataset."""
@@ -389,6 +285,11 @@ def train_and_evaluate(
     writer = metric_writers.create_default_writer(
         workdir, just_logging=jax.process_index() > 0
     )
+
+    # Start the profiler if requested
+    if config.get('start_profiler', False) and jax.process_index() == 0:
+        logging.info("Starting profiler.")
+        jax.profiler.start_server(9999)
     
     # Add wandb writer to the multi-writer if we're on the main process
     if jax.process_index() == 0 and hasattr(writer, '_writers') and config.get('enable_wandb', False):
@@ -410,7 +311,7 @@ def train_and_evaluate(
         "num_train_steps=%d, steps_per_epoch=%d", num_train_steps, steps_per_epoch
     )
     schedule_fn = functools.partial(
-        get_learning_rate,
+        learning_rate.get_learning_rate,
         base_learning_rate=config.learning_rate,
         num_steps=num_train_steps,
         warmup_steps=config.warmup_steps,
@@ -427,10 +328,8 @@ def train_and_evaluate(
         config, data_seed
     )
 
-    # Determine if we need to create an iterator based on loader type
-    # Grain loaders are DataLoader instances and need iter(), while TF iterators are already iterators
-    is_grain_loader = isinstance(train_loader, grain.DataLoader)
-    train_iter = iter(train_loader) if is_grain_loader else train_loader
+    # Train loader is already an iterator from the input pipeline
+    train_iter = train_loader
 
     # Initialize model.
     rng, model_rng = jax.random.split(rng)
@@ -457,19 +356,19 @@ def train_and_evaluate(
     # Get both save and load checkpoint managers
     save_checkpoint_manager, load_checkpoint_manager = (
         checkpoint_utils.get_checkpoint_managers(
-            config, workdir, olddir, is_grain_loader=is_grain_loader
+            config, workdir, olddir
         )
     )
 
     # Retrieve data from previous checkpoints if possible.
     if load_checkpoint_manager.latest_step() is not None:
         # Check if we should use partial loading
-        if partial_load_utils.should_use_partial_loading(config):
+        if checkpoint_utils.should_use_partial_loading(config):
             try:
-                train_state, _ = partial_load_utils.partial_load_checkpoint(
+                train_state, _ = checkpoint_utils.partial_load_checkpoint(
                     config=config,
                     train_state=train_state,
-                    train_iter=train_iter if is_grain_loader else None,
+                    train_iter=None,
                     checkpoint_manager=load_checkpoint_manager,
                     create_train_state_fn=state_utils.create_train_state,
                     schedule_fn=schedule_fn,
@@ -481,9 +380,8 @@ def train_and_evaluate(
                 raise
         else:
             # Standard checkpoint loading
-            train_state, _ = partial_load_utils.standard_checkpoint_loading(
+            train_state = checkpoint_utils.standard_checkpoint_loading(
                 train_state=train_state,
-                train_iter=train_iter if is_grain_loader else None,
                 checkpoint_manager=load_checkpoint_manager,
             )
 
@@ -628,14 +526,9 @@ def train_and_evaluate(
                                 )
                                 # writer.write_texts(step, {"samples": texts})
 
-                                # Calculate SMILES validity for pubchem_large dataset
+                                # Calculate SMILES validity if enabled in config
                                 if (
-                                    config.dataset
-                                    in [
-                                        "pubchem_large",
-                                        "msg_finetune",
-                                        "pubchem_large_text",
-                                    ]
+                                    config.get("calculate_smiles_validity", False)
                                     and texts is not None
                                 ):
                                     validity_metrics = (
@@ -660,10 +553,6 @@ def train_and_evaluate(
                             np.array, flax_utils.unreplicate(train_state)
                         ),
                     )
-
-                    # Only include train_iter for grain loaders
-                    if is_grain_loader:
-                        checkpoint_items["train_iter"] = train_iter
 
                     save_checkpoint_manager.save(
                         step,

@@ -32,10 +32,6 @@ def get_model(config: ml_collections.ConfigDict):
             num_heads=config.num_heads,
             n_kv_heads=config.get("n_kv_heads", config.num_heads),
             n_layers=config.n_layers,
-            n_dit_layers=config.n_dit_layers,
-            dit_num_heads=config.dit_num_heads,
-            dit_hidden_size=config.dit_hidden_size,
-            ch_mult=config.ch_mult,
             vocab_size=config.vocab_size,
             noise_schedule_type=config.noise_schedule,
             dropout_rate=config.dropout_rate,
@@ -53,12 +49,15 @@ def get_model(config: ml_collections.ConfigDict):
             fingerprint_dim=config.get("fingerprint_dim", 0),
             raw_fingerprint_dim=config.get("raw_fingerprint_dim", 0),
             fingerprint_adapter=config.get("fingerprint_adapter", False),
-            atom_type_size=config.get("atom_type_size", 0),
             only_adapter=config.get("only_adapter", False),
             fingerprint_mlp_layers=config.get("fingerprint_mlp_layers", ()),
             multiple_of=config.get("multiple_of", 256),
             dtype=config.get("dtype", jnp.float32),
             param_dtype=config.get("param_dtype", jnp.float32),
+            use_cross_attention=config.get("use_cross_attention", False),
+            cross_attention_layers=config.get("cross_attention_layers", None),
+            cross_attention_proj_dim=config.get("cross_attention_proj_dim", None),
+            cross_conditioning_seq_length=config.get("cross_conditioning_seq_length", 64),
         )
     elif config.model_type == "genmd4":
         return genmd4.GenMD4(

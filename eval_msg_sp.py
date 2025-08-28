@@ -2,7 +2,7 @@
 """Evaluation script for MSG dataset: load checkpoints and generate SMILES.
 
 The script assigns unique eval_id to each datapoint in the evaluation dataset.
-This ensures that even if multiple entries have the same InChI but different 
+This ensures that even if multiple entries have the same InChI but different
 predicted fingerprints, they are treated as separate evaluation instances.
 
 Output CSV format:
@@ -27,7 +27,6 @@ import jax.numpy as jnp
 import ml_collections
 import numpy as np
 import polars as pl
-import transformers
 from etils import epath
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -36,6 +35,7 @@ from tqdm import tqdm
 
 try:
     from rdkit import Chem
+
     RDKIT_AVAILABLE = True
 except ImportError:
     RDKIT_AVAILABLE = False
@@ -43,22 +43,24 @@ except ImportError:
 
 # Import MD4 modules
 from md4 import sampling
+from md4.input_pipeline_pubchem_large_text import SentencePieceTokenizer
 from md4.utils import checkpoint_utils, rdkit_utils, state_utils, utils
+
 
 def load_config_from_path(config_path: str) -> ml_collections.ConfigDict:
     """Load configuration from a given path.
-    
+
     Args:
         config_path: Path to the config file. Can be either:
-                    - Module path like "md4.configs.md4.molecular_xtra_large" 
+                    - Module path like "md4.configs.md4.molecular_xtra_large"
                     - File path like "/path/to/config.py"
                     - Relative path like "md4/configs/md4/molecular_xtra_large.py"
-        
+
     Returns:
         Configuration object
     """
     print(f"Loading config from: {config_path}")
-    
+
     # Handle different path formats
     if config_path.startswith("md4/") and config_path.endswith(".py"):
         # Relative path from md4 package - convert to module path
@@ -66,14 +68,18 @@ def load_config_from_path(config_path: str) -> ml_collections.ConfigDict:
         module_path = config_path.replace("/", ".")
         if module_path.endswith(".py"):
             module_path = module_path[:-3]  # Remove .py extension
-        
+
         # Import as module
         try:
             module = importlib.import_module(module_path)
             return module.get_config()
         except ImportError as e:
             raise ImportError(f"Could not import config module {module_path}") from e
-    elif "." in config_path and not config_path.startswith("/") and not config_path.endswith(".py"):
+    elif (
+        "." in config_path
+        and not config_path.startswith("/")
+        and not config_path.endswith(".py")
+    ):
         # Direct module path like "md4.configs.md4.molecular_xtra_large"
         try:
             module = importlib.import_module(config_path)
@@ -85,12 +91,12 @@ def load_config_from_path(config_path: str) -> ml_collections.ConfigDict:
         config_file = epath.Path(config_path)
         if not config_file.exists():
             raise FileNotFoundError(f"Config file not found: {config_path}")
-        
+
         # Load module from file path
-        spec = importlib.util.spec_from_file_location("config_module", config_file)
+        spec = importlib.util.spec_from_file_location("config_module", str(config_file))
         if spec is None or spec.loader is None:
             raise ImportError(f"Could not load config from {config_path}")
-        
+
         module = importlib.util.module_from_spec(spec)
         sys.modules["config_module"] = module
         spec.loader.exec_module(module)
@@ -99,16 +105,16 @@ def load_config_from_path(config_path: str) -> ml_collections.ConfigDict:
 
 def smiles_to_molecular_formula(smiles_list: List[str]) -> List[str]:
     """Convert SMILES strings to molecular formulas using RDKit.
-    
+
     Args:
         smiles_list: List of SMILES strings
-        
+
     Returns:
         List of molecular formulas (e.g., "C14H19NO2")
     """
     if not RDKIT_AVAILABLE:
         raise ImportError("RDKit is required to convert SMILES to molecular formulas.")
-    
+
     formulas = []
     for smiles in smiles_list:
         try:
@@ -122,15 +128,15 @@ def smiles_to_molecular_formula(smiles_list: List[str]) -> List[str]:
         except Exception:
             # Fallback to empty formula if any error occurs
             formulas.append("")
-    
+
     return formulas
 
 
 def safe_decode_tokens(tokenizer, tokens) -> str:
-    """Safely decode tokens using standard tokenizer.
+    """Safely decode tokens using SentencePiece tokenizer.
 
     Args:
-        tokenizer: Tokenizer instance
+        tokenizer: SentencePieceTokenizer instance
         tokens: Token sequence (can be numpy array, list, or tensor)
 
     Returns:
@@ -145,14 +151,14 @@ def safe_decode_tokens(tokenizer, tokens) -> str:
         else:
             tokens_list = list(tokens)
 
-        # Use standard decode method
-        decoded_text = tokenizer.decode(
-            tokens_list,
+        # Use batch_decode method like in train.py for consistency
+        texts = tokenizer.batch_decode(
+            [tokens_list],  # Convert single sequence to batch format
             skip_special_tokens=False,
             clean_up_tokenization_spaces=True,
         )
 
-        return decoded_text
+        return texts[0]  # Return the first (and only) decoded text
 
     except Exception as e:
         print(
@@ -162,73 +168,89 @@ def safe_decode_tokens(tokenizer, tokens) -> str:
 
 
 def extract_smiles_between_sep(decoded_text: str) -> str:
-    """Extract SMILES content between [SEP] tokens and remove spaces.
-    
+    """Extract SMILES content after [SEP] token and remove spaces.
+
     Args:
-        decoded_text: Decoded text from tokenizer containing [CLS], [SEP], [PAD] tokens
-        
+        decoded_text: Decoded text from tokenizer. SentencePiece automatically removes
+                     [BEGIN], [END], and [PAD] tokens, so the format is: "formula [SEP] smiles"
+
     Returns:
         Clean SMILES string with spaces removed, or empty string if parsing fails
-        
+
     Example:
-        Input: "[CLS] C21H19 N3O2S2 [SEP] CS 1 (=O) (C 2)C1 c1ccc(N n2 nc( cc3 cs c(- c4ccccc4) c23)cc1 [SEP] [PAD] ..."
+        Input: "C21H19N3O2S2 [SEP] CS 1 (=O) (C 2)C1 c1ccc(N n2 nc( cc3 cs c(- c4ccccc4) c23)cc1"
         Output: "CS1(=O)(C2)C1c1ccc(Nn2nc(cc3csc(-c4ccccc4)c23)cc1"
     """
     try:
-        # Find all [SEP] tokens
-        sep_positions = []
-        sep_token = "[SEP]"
-        start = 0
-        while True:
-            pos = decoded_text.find(sep_token, start)
-            if pos == -1:
-                break
-            sep_positions.append(pos)
-            start = pos + len(sep_token)
-        
-        # We need at least 2 [SEP] tokens to extract content between them
-        if len(sep_positions) < 2:
+        # Split by [SEP] and take the last part (more robust approach)
+        parts = decoded_text.split("[SEP]")
+
+        # We need at least 2 parts (formula and SMILES)
+        if len(parts) < 2:
             return ""
-        
-        # Extract content between first and second [SEP] tokens
-        start_pos = sep_positions[0] + len(sep_token)
-        end_pos = sep_positions[1]
-        
-        smiles_content = decoded_text[start_pos:end_pos].strip()
-        
+
+        # Take the last part as SMILES (handles cases with multiple [SEP] tokens)
+        smiles_content = parts[-1].strip()
+
         # Remove all spaces
         smiles_content = smiles_content.replace(" ", "")
-        
+
         return smiles_content
-        
+
     except Exception:
         # Return empty string if any parsing error occurs
         return ""
 
 
-def tokenize_smiles_with_formulas(tokenizer, smiles_list: List[str], max_length: int) -> dict:
-    """Tokenize SMILES with corresponding molecular formulas.
-    
+def tokenize_smiles_with_formulas(
+    tokenizer, smiles_list: List[str], max_length: int
+) -> dict:
+    """Tokenize SMILES with corresponding molecular formulas using SentencePiece tokenizer.
+
+    This function aligns with the training pipeline's tokenization approach.
+
     Args:
-        tokenizer: The tokenizer instance
-        smiles_list: List of SMILES strings  
+        tokenizer: The SentencePieceTokenizer instance
+        smiles_list: List of SMILES strings
         max_length: Maximum sequence length
-        
+
     Returns:
         Dictionary with tokenized inputs
     """
     # Generate molecular formulas from SMILES
     formulas = smiles_to_molecular_formula(smiles_list)
-    
-    # Tokenize with formulas as text and SMILES as text_pair
-    return tokenizer(
-        text=formulas,
-        text_pair=smiles_list,
-        padding="max_length",
-        truncation=True,
-        max_length=max_length,
-        return_tensors="np",
-    )
+
+    # Create combined text exactly as in training pipeline
+    # Format: "formula[SEP]smiles" (SentencePiece will automatically add [BEGIN] and [END])
+    combined_texts = []
+    for formula, smiles in zip(formulas, smiles_list):
+        combined_text = f"{formula}[SEP]{smiles}"
+        combined_texts.append(combined_text)
+
+    # Tokenize using the same approach as training pipeline's _tokenize_and_truncate
+    input_ids = []
+    for text in combined_texts:
+        # Use tokenizer.encode directly (it handles BOS/EOS automatically)
+        tokens = tokenizer.encode(text)
+
+        # Convert to numpy array if it's a tensor
+        if hasattr(tokens, "numpy"):
+            tokens = tokens.numpy()
+
+        # Ensure it's a list for manipulation
+        tokens = list(tokens)
+
+        # Truncate to max_length (same as training)
+        tokens = tokens[:max_length]
+
+        # Pad to max_length with pad_id (same as training)
+        current_length = len(tokens)
+        padding_length = max_length - current_length
+        tokens.extend([int(tokenizer.pad_id)] * padding_length)
+
+        input_ids.append(tokens)
+
+    return {"input_ids": np.array(input_ids, dtype=np.int32)}
 
 
 class MolecularEvaluator:
@@ -333,7 +355,7 @@ class MolecularEvaluator:
         """Create device mesh for evaluation."""
         # Create mesh configuration for evaluation (single data axis with 8 devices)
         mesh_config = ml_collections.ConfigDict(
-            {"mesh_shape": (1,), "mesh_axis_names": ("data",)}
+            {"mesh_shape": (8,), "mesh_axis_names": ("data",)}
         )
 
         # Create the mesh
@@ -345,25 +367,42 @@ class MolecularEvaluator:
     def _load_config(self) -> ml_collections.ConfigDict:
         """Load molecular configuration."""
         # Use config path from args if provided, otherwise default to molecular_xtra_large
-        config_path = getattr(self.args, 'config_path', 'md4.configs.md4.molecular_xtra_large')
+        config_path = getattr(
+            self.args, "config_path", "md4.configs.md4.molecular_xtra_large"
+        )
         config = load_config_from_path(config_path)
         config.batch_size = self.args.batch_size
         return config
 
     def _load_tokenizer(self):
-        """Load SMILES tokenizer."""
+        """Load SentencePiece SMILES tokenizer."""
         try:
-            tokenizer_cls = getattr(transformers, "AutoTokenizer")
-            tokenizer = tokenizer_cls.from_pretrained(
-                self.config.tokenizer or self.args.tokenizer_path
+            tokenizer_path = epath.Path(self.config.tokenizer or self.args.tokenizer_path)
+            # Handle .model file extension for SentencePiece
+            if not str(tokenizer_path).endswith(".model"):
+                tokenizer_path = tokenizer_path / "sentencepiece_tokenizer.model"
+                if not tokenizer_path.exists():
+                    # Try with different common paths
+                    possible_paths = [
+                        epath.Path(str(self.config.tokenizer or self.args.tokenizer_path) + ".model"),
+                        epath.Path("data/sentencepiece_tokenizer.model"),
+                        epath.Path("data/sentencepiece_tokenizer_4096_bpe_latest.model"),
+                    ]
+                    for path in possible_paths:
+                        if path.exists():
+                            tokenizer_path = path
+                            break
+
+            tokenizer = SentencePieceTokenizer(
+                model_path=str(tokenizer_path), add_bos=True, add_eos=True
             )
             print(
-                f"Loaded tokenizer with vocab size: {tokenizer.vocab_size} from {self.config.tokenizer or self.args.tokenizer_path}"
+                f"Loaded SentencePiece tokenizer with vocab size: {tokenizer.vocab_size} from {tokenizer_path}"
             )
             return tokenizer
         except Exception as e:
             raise ValueError(
-                f"Failed to load tokenizer from {self.config.tokenizer or self.args.tokenizer_path}: {e}"
+                f"Failed to load SentencePiece tokenizer from {self.config.tokenizer or self.args.tokenizer_path}: {e}"
             )
 
     def _load_checkpoint_manager(self) -> orbax_checkpoint.CheckpointManager:
@@ -476,7 +515,9 @@ class MolecularEvaluator:
             print(
                 "WARNING: No predicted_fingerprint column found, using zero fingerprints"
             )
-            fingerprints_list = [np.zeros(self.args.fp_bits) for _ in range(len(inchi_list))]
+            fingerprints_list = [
+                np.zeros(self.args.fp_bits) for _ in range(len(inchi_list))
+            ]
 
         print(f"Converting {len(inchi_list)} InChI to SMILES...")
 
@@ -493,7 +534,9 @@ class MolecularEvaluator:
                 smiles = Chem.MolToSmiles(mol)  # type: ignore[attr-defined]
 
                 # Extract features
-                features = rdkit_utils.process_smiles(smiles, fp_radius=2, fp_bits=self.args.fp_bits)
+                features = rdkit_utils.process_smiles(
+                    smiles, fp_radius=2, fp_bits=self.args.fp_bits
+                )
                 if features is None:
                     continue
 
@@ -504,7 +547,9 @@ class MolecularEvaluator:
                     else np.zeros(self.args.fp_bits, dtype=np.float32)
                 )
                 original_fingerprint = (
-                    features if isinstance(features, np.ndarray) else np.zeros(self.args.fp_bits)
+                    features
+                    if isinstance(features, np.ndarray)
+                    else np.zeros(self.args.fp_bits)
                 )
 
                 processed_count += 1
@@ -639,7 +684,7 @@ class MolecularEvaluator:
                     print(f"Clean SMILES: {clean_smiles}")
                     sample_list.append(clean_smiles)
             else:
-                # Use safe decoding
+                # Use safe decoding for SentencePiece tokenizer
                 sample_list = []
                 for i in range(actual_samples_per_input):
                     tokens = samples[b, i]
@@ -649,8 +694,6 @@ class MolecularEvaluator:
             batch_results.append(sample_list)
 
         return batch_results
-
-
 
     def _save_batch_results(
         self,
@@ -670,9 +713,6 @@ class MolecularEvaluator:
             "original_smiles": [],
             "generated_smiles": [],
         }
-        if self.original_inchi:
-            result["original_inchi"] = self.original_inchi
-        return result
 
         if batch_inchi is not None:
             batch_data["original_inchi"] = []
@@ -869,7 +909,6 @@ class MolecularEvaluator:
         print("Evaluation completed successfully!")
 
 
-
 def parse_arguments() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="MSG dataset evaluation script")
@@ -889,8 +928,8 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--tokenizer_path",
-        default="data/smiles_tokenizer",
-        help="Path to SMILES tokenizer",
+        default="data/sentencepiece_tokenizer.model",
+        help="Path to SentencePiece SMILES tokenizer model file",
     )
     parser.add_argument(
         "--config_path",

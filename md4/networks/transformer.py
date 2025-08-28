@@ -49,7 +49,6 @@ class ModelArgs:
     multiple_of: int = 32  # MLP hidden layer size will be multiple of
     norm_eps: float = 1e-5
     dropout_rate: float = 0.0
-    weight_tying: bool = False
     w_init_scale: float = 1.0
     depth_scaled_init: bool = False
     # glu, geglu, swiglu
@@ -61,6 +60,12 @@ class ModelArgs:
     causal: bool = False
     dtype: jnp.dtype = jnp.float32
     param_dtype: jnp.dtype = jnp.float32
+    # rope
+    rope_theta: float = 10000.0
+    # cross-attention configuration
+    use_cross_attention: bool = False
+    cross_attention_layers: Optional[int] = None  # Number of layers with cross-attention (from first layer)
+    cross_attention_proj_dim: Optional[int] = None  # Projection dimension for cross-attention
 
 
 class RMSNorm(nn.Module):
@@ -71,7 +76,9 @@ class RMSNorm(nn.Module):
 
     def setup(self):
         self.scale = self.param(
-            "scale", lambda key, shape: jnp.ones(shape, dtype=self.param_dtype), (self.dim,)
+            "scale",
+            lambda key, shape: jnp.ones(shape, dtype=self.param_dtype),
+            (self.dim,),
         )
 
     def _norm(self, x):
@@ -84,7 +91,9 @@ class RMSNorm(nn.Module):
 
 def precompute_freqs_cis(dim, end, theta: float = 10000.0, dtype=jnp.float32):
     # Compute everything in fp32 for numerical stability
-    freqs = 1.0 / (theta ** (jnp.arange(0, dim, 2, dtype=jnp.float32)[: (dim // 2)] / dim))
+    freqs = 1.0 / (
+        theta ** (jnp.arange(0, dim, 2, dtype=jnp.float32)[: (dim // 2)] / dim)
+    )
     t = jnp.arange(end, dtype=jnp.float32)
     freqs = jnp.outer(t, freqs)
     freqs_cos = jnp.cos(freqs)
@@ -174,16 +183,52 @@ class Attention(nn.Module):
         assert self.n_heads % self._n_kv_heads == 0
         self.n_rep = self.n_heads // self._n_kv_heads
         self.head_dim = self.dim // self.n_heads
-        self.wq = nn.Dense(self.n_heads * self.head_dim, use_bias=self.qkv_bias, dtype=self.dtype, param_dtype=self.param_dtype)
-        self.wk = nn.Dense(self._n_kv_heads * self.head_dim, use_bias=self.qkv_bias, dtype=self.dtype, param_dtype=self.param_dtype)
-        self.wv = nn.Dense(self._n_kv_heads * self.head_dim, use_bias=self.qkv_bias, dtype=self.dtype, param_dtype=self.param_dtype)
-        self.wo = nn.Dense(self.dim, use_bias=False, dtype=self.dtype, param_dtype=self.param_dtype)
+        self.wq = nn.Dense(
+            self.n_heads * self.head_dim,
+            use_bias=self.qkv_bias,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.initializers.xavier_normal(), ("hidden", "attn_qkv")
+            )
+        )
+        self.wk = nn.Dense(
+            self._n_kv_heads * self.head_dim,
+            use_bias=self.qkv_bias,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.initializers.xavier_normal(), ("hidden", "attn_qkv")
+            )
+        )
+        self.wv = nn.Dense(
+            self._n_kv_heads * self.head_dim,
+            use_bias=self.qkv_bias,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.initializers.xavier_normal(), ("hidden", "attn_qkv")
+            )
+        )
+        self.wo = nn.Dense(
+            self.dim, use_bias=False, dtype=self.dtype, param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.initializers.xavier_normal(), ("attn_o", "hidden")
+            )
+        )
         if self.dropout_rate > 0.0:
             self.attn_dropout = nn.Dropout(self.dropout_rate)
             self.resid_dropout = Dropout1d(self.dropout_rate)
 
     def __call__(self, x, freqs_cos, freqs_sin, train=False):
         bsz, seqlen, _ = x.shape
+
+        x = nn.with_logical_constraint(
+            x, ("batch", None, "hidden")
+        )
+
+        freqs_cos = nn.with_logical_constraint(freqs_cos, (None, 'hidden'))
+        freqs_sin = nn.with_logical_constraint(freqs_sin, (None, 'hidden'))
 
         # QKV
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
@@ -204,16 +249,16 @@ class Attention(nn.Module):
         xv = xv.swapaxes(1, 2)
 
         xk_transposed = xk.swapaxes(2, 3)
-        scores = jnp.matmul(xq, xk_transposed) / math.sqrt(self.head_dim)
+        scores = jnp.matmul(
+            xq.astype(jnp.float32), xk_transposed.astype(jnp.float32)
+        ) / math.sqrt(self.head_dim)
         if self.causal:
             mask = jnp.full((1, 1, seqlen, seqlen), -jnp.inf, dtype=jnp.float32)
             mask = jnp.triu(mask, k=1)
             scores = (
                 scores + mask[:, :, :seqlen, :seqlen]
             )  # (bs, n_heads, seqlen, seqlen)
-        # Force softmax computation in fp32 for numerical stability
-        scores_fp32 = scores.astype(jnp.float32)
-        scores = nn.softmax(scores_fp32, axis=-1).astype(self.dtype)
+        scores = nn.softmax(scores, axis=-1).astype(self.dtype)
         if self.dropout_rate > 0.0:
             scores = self.attn_dropout(scores, deterministic=not train)
         output = jnp.matmul(scores, xv)  # (bs, n_heads, seqlen, head_dim)
@@ -226,6 +271,108 @@ class Attention(nn.Module):
         if self.dropout_rate > 0.0:
             output = self.resid_dropout(output, deterministic=not train)
         return output
+
+class CrossAttention(nn.Module):
+    dim: int
+    n_heads: int
+    n_kv_heads: int | None = None
+    dropout_rate: float = 0.0
+    qkv_bias: bool = False
+    dtype: jnp.dtype = jnp.float32
+    param_dtype: jnp.dtype = jnp.float32
+    cross_cond_dim: Optional[int] = None  # Input dimension for cross-conditioning
+
+    def setup(self):
+        self._n_kv_heads = self.n_kv_heads if self.n_kv_heads is not None else self.n_heads
+        assert self.n_heads % self._n_kv_heads == 0
+        self.n_rep = self.n_heads // self._n_kv_heads
+        self.head_dim = self.dim // self.n_heads
+
+        # Projections: Q from x, K/V from cross_conditioning
+        self.wq = nn.Dense(
+            self.n_heads * self.head_dim,
+            use_bias=self.qkv_bias,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.initializers.xavier_normal(), ("hidden", "attn_qkv")
+            ),
+        )
+        self.wk = nn.Dense(
+            self._n_kv_heads * self.head_dim,
+            use_bias=self.qkv_bias,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.initializers.xavier_normal(), ("hidden", "attn_qkv")
+            ),
+        )
+        self.wv = nn.Dense(
+            self._n_kv_heads * self.head_dim,
+            use_bias=self.qkv_bias,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.initializers.xavier_normal(), ("hidden", "attn_qkv")
+            ),
+        )
+        self.wo = nn.Dense(
+            self.dim,
+            use_bias=False,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.initializers.xavier_normal(), ("attn_o", "hidden")
+            ),
+        )
+        if self.dropout_rate > 0.0:
+            self.attn_dropout = nn.Dropout(self.dropout_rate)
+            self.resid_dropout = Dropout1d(self.dropout_rate)
+
+    def __call__(self, x, cross_conditioning, train: bool = False):
+        """
+        x:                 (bsz, tgt_len, dim)         -- queries come from here
+        cross_conditioning:(bsz, src_len, cross_cond_dim or dim)  -- keys/values come from here
+        """
+        bsz, tgt_len, _ = x.shape
+        _, src_len, cross_dim = cross_conditioning.shape
+
+        # Project Q from x; K,V from cross_conditioning
+        xq = self.wq(x)                                   # (bsz, tgt_len, n_heads*head_dim)
+        xk = self.wk(cross_conditioning)                  # (bsz, src_len,  n_kv_heads*head_dim)
+        xv = self.wv(cross_conditioning)                  # (bsz, src_len,  n_kv_heads*head_dim)
+
+        xq = xq.reshape(bsz, tgt_len, self.n_heads, self.head_dim)
+        xk = xk.reshape(bsz, src_len, self._n_kv_heads, self.head_dim)
+        xv = xv.reshape(bsz, src_len, self._n_kv_heads, self.head_dim)
+
+        # Grouped multi-query attention: expand shared K/V heads to full head count
+        xk = repeat_kv(xk, self.n_rep)                    # (bsz, src_len,  n_heads, head_dim)
+        xv = repeat_kv(xv, self.n_rep)                    # (bsz, src_len,  n_heads, head_dim)
+
+        # Move heads to batch axis
+        xq = xq.swapaxes(1, 2)                            # (bsz, n_heads, tgt_len, head_dim)
+        xk = xk.swapaxes(1, 2)                            # (bsz, n_heads, src_len, head_dim)
+        xv = xv.swapaxes(1, 2)                            # (bsz, n_heads, src_len, head_dim)
+
+        # Scaled dot-product attention
+        xk_t = xk.swapaxes(2, 3)                          # (bsz, n_heads, head_dim, src_len)
+        scores = jnp.matmul(
+            xq.astype(jnp.float32), xk_t.astype(jnp.float32)
+        ) / math.sqrt(self.head_dim)                      # (bsz, n_heads, tgt_len, src_len)
+
+        attn = nn.softmax(scores, axis=-1).astype(self.dtype)
+        if self.dropout_rate > 0.0:
+            attn = self.attn_dropout(attn, deterministic=not train)
+
+        out = jnp.matmul(attn, xv)                        # (bsz, n_heads, tgt_len, head_dim)
+
+        # Concat heads and project back
+        out = out.swapaxes(1, 2).reshape(bsz, tgt_len, -1)  # (bsz, tgt_len, dim)
+        out = self.wo(out)
+        if self.dropout_rate > 0.0:
+            out = self.resid_dropout(out, deterministic=not train)
+        return out
 
 
 def dense_2d(dense, x):
@@ -254,21 +401,38 @@ class FeedForward(nn.Module):
         w_init = nn.initializers.variance_scaling(
             self.w_init_scale, "fan_in", "truncated_normal"
         )
-        self.w1 = nn.Dense(hidden_dim, use_bias=False, kernel_init=w_init, dtype=self.dtype, param_dtype=self.param_dtype)
-        self.w2 = nn.Dense(self.dim, use_bias=False, kernel_init=w_init, dtype=self.dtype, param_dtype=self.param_dtype)
-        self.w3 = nn.Dense(hidden_dim, use_bias=False, kernel_init=w_init, dtype=self.dtype, param_dtype=self.param_dtype)
+        self.w1 = nn.Dense(
+            hidden_dim,
+            use_bias=False,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(w_init, ('hidden', 'ff_mlp')),
+        )
+        self.w2 = nn.Dense(
+            self.dim,
+            use_bias=False,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(w_init, ('ff_mlp', 'hidden')),
+        )
+        self.w3 = nn.Dense(
+            hidden_dim,
+            use_bias=False,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(w_init, ('hidden', 'ff_mlp'))
+        )
         # self.dropout = nn.Dropout(self.dropout_rate)
         if self.dropout_rate > 0.0:
             self.dropout = Dropout1d(self.dropout_rate)
 
     def __call__(self, x, train=False):
         act = activation_map[self.mlp_type]
-        u = dense_2d(self.w1, x)
-        v = dense_2d(self.w3, x)        # used for *any* gated MLP; ignore if plain GELU MLP
-        y = dense_2d(self.w2, act(u.astype(jnp.float32)).astype(self.dtype) * v)
+        y = self.w2(act(self.w1(x)) * self.w3(x))
         if self.dropout_rate > 0.0:
-            y = self.dropout(y, deterministic=not train)
-        return y
+            return self.dropout(y, deterministic=not train)
+        else:
+            return y
 
 
 class TransformerBlock(nn.Module):
@@ -287,6 +451,28 @@ class TransformerBlock(nn.Module):
             param_dtype=args.param_dtype,
         )
 
+        # Add cross-attention if configured
+        self.use_cross_attention = False
+        if args.use_cross_attention:
+            # Check if this layer should have cross-attention
+            if args.cross_attention_layers is None:
+                # All layers have cross-attention
+                self.use_cross_attention = True
+            elif self.layer_id < args.cross_attention_layers:
+                # Only first N layers have cross-attention
+                self.use_cross_attention = True
+            
+            if self.use_cross_attention:
+                self.cross_attention = CrossAttention(
+                    dim=args.dim,
+                    n_heads=args.n_heads,
+                    n_kv_heads=args.n_kv_heads,
+                    dropout_rate=args.dropout_rate,
+                    dtype=args.dtype,
+                    param_dtype=args.param_dtype,
+                    cross_cond_dim=args.cross_attention_proj_dim if args.cross_attention_proj_dim is not None else args.dim,
+                )
+
         if args.depth_scaled_init:
             w_init_scale = 2.0 / args.n_layers
         else:
@@ -304,56 +490,80 @@ class TransformerBlock(nn.Module):
         )
 
     @nn.compact
-    def __call__(self, x, freqs_cos, freqs_sin, cond=None, train=False):
-        if cond is not None:
-            activation = activation_map[self.args.mlp_type]
-            if self.args.cond_type == "adaln":
-                ln = nn.Sequential(
-                    [
-                        # nn.swish,
-                        activation,
-                        nn.Dense(6 * self.args.dim, use_bias=True, dtype=self.args.dtype, param_dtype=self.args.param_dtype),
-                    ]
-                )
-            elif self.args.cond_type == "adaln_zero":
-                ln = nn.Sequential(
-                    [
-                        # nn.swish,
-                        activation,
-                        nn.Dense(
-                            6 * self.args.dim,
-                            use_bias=True,
-                            kernel_init=nn.initializers.zeros,
-                            bias_init=nn.initializers.zeros,
-                            dtype=self.args.dtype,
-                            param_dtype=self.args.param_dtype,
-                        ),
-                    ]
-                )
-            else:
-                raise NotImplementedError()
-            (shift_att, scale_att, gate_att, shift_mlp, scale_mlp, gate_mlp) = (
-                jnp.split(ln(cond)[:, None, :], 6, axis=-1)
-            )
+    def __call__(self, x, freqs_cos, freqs_sin, cond_params=None, cross_conditioning=None, train=False):
+        if cond_params is not None:
+            # Use shared conditioning parameters for all layers
+            shift_att, scale_att, gate_att, shift_mlp, scale_mlp, gate_mlp = cond_params
+            
             attention_norm = nn.LayerNorm(
-                epsilon=self.args.norm_eps, use_bias=False, use_scale=False, dtype=jnp.float32, param_dtype=jnp.float32
+                epsilon=self.args.norm_eps,
+                use_bias=False,
+                use_scale=False,
+                dtype=self.args.dtype,
+                param_dtype=self.args.param_dtype,
             )
             ffn_norm = nn.LayerNorm(
-                epsilon=self.args.norm_eps, use_bias=False, use_scale=False, dtype=jnp.float32, param_dtype=jnp.float32
+                epsilon=self.args.norm_eps,
+                use_bias=False,
+                use_scale=False,
+                dtype=self.args.dtype,
+                param_dtype=self.args.param_dtype,
             )
+            # Self-attention
             h = x + gate_att * self.attention(
                 attention_norm(x) * (scale_att + 1.0) + shift_att,
                 freqs_cos,
                 freqs_sin,
                 train=train,
             )
+            
+            # Cross-attention if configured and available
+            if self.use_cross_attention and cross_conditioning is not None:
+                cross_norm = nn.LayerNorm(
+                    epsilon=self.args.norm_eps,
+                    use_bias=False,
+                    use_scale=False,
+                    dtype=self.args.dtype,
+                    param_dtype=self.args.param_dtype,
+                )
+                # Apply cross-attention with same gating as self-attention
+                h = h + gate_att * self.cross_attention(
+                    cross_norm(h) * (scale_att + 1.0) + shift_att,
+                    cross_conditioning,
+                    train=train,
+                )
+            
+            # Feed-forward
             out = h + gate_mlp * self.feed_forward(
                 ffn_norm(h) * (scale_mlp + 1.0) + shift_mlp, train=train
             )
         else:
-            attention_norm = RMSNorm(self.args.dim, eps=self.args.norm_eps, dtype=jnp.float32, param_dtype=jnp.float32)
-            ffn_norm = RMSNorm(self.args.dim, eps=self.args.norm_eps, dtype=jnp.float32, param_dtype=jnp.float32)
+            attention_norm = RMSNorm(
+                self.args.dim,
+                eps=self.args.norm_eps,
+                dtype=self.args.dtype,
+                param_dtype=self.args.param_dtype,
+            )
+            ffn_norm = RMSNorm(
+                self.args.dim,
+                eps=self.args.norm_eps,
+                dtype=self.args.dtype,
+                param_dtype=self.args.param_dtype,
+            )
+            # Self-attention
             h = x + self.attention(attention_norm(x), freqs_cos, freqs_sin, train=train)
+            
+            # Cross-attention if configured and available
+            if self.use_cross_attention and cross_conditioning is not None:
+                cross_norm = RMSNorm(
+                    self.args.dim,
+                    eps=self.args.norm_eps,
+                    dtype=self.args.dtype,
+                    param_dtype=self.args.param_dtype,
+                )
+                h = h + self.cross_attention(cross_norm(h), cross_conditioning, train=train)
+            
+            # Feed-forward
             out = h + self.feed_forward(ffn_norm(h), train=train)
 
         return out
@@ -363,69 +573,171 @@ class Transformer(nn.Module):
     args: ModelArgs
 
     @nn.compact
-    def __call__(self, x, cond=None, train=False, output_channels=None):
+    def __call__(self, x, cond=None, cross_conditioning=None, train=False, output_channels=None):
         args = self.args
         if output_channels is None:
             output_channels = args.output_channels
 
         if args.embed_input:
-            h = nn.Embed(args.n_embed_classes, args.dim, dtype=args.dtype, param_dtype=args.param_dtype)(x)
+            h = nn.Embed(
+                num_embeddings=args.n_embed_classes,
+                features=args.dim,
+                dtype=args.dtype,
+                param_dtype=args.param_dtype,
+                embedding_init=nn.with_logical_partitioning(
+                    nn.linear.default_embed_init, ("embed_vocab", "hidden")
+                ),
+            )(x)
             if args.dropout_rate > 0.0:
                 h = nn.Dropout(args.dropout_rate, deterministic=not train)(h)
         else:
-            h = nn.Dense(args.dim, dtype=args.dtype, param_dtype=args.param_dtype)(x)
+            h = nn.Dense(
+                args.dim,
+                dtype=args.dtype,
+                param_dtype=args.param_dtype,
+                kernel_init=nn.with_logical_partitioning(
+                    nn.linear.default_kernel_init, ("input_embed", "hidden")
+                ),
+            )(x)
 
         seqlen = x.shape[1]
-        freqs_cos, freqs_sin = precompute_freqs_cis(args.dim // args.n_heads, seqlen, dtype=args.dtype)
+        freqs_cos, freqs_sin = precompute_freqs_cis(
+            args.dim // args.n_heads, seqlen, theta=args.rope_theta, dtype=args.dtype
+        )
 
         freqs_cos = freqs_cos[:seqlen]
         freqs_sin = freqs_sin[:seqlen]
 
+        # Process conditioning once for all layers
+        cond_params = None
+        if cond is not None:
+            activation = activation_map[args.mlp_type]
+            # Create shared AdaLN/AdaLN-Zero layer for all blocks
+            if args.cond_type == "adaln":
+                shared_adaln = nn.Sequential(
+                    [
+                        activation,
+                        nn.Dense(
+                            6 * args.dim,  # Same parameters shared by all layers
+                            use_bias=True,
+                            dtype=args.dtype,
+                            param_dtype=args.param_dtype,
+                            kernel_init=nn.with_logical_partitioning(
+                                nn.linear.default_kernel_init, ('cond', 'hidden')
+                            ),
+                        ),
+                    ]
+                )
+            elif args.cond_type == "adaln_zero":
+                shared_adaln = nn.Sequential(
+                    [
+                        activation,
+                        nn.Dense(
+                            6 * args.dim,  # Same parameters shared by all layers
+                            use_bias=True,
+                            kernel_init=nn.with_logical_partitioning(
+                                nn.linear.default_kernel_init, ('cond', 'hidden')
+                            ),
+                            bias_init=nn.initializers.zeros,
+                            dtype=args.dtype,
+                            param_dtype=args.param_dtype,
+                        ),
+                    ]
+                )
+            else:
+                raise NotImplementedError()
+            
+            # Compute conditioning parameters once, shared by all blocks
+            all_cond_params = shared_adaln(cond)[:, None, :]
+            # Split into 6 parameters (shift_att, scale_att, gate_att, shift_mlp, scale_mlp, gate_mlp)
+            cond_params = jnp.split(all_cond_params, 6, axis=-1)
+
+        # Process cross-conditioning if provided
+        if cross_conditioning is not None:
+            # Project cross-conditioning to model dimension if needed
+            # Use cross_attention_proj_dim if specified, otherwise use args.dim
+            proj_dim = args.cross_attention_proj_dim if args.cross_attention_proj_dim is not None else args.dim
+            cross_cond_proj = nn.Dense(
+                proj_dim,
+                dtype=args.dtype,
+                param_dtype=args.param_dtype,
+                kernel_init=nn.with_logical_partitioning(
+                    nn.linear.default_kernel_init, ("cross_attn", "hidden")
+                ),
+            )(cross_conditioning)
+        else:
+            cross_cond_proj = cross_conditioning
+
         for layer_id in range(args.n_layers):
             h = TransformerBlock(layer_id, args)(
-                h, freqs_cos, freqs_sin, cond=cond, train=train
+                h, freqs_cos, freqs_sin, cond_params=cond_params, 
+                cross_conditioning=cross_cond_proj, train=train
             )
 
         if cond is not None:
             output_norm = nn.LayerNorm(
-                epsilon=args.norm_eps, use_bias=False, use_scale=False, dtype=jnp.float32, param_dtype=jnp.float32
+                epsilon=args.norm_eps,
+                use_bias=False,
+                use_scale=False,
+                dtype=args.dtype,
+                param_dtype=args.param_dtype,
             )
             activation = activation_map[args.mlp_type]
             if args.cond_type == "adaln":
-                ln = nn.Sequential(
+                ln_final = nn.Sequential(
                     [
-                        # nn.swish,
-                        activation,
-                        nn.Dense(2 * args.dim, use_bias=True, dtype=jnp.float32, param_dtype=jnp.float32),
-                    ]
-                )
-            elif args.cond_type == "adaln_zero":
-                ln = nn.Sequential(
-                    [
-                        # nn.swish,
                         activation,
                         nn.Dense(
                             2 * args.dim,
                             use_bias=True,
-                            kernel_init=nn.initializers.zeros,
-                            bias_init=nn.initializers.zeros,
                             dtype=jnp.float32,
+                            param_dtype=jnp.float32,
+                            kernel_init=nn.with_logical_partitioning(
+                                nn.linear.default_kernel_init, ('cond', 'hidden')
+                            ),
+                        ),
+                    ]
+                )
+            elif args.cond_type == "adaln_zero":
+                ln_final = nn.Sequential(
+                    [
+                        activation,
+                        nn.Dense(
+                            2 * args.dim,
+                            use_bias=True,
+                            kernel_init=nn.with_logical_partitioning(
+                                nn.initializers.zeros, ('cond', 'hidden')
+                            ),
+                            bias_init=nn.initializers.zeros,
+                            dtype=args.dtype,
                             param_dtype=jnp.float32,
                         ),
                     ]
                 )
             else:
                 raise NotImplementedError()
-            shift_out, scale_out = jnp.split(ln(cond.astype(jnp.float32))[:, None, :], 2, axis=-1)
+            shift_out, scale_out = jnp.split(
+                ln_final(cond.astype(jnp.float32))[:, None, :], 2, axis=-1
+            )
             logits = nn.Dense(
-                output_channels, use_bias=False, kernel_init=nn.initializers.zeros, dtype=jnp.float32, param_dtype=jnp.float32
+                output_channels,
+                use_bias=False,
+                kernel_init=nn.with_logical_partitioning(
+                    nn.initializers.zeros, ('hidden', 'vocab')
+                ),
+                dtype=jnp.float32,
+                param_dtype=jnp.float32,
             )(output_norm(h) * (scale_out + 1) + shift_out)
         else:
-            h = RMSNorm(args.dim, args.norm_eps, dtype=jnp.float32, param_dtype=jnp.float32)(h)
+            h = RMSNorm(
+                args.dim, args.norm_eps, dtype=args.dtype, param_dtype=args.param_dtype
+            )(h)
             logits = nn.Dense(
                 features=output_channels,
                 use_bias=False,
-                kernel_init=nn.initializers.zeros,
+                kernel_init=nn.with_logical_partitioning(
+                    nn.initializers.zeros, ('hidden', 'vocab')
+                ),
                 dtype=jnp.float32,
                 param_dtype=jnp.float32,
             )(h)

@@ -1,88 +1,101 @@
+import functools
 import glob
 import multiprocessing as mp
 import os
 from pathlib import Path
-from typing import List, Sequence
 
+import jax
 import numpy as np
 import polars as pl
 import tensorflow as tf
 import tensorflow_datasets as tfds
-import tensorflow_text as tftxt
 from ml_collections import config_dict
 
+from md4.tokenizers import SentencePieceTokenizer
 from md4.utils.pubchem_worker import process_and_write_shard_tfrecord
 
 # Heavy imports are now imported conditionally within functions to reduce memory usage
 
+
 _SENTENCEPIECE_TOKENIZER = "data/sentencepiece_tokenizer.model"
 
 
-class SentencePieceTokenizer:
-    """
-    Tokenizing and encoding/decoding text using the Sentencepiece tokenizer loaded with tensorflow_text
-    """
+def _parse_tfexample_fn(tfrecord, fp_bits=2048, num_variants=1):
+    """Parse a single TFRecord example."""
+    # Define feature description based on the features used in dataset creation
+    # Note: fingerprint might be stored as int64 in TFRecord but we want int8
+    # SMILES is now a sequence of variants
+    feature_description = {
+        "smiles": tf.io.FixedLenFeature(
+            [num_variants], tf.string
+        ),  # Fixed length sequence of SMILES variants
+        "fingerprint": tf.io.FixedLenFeature(
+            [fp_bits], tf.int64
+        ),  # Read as int64, convert to int8
+    }
 
-    def __init__(self, model_path: str, add_bos: bool = True, add_eos: bool = True):
-        print(f"Tokenizer path: {model_path}")
-        with tf.io.gfile.GFile(model_path, "rb") as model_fp:
-            sp_model = model_fp.read()
-        self.sp_tokenizer = tftxt.SentencepieceTokenizer(
-            model=sp_model, add_bos=add_bos, add_eos=add_eos, reverse=False
-        )
-        self.vocab_size = self.sp_tokenizer.vocab_size()
-        self.pad_id = self.sp_tokenizer.string_to_id("[PAD]")
-        self.unk_id = self.sp_tokenizer.string_to_id("[UNK]")
-        self.sep_id = self.sp_tokenizer.string_to_id("[SEP]")
+    # Parse the input tf.train.Example proto using the dictionary above
+    example = tf.io.parse_single_example(tfrecord, feature_description)
 
-    def encode(self, s: str) -> List[int]:
-        return self.sp_tokenizer.tokenize(s)
+    # Convert fingerprint from int64 to int8 to match expected format
+    example["fingerprint"] = tf.cast(example["fingerprint"], tf.int8)
 
-    def decode(self, t: Sequence[int]) -> str:
-        return self.sp_tokenizer.detokenize(t)
+    return example
 
-    def batch_decode(self, t: Sequence[Sequence[int]], **kwargs) -> List[str]:
-        return [b.decode() for b in self.decode_with_padding_removal(t)]
+def _choose_random_variant(seed=None):
+    def _f(ex):
+        n = tf.shape(ex["smiles"])[0]
+        idx = tf.random.uniform([], 0, n, dtype=tf.int32, seed=seed)
+        out = {"smiles": ex["smiles"][idx], "fingerprint": ex["fingerprint"]}
+        # Set static shapes:
+        out["smiles"].set_shape([])
+        out["fingerprint"].set_shape(ex["fingerprint"].shape)  # [fp_bits]
+        return out
+    return _f
 
-    def decode_with_padding_removal(self, t):
-        """Decode tokens after removing padding tokens."""
-        # Handle multi-dimensional numpy arrays
-        if isinstance(t, np.ndarray):
-            if t.ndim > 1:
-                # For multi-dimensional arrays, process each sequence separately
-                results = []
-                for seq in t:
-                    # Remove padding tokens from each sequence
-                    seq_no_padding = seq[seq != self.pad_id]
-                    # Convert to int32 for SentencePiece tokenizer
-                    seq_no_padding = seq_no_padding.astype(np.int32)
-                    decoded = self.sp_tokenizer.detokenize(seq_no_padding).numpy()
-                    results.append(decoded)
-                return results
-            else:
-                # For 1D numpy arrays
-                t_no_padding = t[t != self.pad_id]
-                # Convert to int32 for SentencePiece tokenizer
-                t_no_padding = t_no_padding.astype(np.int32)
-                return self.sp_tokenizer.detokenize(t_no_padding).numpy()
-        else:
-            # For lists or other sequences
-            if hasattr(t, "__len__") and len(t) > 0 and hasattr(t[0], "__len__"):
-                # Handle nested sequences (batch of sequences)
-                results = []
-                for seq in t:
-                    seq_no_padding = [token for token in seq if token != self.pad_id]
-                    # Convert to numpy array with int32 dtype
-                    seq_no_padding = np.array(seq_no_padding, dtype=np.int32)
-                    decoded = self.sp_tokenizer.detokenize(seq_no_padding).numpy()
-                    results.append(decoded)
-                return results
-            else:
-                # Handle single sequence
-                t_no_padding = [token for token in t if token != self.pad_id]
-                # Convert to numpy array with int32 dtype
-                t_no_padding = np.array(t_no_padding, dtype=np.int32)
-                return self.sp_tokenizer.detokenize(t_no_padding).numpy()
+def create_high_entropy_dataset(
+    tfrecord_pattern,
+    fp_bits=2048,
+    num_variants=1,
+    cycle_length=10,
+    block_length=1,
+    file_shuffle_buffer=1000,
+    record_shuffle_buffer=2000,
+    batch_shuffle_buffer=20,
+    seed=None,
+):
+    """Create a high-entropy dataset from TFRecord files with multiple levels of shuffling."""
+    # First, list all file paths to the sharded tfrecord dataset
+    dataset = tf.data.Dataset.list_files(tfrecord_pattern, shuffle=True, seed=seed)
+
+    # Make sure to fully shuffle the list of tfrecord files
+    dataset = dataset.shuffle(
+        buffer_size=file_shuffle_buffer, reshuffle_each_iteration=True, seed=seed
+    )
+
+    # Preprocesses files concurrently and interleaves records from each file into a single, unified dataset
+    dataset = dataset.interleave(
+        tf.data.TFRecordDataset,
+        cycle_length=cycle_length,
+        block_length=block_length,
+        num_parallel_calls=tf.data.AUTOTUNE,
+        deterministic=True,  # Important for high entropy
+    )
+
+    # Parse raw protobufs into structs
+    dataset = dataset.map(
+        functools.partial(_parse_tfexample_fn, fp_bits=fp_bits, num_variants=num_variants),
+        num_parallel_calls=tf.data.AUTOTUNE,
+    )
+
+    dataset = dataset.map(_choose_random_variant(seed), num_parallel_calls=tf.data.AUTOTUNE)
+
+    # Add record-level shuffling for maximum entropy
+    dataset = dataset.shuffle(
+        record_shuffle_buffer, reshuffle_each_iteration=True, seed=seed
+    )
+
+    return dataset
 
 
 def find_data_files(data_file_pattern):
@@ -92,32 +105,45 @@ def find_data_files(data_file_pattern):
 
 
 def preprocess_or_load_pubchem(
-    data_dir,
+    tfrecord_dir,
+    parquet_dir,
     version="1.0.3",
     fp_radius=2,
     fp_bits=2048,
     training_shards=16,
     validation_shards=4,
-    max_length=160,
+    num_variants=1,
     num_workers=None,
     include_formula=False,
+    canonical=True,
+    randomize=True,
+    isomeric=False,
+    use_safe=False,
 ):
     """Load and preprocess PubChem dataset with SAFE encoding and tokenizer training.
 
     Args:
-        data_dir: Directory to store the dataset
+        tfrecord_dir: Directory to store/read TFRecord files
+        parquet_dir: Directory containing parquet files
+        version: Dataset version string
         fp_radius: Morgan fingerprint radius
         fp_bits: Number of bits for fingerprint
-        pad_to_length: Length to pad atom types to
-        chunk_size: Chunk size for multiprocessing (default: 1000)
-        num_processes: Number of processes to use (default: min(cpu_count(), 8))
+        training_shards: Number of training shards
+        validation_shards: Number of validation shards
+        num_variants: Number of SMILES variants per molecule
+        num_workers: Number of processes to use (default: cpu_count())
+        include_formula: Whether to include molecular formulas
+        canonical: Whether to canonicalize SMILES
+        randomize: Whether to randomize SMILES output
+        isomeric: Whether to include stereochemistry
+        use_safe: Whether to use SAFE encoding for SMILES
     """
     # Import heavy modules only when needed
 
-    if not os.path.exists(data_dir):
-        os.makedirs(data_dir)
+    if not os.path.exists(tfrecord_dir):
+        os.makedirs(tfrecord_dir)
 
-    tfds_data_dir = Path(data_dir) / version
+    tfds_data_dir = Path(tfrecord_dir) / version
     try:
         # Check if dataset already exists
         pubchem_builder = tfds.builder_from_directory(tfds_data_dir)
@@ -129,7 +155,7 @@ def preprocess_or_load_pubchem(
 
         print("Loading full dataset without streaming...")
         ds_full = pl.read_parquet(
-            find_data_files("data/pubchem_large/data/train-*.parquet")
+            find_data_files(os.path.join(parquet_dir, "train-*.parquet"))
         )
         print(f"Loaded {len(ds_full)} samples")
         train_size = int(len(ds_full) * 0.98)
@@ -180,7 +206,7 @@ def preprocess_or_load_pubchem(
 
         features = tfds.features.FeaturesDict(
             {
-                "smiles": tfds.features.Text(),
+                "smiles": tfds.features.Sequence(tfds.features.Text(), length=num_variants),
                 "fingerprint": tfds.features.Tensor(shape=(fp_bits,), dtype=np.int8),
             }
         )
@@ -188,43 +214,53 @@ def preprocess_or_load_pubchem(
         if not tfds_data_dir.exists():
             tfds_data_dir.mkdir(parents=True, exist_ok=True)
 
-        valid_training_counts = process_map(
+        # Create partially applied function with fixed arguments for training
+        process_training_shard = functools.partial(
             process_and_write_shard_tfrecord,
+            total_shards=training_shards,
+            split="train",
+            output_dir=tfds_data_dir,
+            features=features,
+            fp_bits=fp_bits,
+            fp_radius=fp_radius,
+            canonical=canonical,
+            randomize=randomize,
+            isomeric=isomeric,
+            num_variants=num_variants,
+            include_formula=include_formula,
+            use_safe=use_safe,
+        )
+
+        valid_training_counts = process_map(
+            process_training_shard,
             [
-                (
-                    i,
-                    len(training_shards_tasks),
-                    shard,
-                    "train",
-                    tfds_data_dir,
-                    features,
-                    fp_bits,
-                    None,
-                    max_length,
-                    include_formula,
-                    training_formula_shards[i],
-                )
+                (i, shard, training_formula_shards[i])
                 for i, shard in enumerate(training_shards_tasks)
             ],
             max_workers=_num_workers,
         )
 
-        valid_validation_counts = process_map(
+        # Create partially applied function with fixed arguments for validation
+        process_validation_shard = functools.partial(
             process_and_write_shard_tfrecord,
+            total_shards=validation_shards,
+            split="validation",
+            output_dir=tfds_data_dir,
+            features=features,
+            fp_bits=fp_bits,
+            fp_radius=fp_radius,
+            canonical=canonical,
+            randomize=randomize,
+            isomeric=isomeric,
+            num_variants=num_variants,
+            include_formula=include_formula,
+            use_safe=use_safe,
+        )
+
+        valid_validation_counts = process_map(
+            process_validation_shard,
             [
-                (
-                    i,
-                    len(validation_shards_tasks),
-                    shard,
-                    "validation",
-                    tfds_data_dir,
-                    features,
-                    fp_bits,
-                    None,
-                    max_length,
-                    include_formula,
-                    validation_formula_shards[i],
-                )
+                (i, shard, validation_formula_shards[i])
                 for i, shard in enumerate(validation_shards_tasks)
             ],
             max_workers=_num_workers,
@@ -243,7 +279,7 @@ def preprocess_or_load_pubchem(
                     num_bytes=0,
                 ),
             ],
-            description="PubChem dataset with SMILES, Morgan fingerprints (radius={fp_radius}, bits={fp_bits})",
+            description="PubChem dataset with SMILES (Safe: {use_safe}), Morgan fingerprints (radius={fp_radius}, bits={fp_bits})",
             check_data=False,
         )
 
@@ -252,16 +288,90 @@ def preprocess_or_load_pubchem(
         return pubchem_builder
 
 
+def random_pad_after_first_sep_ratio(
+    tokens: tf.Tensor,  # 1D int tensor (unpadded/truncated), length L <= max_length
+    sep_id: int,
+    pad_id: int,
+    max_length: int,
+    interior_frac: float = 0.5,  # upper bound fraction of P moved after [SEP]
+    seed: int | None = None,
+) -> tf.Tensor:
+    tokens = tf.convert_to_tensor(tokens)
+    dtype = tokens.dtype
+    sep_id = tf.cast(sep_id, dtype)
+    pad_id = tf.cast(pad_id, dtype)
+
+    L = tf.shape(tokens)[0]
+    P = tf.maximum(max_length - L, 0)  # total PADs required
+
+    def no_pad():
+        out = tokens[:max_length]
+        out.set_shape([max_length])
+        return out
+
+    # locate first [SEP]
+    sep_pos_all = tf.where(tf.equal(tokens, sep_id))  # [?,1]
+    has_sep = tf.greater(tf.shape(sep_pos_all)[0], 0)
+
+    def only_trailing():
+        out = tf.concat([tokens, tf.fill([P], pad_id)], axis=0)
+        out = out[:max_length]
+        out.set_shape([max_length])
+        return out
+
+    def with_sep():
+        sep_pos = tf.reduce_min(tf.reshape(sep_pos_all, [-1]))
+        pre = tokens[: sep_pos + 1]  # includes [SEP]
+        post = tokens[sep_pos + 1 :]  # strictly after [SEP]
+        L2 = tf.shape(post)[0]
+
+        # sample interior uniformly from 0..floor(P*interior_frac)
+        frac = tf.clip_by_value(tf.cast(interior_frac, tf.float32), 0.0, 1.0)
+        interior_max = tf.cast(tf.floor(tf.cast(P, tf.float32) * frac), tf.int32)
+        interior = tf.cond(
+            tf.greater(interior_max, 0),
+            lambda: tf.random.uniform(
+                [], minval=0, maxval=interior_max + 1, dtype=tf.int32, seed=seed
+            ),
+            lambda: tf.zeros([], tf.int32),
+        )
+        end_pad = P - interior
+
+        # build the post-[SEP] region by placing the L2 tokens into (L2+interior) slots
+        n_total_post = L2 + interior
+        base = tf.fill([n_total_post], pad_id)
+        perm = tf.random.shuffle(tf.range(n_total_post, dtype=tf.int32), seed=seed)
+        tok_pos = tf.sort(perm[:L2])  # preserves token order
+        region = tf.tensor_scatter_nd_update(base, tf.expand_dims(tok_pos, 1), post)
+
+        out = tf.concat([pre, region, tf.fill([end_pad], pad_id)], axis=0)
+        out = out[:max_length]
+        out.set_shape([max_length])
+        return out
+
+    return tf.cond(P <= 0, no_pad, lambda: tf.cond(has_sep, with_sep, only_trailing))
+
+
 def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
     """Create PubChem datasets with SAFE encoding and molecular features."""
-    # Import heavy modules only when needed
-
     # Molecular dataset with SAFE, SMILES and Morgan fingerprints
     fp_radius = config.get("fp_radius", 2)
     fp_bits = config.get("fp_bits", 2048)
     max_length = config.get("max_length", 160)
     tokenizer_path = config.get("tokenizer", _SENTENCEPIECE_TOKENIZER)
     batch_size = config.get("batch_size", 512)
+
+    # Adjust batch size for multi-host environments
+    if config.get("initialize_multihost", False):
+        # In multi-host mode, each process should handle batch_size // num_processes
+        process_batch_size = (batch_size // jax.process_count()) * config.get(
+            "process_batch_size_multiplier", 1
+        )
+        print(
+            f"Multi-host detected: using process batch size {process_batch_size} (total: {batch_size})"
+        )
+    else:
+        process_batch_size = batch_size
 
     tokenizer = SentencePieceTokenizer(
         model_path=tokenizer_path,
@@ -270,9 +380,13 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
     # Use preprocess_pubchem to get the dataset builder
     num_processes = config.get("num_processes", 64)
     include_formula = config.get("include_formula", False)
+    # Get data directories from config or use defaults
+    tfrecord_dir = config.get("tfrecord_data_dir", "./data/pubchem_large_text")
+    parquet_dir = config.get("parquet_data_dir", "data/pubchem_large/data")
+
     pubchem_builder = preprocess_or_load_pubchem(
-        data_dir=os.path.join("./data", "pubchem_large_text"),
-        max_length=max_length,
+        tfrecord_dir=tfrecord_dir,
+        parquet_dir=parquet_dir,
         version=config.get("version", "1.0.0"),
         fp_radius=fp_radius,
         fp_bits=fp_bits,
@@ -280,55 +394,177 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         validation_shards=config.get("validation_shards", 2),
         num_workers=num_processes,
         include_formula=include_formula,
+        canonical=config.get("canonical", True),
+        randomize=config.get("randomize", True),
+        isomeric=config.get("isomeric", False),
+        num_variants=config.get("num_variants", 1),
+        use_safe=config.get("use_safe", False),
     )
 
     # Load SMILES tokenizer
     vocab_size = tokenizer.vocab_size
 
-    # Load Datasets
-    train_split = tfds.split_for_jax_process("train", drop_remainder=True)
-    train_dataset = pubchem_builder.as_dataset(
-        split=train_split,
-        shuffle_files=True,
+    # Create high-entropy datasets using TFRecord pattern loading
+    tfds_data_dir = Path(tfrecord_dir) / config.get("version", "1.0.0")
+
+    # Define TFRecord patterns for train and validation splits (matching pubchem_worker.py naming)
+    train_pattern = str(tfds_data_dir / "pubchem_large-train.tfrecord-?????-of-?????")
+    validation_pattern = str(
+        tfds_data_dir / "pubchem_large-validation.tfrecord-?????-of-?????"
+    )
+
+    # Check if TFRecord files exist, otherwise fall back to TFDS builder
+    use_high_entropy_loading = (
+        len(glob.glob(train_pattern)) > 0 and len(glob.glob(validation_pattern)) > 0
     )
 
     def _tokenize_and_truncate(x):
-        x["smiles"] = tokenizer.encode(x["smiles"])
-        x["smiles"] = x["smiles"][:max_length]
-        # Pad to max_length with tokenizer.pad_id
-        current_length = tf.shape(x["smiles"])[0]
-        padding_length = max_length - current_length
-        pad_id_int = tf.cast(tokenizer.pad_id, tf.int32)
-        x["smiles"] = tf.pad(
-            x["smiles"], [[0, padding_length]], constant_values=pad_id_int
+        # x["smiles"] is now a single string (not a list) after expansion
+        toks = tokenizer.encode(x["smiles"])
+        toks = tf.cast(toks, tf.int32)
+        x["smiles"] = random_pad_after_first_sep_ratio(
+            tokens=toks,
+            sep_id=int(tokenizer.sep_id),
+            pad_id=int(tokenizer.pad_id),
+            max_length=max_length,
+            interior_frac=config.get("interior_frac", 0.1),
+            seed=seed,
         )
+
         return x
 
-    train_dataset = train_dataset.map(
-        _tokenize_and_truncate,
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
+    if use_high_entropy_loading:
+        print("Using high-entropy TFRecord loading for maximum data diversity...")
 
-    train_dataset = train_dataset.repeat()  # Repeat for continuous training
-    train_dataset = train_dataset.shuffle(batch_size * 8)  # Shuffle with larger buffer
-    train_dataset = train_dataset.batch(batch_size, drop_remainder=True)
-    train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
-    train_dataset = train_dataset.as_numpy_iterator()
+        # Create high-entropy training dataset
+        train_dataset = create_high_entropy_dataset(
+            train_pattern,
+            fp_bits=fp_bits,
+            num_variants=config.get("num_variants", 1),
+            cycle_length=config.get("cycle_length", 16),
+            block_length=config.get("block_length", 4),
+            file_shuffle_buffer=config.get("file_shuffle_buffer", 1000),
+            record_shuffle_buffer=config.get("record_shuffle_buffer", 10000),
+            seed=seed,
+        )
 
-    validation_split = tfds.split_for_jax_process("validation", drop_remainder=True)
-    eval_dataset = pubchem_builder.as_dataset(
-        split=validation_split,
-        shuffle_files=True,
-    )
-    eval_dataset = eval_dataset.map(
-        _tokenize_and_truncate,
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
-    eval_dataset = eval_dataset.repeat()  # Repeat for continuous evaluation
-    eval_dataset = eval_dataset.shuffle(batch_size * 8)  # Shuffle with larger buffer
-    eval_dataset = eval_dataset.batch(batch_size, drop_remainder=True)
-    eval_dataset = eval_dataset.prefetch(tf.data.AUTOTUNE)
-    eval_dataset = eval_dataset.as_numpy_iterator()
+        # Add process-specific data sharding for multi-host
+        if config.get("initialize_multihost", False):
+            # Shard the dataset across processes
+            train_dataset = train_dataset.shard(
+                num_shards=jax.process_count(), index=jax.process_index()
+            )
+
+        train_dataset = train_dataset.map(
+            _tokenize_and_truncate,
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
+
+        # Apply multiple levels of shuffling and batching for maximum entropy
+        train_dataset = train_dataset.shuffle(
+            process_batch_size * 16, reshuffle_each_iteration=True, seed=seed
+        )  # Large shuffle buffer
+        train_dataset = train_dataset.repeat()  # Repeat for continuous training
+        train_dataset = train_dataset.batch(process_batch_size, drop_remainder=True)
+        train_dataset = train_dataset.shuffle(
+            config.get("batch_shuffle_buffer", 50),
+            reshuffle_each_iteration=True,
+            seed=seed + 1 if seed is not None else None,
+        )  # Batch-level shuffling
+        train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
+        train_dataset = train_dataset.as_numpy_iterator()
+
+        # Create high-entropy validation dataset
+        eval_dataset = create_high_entropy_dataset(
+            validation_pattern,
+            fp_bits=fp_bits,
+            num_variants=config.get("num_variants", 1),
+            cycle_length=config.get("cycle_length", 8),
+            block_length=config.get("block_length", 2),
+            file_shuffle_buffer=config.get("file_shuffle_buffer", 200),
+            record_shuffle_buffer=config.get("record_shuffle_buffer", 2000),
+            seed=seed + 2 if seed is not None else None,
+        )
+
+        # Add process-specific data sharding for multi-host
+        if config.get("initialize_multihost", False):
+            # Shard the dataset across processes
+            eval_dataset = eval_dataset.shard(
+                num_shards=jax.process_count(), index=jax.process_index()
+            )
+
+        eval_dataset = eval_dataset.map(
+            _tokenize_and_truncate,
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
+        eval_dataset = eval_dataset.shuffle(
+            process_batch_size * 8,
+            reshuffle_each_iteration=True,
+            seed=seed + 3 if seed is not None else None,
+        )  # Shuffle with larger buffer
+        eval_dataset = eval_dataset.repeat()  # Repeat for continuous evaluation
+        eval_dataset = eval_dataset.batch(process_batch_size, drop_remainder=True)
+        eval_dataset = eval_dataset.shuffle(
+            config.get("batch_shuffle_buffer", 20),
+            reshuffle_each_iteration=True,
+            seed=seed + 4 if seed is not None else None,
+        )  # Batch-level shuffling
+        eval_dataset = eval_dataset.prefetch(tf.data.AUTOTUNE)
+        eval_dataset = eval_dataset.as_numpy_iterator()
+
+    else:
+        print(
+            "TFRecord files not found, falling back to TFDS builder with enhanced shuffling..."
+        )
+
+        # Load Datasets using TFDS builder with enhanced shuffling
+        train_split = tfds.split_for_jax_process("train", drop_remainder=True)
+        train_dataset = pubchem_builder.as_dataset(
+            split=train_split,
+            shuffle_files=True,
+        )
+
+        train_dataset = train_dataset.map(
+            _tokenize_and_truncate,
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
+
+        train_dataset = train_dataset.repeat()  # Repeat for continuous training
+        train_dataset = train_dataset.shuffle(
+            batch_size * 64, reshuffle_each_iteration=True, seed=seed
+        )  # Enhanced shuffle buffer
+        train_dataset = train_dataset.batch(batch_size, drop_remainder=True)
+        train_dataset = train_dataset.shuffle(
+            config.get("batch_shuffle_buffer", 50),
+            reshuffle_each_iteration=True,
+            seed=seed + 1 if seed is not None else None,
+        )  # Batch-level shuffling
+        train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
+        train_dataset = train_dataset.as_numpy_iterator()
+
+        validation_split = tfds.split_for_jax_process("validation", drop_remainder=True)
+        eval_dataset = pubchem_builder.as_dataset(
+            split=validation_split,
+            shuffle_files=True,
+        )
+        eval_dataset = eval_dataset.map(
+            _tokenize_and_truncate,
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
+        eval_dataset = eval_dataset.repeat()  # Repeat for continuous evaluation
+        eval_dataset = eval_dataset.shuffle(
+            batch_size * 8,
+            reshuffle_each_iteration=True,
+            seed=seed + 2 if seed is not None else None,
+        )  # Enhanced shuffle buffer
+        eval_dataset = eval_dataset.batch(batch_size, drop_remainder=True)
+        eval_dataset = eval_dataset.shuffle(
+            config.get("batch_shuffle_buffer", 20),
+            reshuffle_each_iteration=True,
+            seed=seed + 3 if seed is not None else None,
+        )  # Batch-level shuffling
+        eval_dataset = eval_dataset.prefetch(tf.data.AUTOTUNE)
+        eval_dataset = eval_dataset.as_numpy_iterator()
 
     info = {
         "fp_radius": fp_radius,
@@ -355,13 +591,28 @@ if __name__ == "__main__":
                 "fp_radius": 2,
                 "fp_bits": 4096,
                 "max_length": 128,
-                "tokenizer": "data/sentencepiece_tokenizer_4096_bpe_latest.model",
+                "tokenizer": "data/sentencepiece_tokenizer_bpe_3000_newcorpus.model", # Path to your tokenizer model
                 "batch_size": 512,
-                "version": "1.0.0",
-                "training_shards": 128,
-                "validation_shards": 4,
+                "version": "1.2.0",
+                "training_shards": 160,
+                "validation_shards": 6,
                 "num_processes": 160,
                 "include_formula": True,  # Set to True to include molecular formulas
+                # SMILES processing configuration
+                "canonical": True,  # Whether to canonicalize SMILES
+                "randomize": True,  # Whether to randomize SMILES output
+                "isomeric": False,  # Whether to include stereochemistry
+                "num_variants": 2,  # Number of SMILES variants per molecule
+                # Data directory configuration
+                "tfrecord_data_dir": "/mnt/data/pubchem_large_text", # Directory to read/write TFRecord files
+                "parquet_data_dir": "data/pubchem_large/data", # Directory containing train-*.parquet files
+                # High-entropy loading configuration
+                "cycle_length": 16,  # Number of files to interleave concurrently
+                "block_length": 4,  # Number of consecutive elements from each file
+                "file_shuffle_buffer": 1000,  # File-level shuffle buffer
+                "record_shuffle_buffer": 10000,  # Record-level shuffle buffer
+                "batch_shuffle_buffer": 50,  # Batch-level shuffle buffer
+                "use_safe": True, # Whether to use SAFE encoding for SMILES
             }
         ),
         seed=42,
@@ -378,7 +629,7 @@ if __name__ == "__main__":
     )  # Decode smiles of the first sample
     print("Decoded SMILES:", decoded)
 
-    decoded_2 = tokenizer.decode_with_padding_removal(
+    decoded_2 = tokenizer._decode_with_padding_removal(
         features["smiles"][1]
     )  # Decode smiles of the second sample
     print("Decoded SMILES 2:", decoded_2)

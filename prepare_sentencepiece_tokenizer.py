@@ -99,10 +99,11 @@ def _train_sentencepiece(
     sep_token: str = "[SEP]",
     smiles_column: str = "smiles",
     formula_column: str = "molecular_formula",
+    input_files: Union[str, list, None] = None,
 ):
-    """Train SentencePiece tokenizer from HuggingFace dataset.
+    """Train SentencePiece tokenizer from HuggingFace dataset or list of input files.
     Args:
-      dataset: HuggingFace dataset
+      dataset: HuggingFace dataset (ignored if input_files is provided)
       vocab_size: int: size of vocab tokens to train.
       maxchars: int: number of characters to use for sentencepiece training. If None or -1, use all data.
       model_path: str: path of model file to save vocab model to.
@@ -113,6 +114,8 @@ def _train_sentencepiece(
       sep_token: str: separator token to include as special token.
       smiles_column: str: name of the SMILES column in the dataset.
       formula_column: str: name of the molecular formula column in the dataset.
+      input_files: Union[str, list, None]: If provided, use these files directly instead of dataset.
+        Can be a single file path (str) or list of file paths. Files should contain text data.
     Returns:
       path to the trained sentencepiece vocabulary model.
     """
@@ -121,14 +124,47 @@ def _train_sentencepiece(
     else:
         abs_model_path = os.path.abspath(os.path.expanduser(model_path))
     
-    fname, actual_chars = _dump_hf_data_to_textfile(
-        dataset, maxchars=maxchars, sep_token=sep_token,
-        smiles_column=smiles_column, formula_column=formula_column
-    )
-    if maxchars is None or maxchars == -1:
-        logging.info(f"Dumped all {actual_chars} characters to {fname}")
+    # Handle input files: either use provided files or dump dataset to file
+    if input_files is not None:
+        # Use provided input files directly
+        if isinstance(input_files, str):
+            # Single file path
+            input_file_list = [input_files]
+        else:
+            # List of file paths
+            input_file_list = input_files
+        
+        # Validate that all files exist
+        for file_path in input_file_list:
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"Input file not found: {file_path}")
+        
+        # Join file paths with comma for SentencePiece input
+        input_files_str = ",".join(input_file_list)
+        logging.info(f"Using input files: {input_files_str}")
+        fname = None  # No temporary file to clean up
+        
+        # Calculate total characters for logging (optional)
+        actual_chars = 0
+        try:
+            for file_path in input_file_list:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    actual_chars += len(f.read())
+            logging.info(f"Total characters in input files: {actual_chars}")
+        except Exception as e:
+            logging.warning(f"Could not calculate total characters: {e}")
+            
     else:
-        logging.info(f"Dumped {actual_chars} characters (max {maxchars}) to {fname}")
+        # Use dataset and dump to temporary file (original behavior)
+        fname, actual_chars = _dump_hf_data_to_textfile(
+            dataset, maxchars=maxchars, sep_token=sep_token,
+            smiles_column=smiles_column, formula_column=formula_column
+        )
+        input_files_str = fname
+        if maxchars is None or maxchars == -1:
+            logging.info(f"Dumped all {actual_chars} characters to {fname}")
+        else:
+            logging.info(f"Dumped {actual_chars} characters (max {maxchars}) to {fname}")
     
     temp_dir = tempfile.gettempdir()
     with tempfile.NamedTemporaryFile(
@@ -141,13 +177,13 @@ def _train_sentencepiece(
     
     argstr = " ".join(
         [
-            f"--input={fname}",
+            f"--input={input_files_str}",
             f"--vocab_size={vocab_size}",
             f"--character_coverage={character_coverage}",
             f"--model_prefix={model_fp.name}",
             f"--model_type={model_type}",
             f"--user_defined_symbols={','.join(user_defined_symbols)}",
-            "--input_sentence_size=80000000",
+            "--input_sentence_size=100000000",
             "--add_dummy_prefix=false",
             "--num_threads=128",
             "--unk_piece=[UNK]",
@@ -158,7 +194,8 @@ def _train_sentencepiece(
             "--shuffle_input_sentence=true",
             "--max_sentencepiece_length=32",
             "--split_by_unicode_script=false",
-            "--split_by_number=false",
+            "--split_by_number=true",
+            "--split_digits=true",
         ]
     )
     
@@ -175,7 +212,9 @@ def _train_sentencepiece(
     
     # Clean up temp files
     try:
-        os.unlink(fname)
+        # Only clean up fname if it was created (not using input_files)
+        if fname is not None:
+            os.unlink(fname)
         os.unlink(model_fp.name + ".model")
         os.unlink(model_fp.name + ".vocab")
     except FileNotFoundError:
@@ -194,17 +233,32 @@ def train_tokenizer(
     sep_token: str = "[SEP]",
     smiles_column: str = "smiles",
     formula_column: str = "molecular_formula",
+    input_files: Union[str, list, None] = None,
 ):
     """tokenizer training function
     Args:
+        dataset_name: str: HuggingFace dataset name (ignored if input_files is provided)
+        vocab_path: str: path to save the trained tokenizer model
+        vocab_size: int: vocabulary size
         max_corpus_chars: int: maximum number of characters to use from corpus. If None or -1, use all data.
         model_type: str: type of sentencepiece model ('unigram', 'bpe', 'word', 'char').
+        sep_token: str: separator token between molecular formula and SMILES
+        smiles_column: str: name of SMILES column in dataset
+        formula_column: str: name of molecular formula column in dataset
+        input_files: Union[str, list, None]: If provided, use these files directly instead of dataset.
+            Can be a single file path (str) or list of file paths. Files should contain text data.
     """
-    logging.info("Loading dataset from HuggingFace...")
-    ds = datasets.load_dataset(dataset_name, split="train").with_format("polars")
-    logging.info("Dataset loaded successfully")
+    if input_files is not None:
+        # Use provided input files directly
+        logging.info(f"Using provided input files: {input_files}")
+        ds = None  # No dataset needed
+    else:
+        # Load dataset from HuggingFace
+        logging.info("Loading dataset from HuggingFace...")
+        ds = datasets.load_dataset(dataset_name, split="train").with_format("polars")
+        logging.info("Dataset loaded successfully")
     
-    logging.info("SentencePiece vocab not found, building one from data.")
+    logging.info("Training SentencePiece tokenizer...")
     vocab_path = _train_sentencepiece(
         ds,
         vocab_size=vocab_size,
@@ -214,6 +268,7 @@ def train_tokenizer(
         sep_token=sep_token,
         smiles_column=smiles_column,
         formula_column=formula_column,
+        input_files=input_files,
     )
     logging.info("Model saved at %s", vocab_path)
 
@@ -221,7 +276,10 @@ def train_tokenizer(
 def main():
     parser = argparse.ArgumentParser(description="Train a SentencePiece tokenizer on SMILES and molecular formulas")
     parser.add_argument("--dataset-name", default="jablonkagroup/pubchem-smiles-molecular-formula", 
-                       help="HuggingFace dataset name")
+                       help="HuggingFace dataset name (ignored if --input-files is provided)")
+    parser.add_argument("--input-files", nargs='+', 
+                       help="List of input text files to use instead of HuggingFace dataset. "
+                            "Files should contain text data with formula[SEP]smiles format.")
     parser.add_argument("--vocab-size", type=int, default=4096, help="Vocabulary size")
     parser.add_argument("--max-corpus-chars", type=int, default=100_000_000, 
                        help="Maximum corpus characters. Use -1 to process all data without limit.")
@@ -255,18 +313,23 @@ def main():
         sep_token=args.sep_token,
         smiles_column=args.smiles_column,
         formula_column=args.formula_column,
+        input_files=args.input_files,
     )
     
     logging.info("Tokenizer training complete!")
     logging.info(f"Model saved to: {vocab_path}")
-    if max_corpus_chars is None:
-        logging.info("Used all available data (no character limit)")
+    if args.input_files:
+        logging.info(f"Used input files: {args.input_files}")
     else:
-        logging.info(f"Used up to {max_corpus_chars:,} characters from dataset")
+        if max_corpus_chars is None:
+            logging.info("Used all available data (no character limit)")
+        else:
+            logging.info(f"Used up to {max_corpus_chars:,} characters from dataset")
     logging.info("To use the tokenizer:")
     logging.info("  import sentencepiece as spm")
     logging.info(f"  sp = smp.SentencePieceProcessor(model_file='{vocab_path}')")
-    logging.info(f"Used columns: formula='{args.formula_column}', smiles='{args.smiles_column}'")
+    if not args.input_files:
+        logging.info(f"Used columns: formula='{args.formula_column}', smiles='{args.smiles_column}'")
 
 
 if __name__ == "__main__":

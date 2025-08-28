@@ -52,3 +52,10 @@ finetune_*/
 *results*/
 
 wandb/
+
+latest_eval/
+
+docs/
+
+.claude
+

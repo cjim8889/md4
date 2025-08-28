@@ -9,16 +9,13 @@ dependencies = [
     "clu>=0.0.12",
     "datasets>=4.0.0",
     "distrax>=0.1.5",
-    "grain>=0.2.11",
     "huggingface-hub>=0.33.2",
-    "jax[tpu]>=0.6.2; sys_platform == 'linux'",
-    "jax>=0.6.2; sys_platform == 'macOS'",
+    "jax[tpu]==0.6.2; sys_platform == 'linux'",
+    "jax==0.6.2; sys_platform == 'macOS'",
     "matplotlib>=3.10.3",
     "ml-collections>=1.1.0",
     "polars>=1.31.0",
     "rdkit>=2025.3.3",
-    "safe-mol>=0.1.13",
-    "seaborn>=0.13.2",
     "transformers==4.51.2",
     "torch==2.7.1",
     "tokenizers==0.21.4",
@@ -30,6 +27,8 @@ dependencies = [
     "tf-keras>=2.19.0",
     "xprof>=2.20.5",
     "wandb>=0.21.0",
+    "flax>=0.10.7",
+    "etils[epath]>=1.13.0",
 ]
 
 

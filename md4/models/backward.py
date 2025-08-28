@@ -16,6 +16,7 @@
 """Classifier implementation."""
 
 from collections.abc import Sequence
+from typing import Optional
 
 import flax.linen as nn
 import jax
@@ -59,8 +60,23 @@ class CondEmbedding(nn.Module):
             cond = temb
         else:
             cond = jnp.concatenate([temb, cond], axis=-1)
-        cond = nn.swish(nn.Dense(features=n_embd * 4, name="dense0", dtype=self.dtype, param_dtype=self.param_dtype)(cond))
-        cond = nn.Dense(n_embd, dtype=self.dtype, param_dtype=self.param_dtype)(cond)
+        cond = nn.swish(nn.Dense(
+            features=n_embd * 4, 
+            name="dense0", 
+            dtype=self.dtype, 
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.linear.default_kernel_init, ('cond_input', 'cond_hidden')
+            )
+        )(cond))
+        cond = nn.Dense(
+            n_embd, 
+            dtype=self.dtype, 
+            param_dtype=self.param_dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.linear.default_kernel_init, ('cond_hidden', 'cond_output')
+            )
+        )(cond)
         return cond
 
 
@@ -68,10 +84,6 @@ class DiscreteClassifier(nn.Module):
     """Discrete input classifier implementation."""
 
     n_layers: int = 12
-    n_dit_layers: int = 0
-    dit_num_heads: int = 12
-    dit_hidden_size: int = 768
-    ch_mult: Sequence[int] = (1,)
     feature_dim: int = 64
     num_heads: int = 12
     n_kv_heads: int = 12
@@ -86,9 +98,12 @@ class DiscreteClassifier(nn.Module):
     multiple_of: int = 64
     dtype: jnp.dtype = jnp.float32
     param_dtype: jnp.dtype = jnp.float32
+    use_cross_attention: bool = False
+    cross_attention_layers: Optional[int] = None
+    cross_attention_proj_dim: Optional[int] = None
 
     @nn.compact
-    def __call__(self, z, t=None, cond=None, train=False):
+    def __call__(self, z, t=None, cond=None, cross_conditioning=None, train=False):
         if t is not None:
             # z: [bs, seq_len] or [bs, h, w, c]
             assert jnp.isscalar(t) or t.ndim == 0 or t.ndim == 1
@@ -97,7 +112,15 @@ class DiscreteClassifier(nn.Module):
 
         if z.ndim == 2:
             if self.outside_embed:
-                z = nn.Embed(self.vocab_size + 1, self.feature_dim, dtype=self.dtype, param_dtype=self.param_dtype)(z)
+                z = nn.Embed(
+                    self.vocab_size + 1, 
+                    self.feature_dim, 
+                    dtype=self.dtype, 
+                    param_dtype=self.param_dtype,
+                    embedding_init=nn.with_logical_partitioning(
+                        nn.linear.default_embed_init, ('vocab', 'hidden')
+                    )
+                )(z)
             if self.model_sharding:
                 args = sharded_transformer.ModelArgs(
                     dim=self.feature_dim * self.num_heads,
@@ -132,10 +155,13 @@ class DiscreteClassifier(nn.Module):
                     n_embed_classes=self.vocab_size + 1,
                     dtype=self.dtype,
                     param_dtype=self.param_dtype,
+                    use_cross_attention=self.use_cross_attention,
+                    cross_attention_layers=self.cross_attention_layers,
+                    cross_attention_proj_dim=self.cross_attention_proj_dim,
                 )
                 # [bs, seq_len] -> [bs, seq_len, |V|]
                 net = transformer.Transformer(args)
-            logits = net(z, cond=cond, train=train)
+            logits = net(z, cond=cond, cross_conditioning=cross_conditioning, train=train)
         else:
             raise NotImplementedError()
 

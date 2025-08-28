@@ -5,9 +5,9 @@ import random
 
 import numpy as np
 from rdkit import Chem, RDLogger
-from rdkit.Chem import Descriptors
-from rdkit.Chem import rdFingerprintGenerator
-from rdkit.Chem import rdMolDescriptors
+from rdkit.Chem import Descriptors, rdFingerprintGenerator, rdMolDescriptors
+
+from .safe_utils import SAFEConverter
 
 # Set random seed and suppress RDKit warnings
 random.seed(42)
@@ -111,14 +111,14 @@ def format_atom_types_summary(atom_types):
 
 def filter_molecule(mol):
     """Basic molecule filtering without atom type restrictions."""
-    if Descriptors.MolWt(mol) >= 3000:  # Molecular weight filter
+    if Descriptors.MolWt(mol) >= 1500:  # Molecular weight filter
         return False
 
-    for atom in mol.GetAtoms():
-        if atom.GetFormalCharge() != 0:  # No charged atoms
-            return False
-        # if atom.GetSymbol() not in FILTER_ATOMS:  # Only allowed atom types
-        #     return False
+    # for atom in mol.GetAtoms():
+    # if atom.GetFormalCharge() != 0:  # No charged atoms
+    # return False
+    # if atom.GetSymbol() not in FILTER_ATOMS:  # Only allowed atom types
+    #     return False
 
     return True
 
@@ -148,14 +148,61 @@ def get_generator(fp_radius=2, fp_bits=2048):
     return mfpgen
 
 
-def process_smiles(smi, fp_radius=2, fp_bits=2048):
-    """Process SMILES string to InChI with filtering."""
+def process_smiles(
+    smi, fp_radius=2, fp_bits=2048, canonical=True, randomize=True, isomeric=False, num_variants=1, safe_encoder: SAFEConverter | None = None
+):
+    """Process SMILES string with filtering and configurable output format.
+
+    Args:
+        smi: Input SMILES string
+        fp_radius: Morgan fingerprint radius (default: 2)
+        fp_bits: Number of bits for fingerprint (default: 2048)
+        canonical: Whether to canonicalize SMILES (default: True)
+        randomize: Whether to randomize SMILES output (default: True, ignored if canonical=False)
+        isomeric: Whether to include stereochemistry in output SMILES (default: False)
+        num_variants: Number of SMILES variants to generate (default: 1)
+
+    Returns:
+        Tuple of (fingerprint, smiles_list) or None if processing fails
+        - fingerprint: numpy array of Morgan fingerprint
+        - smiles_list: list of SMILES strings
+          If canonical=True: first element is canonical, rest are randomized
+          If canonical=False: all elements are original SMILES (repeated)
+    """
     try:
         mol = Chem.MolFromSmiles(smi)
         if filter_molecule(mol):
             fingerprint = get_generator(fp_radius, fp_bits).GetFingerprintAsNumPy(mol)
+            
+            smiles_list = []
+            
+            if canonical:
+                # First variant: canonical (non-randomized)
+                if safe_encoder is not None:
+                    # Use SAFE encoding for canonical SMILES
+                    canonical_smiles = safe_encoder.encoder(mol, canonical=True, randomize=False)
+                else:
+                    canonical_smiles = Chem.MolToSmiles(
+                        mol, isomericSmiles=isomeric, doRandom=False, canonical=True
+                    )
+                smiles_list.append(canonical_smiles)
+            else:
+                # No canonicalization, use original SMILES
+                smiles_list.append(safe_encoder.encoder(mol, canonical=False, randomize=False))
 
-            return np.asarray(fingerprint, dtype=np.int8)
+            # Additional variants: randomized if requested
+            if randomize and num_variants > 1:
+                for _ in range(num_variants - 1):
+                    if safe_encoder is not None:
+                        # Use SAFE encoding for randomized SMILES
+                        randomized_smiles = safe_encoder.encoder(mol, canonical=False, randomize=True)
+                    else:
+                        randomized_smiles = Chem.MolToSmiles(
+                            mol, isomericSmiles=isomeric, doRandom=True, canonical=False
+                        )
+                    smiles_list.append(randomized_smiles)
+
+            return np.asarray(fingerprint, dtype=np.int8), smiles_list
     except Exception:
         pass
     return None
@@ -175,16 +222,16 @@ def process_smiles_with_shared_memory(smi, i, fp_radius=2, fp_bits=2048):
 
 def get_molecular_formula(mol):
     """Get molecular formula from RDKit molecule object.
-    
+
     Args:
         mol: RDKit molecule object
-        
+
     Returns:
         str: Molecular formula (e.g., 'C6H10N2')
     """
     if mol is None:
         return None
-        
+
     try:
         return rdMolDescriptors.CalcMolFormula(mol)
     except Exception:
@@ -246,11 +293,11 @@ def calculate_formula_smiles_validity(texts_list):
             sep_splits = text_str.split("[SEP]")
             if len(sep_splits) < 2:
                 continue
-            
+
             # Extract formula (between [CLS] and first [SEP])
             formula_part = sep_splits[0].replace("[CLS]", "").strip()
             formula_str = formula_part
-            
+
             # Extract SMILES (between first and second [SEP])
             smiles_str = sep_splits[1].strip()
         else:
@@ -258,13 +305,13 @@ def calculate_formula_smiles_validity(texts_list):
             sep_splits = text_str.split("[SEP]")
             if len(sep_splits) < 2:
                 continue
-                
+
             formula_str = sep_splits[0].strip()
             smiles_str = sep_splits[1].strip()
-        
+
         # Remove all whitespace from the SMILES string
         smiles_str = smiles_str.replace(" ", "").replace("\n", "").replace("\t", "")
-        
+
         # Skip empty SMILES or formula strings
         if not smiles_str or not formula_str:
             continue
@@ -273,16 +320,16 @@ def calculate_formula_smiles_validity(texts_list):
             mol = Chem.MolFromSmiles(smiles_str)
             if mol is not None:
                 valid_count += 1
-                
+
                 # Check if it passes our molecule filtering
                 if filter_molecule(mol):
                     filtered_count += 1
-                
+
                 # Check if formula matches SMILES
                 calculated_formula = get_molecular_formula(mol)
                 if calculated_formula and calculated_formula == formula_str:
                     formula_match_count += 1
-                    
+
         except Exception:
             # Any exception during parsing means invalid SMILES
             pass

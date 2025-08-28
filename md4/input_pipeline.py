@@ -15,20 +15,16 @@
 
 """Deterministic input pipeline."""
 
-from typing import Any, Union
+from typing import Any
 
-import grain.python as grain
 import jax
 from ml_collections import config_dict
 
 from md4 import (
     input_pipeline_msg_finetune,
-    input_pipeline_pubchem,
     input_pipeline_pubchem_large,
     input_pipeline_pubchem_large_text,
 )
-
-_DataSet = Union[grain.MapDataset, grain.DataLoader, grain.IterDataset]
 
 
 def get_data_shape(config):
@@ -44,8 +40,8 @@ def get_num_train_steps(config: config_dict.ConfigDict) -> int:
 
 def create_datasets(
     config: config_dict.ConfigDict, seed: int
-) -> tuple[_DataSet, dict[str, _DataSet], dict[str, Any]]:
-    """Create Grain data loaders for training and evaluation.
+) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+    """Create data loaders for training and evaluation.
 
     Args:
       config: Configuration to use.
@@ -57,21 +53,8 @@ def create_datasets(
     """
     info = {}
     assert config.batch_size % jax.process_count() == 0
-    process_batch_size = config.batch_size // jax.process_count()
-    eval_batch_size = config.get("eval_batch_size", config.batch_size)
-    process_eval_batch_size = eval_batch_size // jax.process_count()
 
-    if config.dataset == "pubchem":
-        # Use the dedicated PubChem input pipeline
-        (
-            train_source,
-            train_transformations,
-            eval_source,
-            eval_transformations,
-            pubchem_info,
-        ) = input_pipeline_pubchem.create_pubchem_datasets(config, seed)
-        info.update(pubchem_info)
-    elif config.dataset == "pubchem_large":
+    if config.dataset == "pubchem_large":
         train_dataset, eval_dataset, pubchem_info = (
             input_pipeline_pubchem_large.create_pubchem_datasets(config, seed)
         )
@@ -91,46 +74,5 @@ def create_datasets(
         return train_dataset, eval_dataset, info
     else:
         raise NotImplementedError(
-            "Only pubchem series datasets and msg_finetune are supported."
+            "Only pubchem_large, pubchem_large_text, and msg_finetune datasets are supported."
         )
-
-    train_loader = grain.load(
-        source=train_source,
-        shuffle=True,
-        seed=seed,
-        shard_options=grain.ShardByJaxProcess(drop_remainder=True),
-        transformations=train_transformations,
-        batch_size=process_batch_size,
-        worker_count=config.grain_num_workers,
-        read_options=grain.ReadOptions(
-            num_threads=config.grain_num_read_threads,
-            prefetch_buffer_size=config.grain_prefetch_buffer_size,
-        ),
-    )
-
-    if config.eval_pad_last_batch:
-        raise NotImplementedError(
-            "BatchWithPadElements is not implemented in PyGrain yet."
-        )
-
-    drop_remainder = True
-    shard_options = grain.ShardByJaxProcess(drop_remainder=drop_remainder)
-
-    eval_loaders = {}
-    for split in eval_source:
-        eval_loader = grain.load(
-            source=eval_source[split],
-            num_epochs=1,
-            shard_options=shard_options,
-            transformations=eval_transformations,
-            batch_size=process_eval_batch_size,
-            worker_count=0,
-            drop_remainder=drop_remainder,
-            read_options=grain.ReadOptions(
-                num_threads=config.grain_num_read_threads,
-                prefetch_buffer_size=config.grain_prefetch_buffer_size,
-            ),
-        )
-        eval_loaders[split] = eval_loader
-
-    return train_loader, eval_loaders, info

@@ -16,7 +16,7 @@
 """Simplified masked diffusion (MD4)."""
 
 import math
-from typing import Sequence
+from typing import Sequence, Optional
 
 import flax.linen as nn
 import jax
@@ -84,10 +84,6 @@ class MD4(nn.Module):
     n_kv_heads: int = 12
     antithetic_time_sampling: bool = True
     n_layers: int = 32
-    n_dit_layers: int = 0
-    dit_num_heads: int = 12
-    dit_hidden_size: int = 768
-    ch_mult: Sequence[int] = (1,)
     vocab_size: int = 256
     noise_schedule_type: str = "linear"
     dropout_rate: float = 0.0
@@ -108,17 +104,18 @@ class MD4(nn.Module):
     fingerprint_adapter: bool = False
     only_adapter: bool = False
     raw_fingerprint_dim: int = 0
-    atom_type_size: int = 0
     fingerprint_mlp_layers: Sequence[int] = ()
     multiple_of: int = 64
     dtype: jnp.dtype = jnp.float32
     param_dtype: jnp.dtype = jnp.float32
+    use_cross_attention: bool = False
+    cross_attention_layers: Optional[int] = None
+    cross_attention_proj_dim: Optional[int] = None
+    cross_conditioning_seq_length: int = 64
 
     def setup(self):
         self.noise_schedule = MaskingSchedule(self.data_shape, self.noise_schedule_type)
 
-        if self.classes > 0:
-            self.cond_embeddings = nn.Embed(self.classes, self.feature_dim, dtype=self.dtype, param_dtype=self.param_dtype)
         if self.fingerprint_dim > 0:
             if self.fingerprint_adapter:
                 self.fp_adapter = FingerprintAdapter(
@@ -128,27 +125,8 @@ class MD4(nn.Module):
                     param_dtype=self.param_dtype,
                 )
 
-            # Use configurable layers if provided, otherwise use default
-            if self.fingerprint_mlp_layers:
-                mlp_features = list(self.fingerprint_mlp_layers)
-            else:
-                mlp_features = [self.fingerprint_dim // 2, self.feature_dim * 2, self.feature_dim, self.feature_dim]
-            
-            self.cond_embeddings = SimpleMLP(
-                features=mlp_features,
-                dtype=self.dtype,
-                param_dtype=self.param_dtype,
-            )
-        if self.atom_type_size > 0:
-            self.atom_embeddings = nn.Embed(self.atom_type_size, self.feature_dim, dtype=self.dtype, param_dtype=self.param_dtype)
-            self.atom_embeddings_agg = nn.Dense(features=self.feature_dim, name="atom_embeddings_agg", dtype=self.dtype, param_dtype=self.param_dtype)
-
         self.classifier = backward.DiscreteClassifier(
             n_layers=self.n_layers,
-            n_dit_layers=self.n_dit_layers,
-            dit_num_heads=self.dit_num_heads,
-            dit_hidden_size=self.dit_hidden_size,
-            ch_mult=self.ch_mult,
             feature_dim=self.feature_dim,
             num_heads=self.num_heads,
             n_kv_heads=self.n_kv_heads,
@@ -163,6 +141,9 @@ class MD4(nn.Module):
             multiple_of=self.multiple_of,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
+            use_cross_attention=self.use_cross_attention,
+            cross_attention_layers=self.cross_attention_layers,
+            cross_attention_proj_dim=self.cross_attention_proj_dim,
         )
 
     def forward_sample(self, x, t):
@@ -204,57 +185,55 @@ class MD4(nn.Module):
         return jnp.where(strictly_after, mask_val, tokens).astype(jnp.int32)
 
     def get_cond_embedding(self, conditioning):
+        """Extract conditioning embeddings and cross-conditioning from input."""
         fp_logits = None
+        cross_cond = None
+        
         if conditioning is not None:
             if isinstance(conditioning, dict):
-                _cond = conditioning["fingerprint"]
-                if self.fingerprint_adapter:
-                    # Convert raw fingerprint to the desired dimension
-                    if conditioning["fingerprint"].shape[1] != self.raw_fingerprint_dim:
-                        # Print stack trace for debugging
-                        raise ValueError(
-                            f"Expected fingerprint shape {self.raw_fingerprint_dim}, got {conditioning['fingerprint'].shape[1]}"
-                        )
-                    # _cond = nn.sigmoid(self.cond_conversion(conditioning["fingerprint"]))
-                    _cond, fp_logits = self.fp_adapter(conditioning["fingerprint"])
+                # Extract cross-conditioning if present
+                cross_cond = conditioning.get("cross_conditioning", None)
+                if cross_cond is not None:
+                    cross_cond = cross_cond.reshape(cross_cond.shape[0], self.cross_conditioning_seq_length, -1)
 
-                if "atom_types" in conditioning:
-                    atom_conditioning = self.atom_embeddings(conditioning["atom_types"])
-                    atom_conditioning = jax.vmap(self.atom_embeddings_agg)(atom_conditioning)
-                    atom_conditioning = nn.swish(atom_conditioning.astype(jnp.float32)).astype(self.dtype)
+                # Process fingerprint conditioning
+                if "fingerprint" in conditioning:
+                    _cond = conditioning["fingerprint"]
+                    if self.fingerprint_adapter:
+                        # Convert raw fingerprint to the desired dimension
+                        if conditioning["fingerprint"].shape[1] != self.raw_fingerprint_dim:
+                            # Print stack trace for debugging
+                            raise ValueError(
+                                f"Expected fingerprint shape {self.raw_fingerprint_dim}, got {conditioning['fingerprint'].shape[1]}"
+                            )
+                        # _cond = nn.sigmoid(self.cond_conversion(conditioning["fingerprint"]))
+                        _cond, fp_logits = self.fp_adapter(conditioning["fingerprint"])
 
-                    if atom_conditioning.ndim == 2:
-                        atom_conditioning = jnp.sum(atom_conditioning, axis=0)
-                    elif atom_conditioning.ndim == 3:
-                        atom_conditioning = jnp.sum(atom_conditioning, axis=1)
-                    else:
-                        raise ValueError("Atom conditioning has invalid shape")
+                    return self.cond_embeddings(_cond), fp_logits, cross_cond
+                
+                # If no fingerprint but dict has other keys, return None for cond_embedding
+                return None, fp_logits, cross_cond
 
-                    # Ensure consistent dtypes for concatenation
-                    _cond = _cond.astype(self.dtype)
-                    atom_conditioning = atom_conditioning.astype(self.dtype)
-                    _cond = jnp.concat([_cond, atom_conditioning], axis=-1)
+            # Non-dict conditioning (e.g., class labels)
+            return self.cond_embeddings(conditioning), fp_logits, None
+        
+        return None, fp_logits, None
 
-                return self.cond_embeddings(_cond), fp_logits
-
-            return self.cond_embeddings(conditioning), fp_logits
-        return None, fp_logits
-
-    def predict_x(self, zt, t, cond=None, train=False):
+    def predict_x(self, zt, t, cond=None, cross_conditioning=None, train=False):
         t = None if self.time_features == "none" else t
-        return self.classifier(zt, t=t, cond=cond, train=train)
+        return self.classifier(zt, t=t, cond=cond, cross_conditioning=cross_conditioning, train=train)
 
     def visualize_classifier(self, x, t, conditioning=None):
         # if it's image, x: [bs, h, w, c]
         # if it's text, x: [bs, seq_len]
-        cond, _ = self.get_cond_embedding(conditioning)
+        cond, _, cross_cond = self.get_cond_embedding(conditioning)
         # t: []
         # if it's image, zt: [bs, h, w, c]
         # if it's text, zt: [bs, seq_len]
         zt = self.forward_sample(x, t)
         # logits: [bs, h, w, c, vocab_size] for images
         # [bs, seq_len, vocab_size] for text
-        logits, _ = self.predict_x(zt, t, cond=cond)
+        logits, _ = self.predict_x(zt, t, cond=cond, cross_conditioning=cross_cond)
         n_indep_axes = logits.ndim - 2
         dist = tfd.Independent(tfd.Categorical(logits=logits), n_indep_axes)
         return dist
@@ -268,8 +247,8 @@ class MD4(nn.Module):
         masked = z0 == self.vocab_size
         z0_cliped = jnp.where(masked, jnp.zeros_like(z0), z0)
         masked = masked[..., None]
-        cond, _ = self.get_cond_embedding(conditioning)
-        logits, _ = self.predict_x(z0, jnp.array(0.0), cond=cond)
+        cond, _, cross_cond = self.get_cond_embedding(conditioning)
+        logits, _ = self.predict_x(z0, jnp.array(0.0), cond=cond, cross_conditioning=cross_cond)
         probs = jnp.where(
             masked,
             nn.softmax(logits, axis=-1),
@@ -328,21 +307,22 @@ class MD4(nn.Module):
         loss = alpha * focal_weight * ce
         return loss
     
-    def diffusion_loss(self, t, x, cond=None, train=False):
+    def diffusion_loss(self, t, x, cond=None, cross_conditioning=None, train=False):
         if not self.cont_time:
             # discretize time steps
             t = (jnp.floor(t * self.timesteps) + 1) / self.timesteps
 
         # sample z_t
         zt = self.forward_sample(x, t)
-        logits, _ = self.predict_x(zt, t, cond=cond, train=train)
+        # Ensure all loss computations are in fp32 for numerical stability
+        logits, _ = self.predict_x(zt, t, cond=cond, cross_conditioning=cross_conditioning, train=train)
         logits = logits.astype(jnp.float32)
         log_p = jax.nn.log_softmax(logits, axis=-1)
-        one_hot_x = jax.nn.one_hot(x, self.vocab_size)
+        one_hot_x = jax.nn.one_hot(x, self.vocab_size).astype(jnp.float32)
         neg_cross_ent = one_hot_x * log_p
         neg_cross_ent = jnp.where(one_hot_x, neg_cross_ent, 0.0)
         neg_cross_ent = jnp.sum(neg_cross_ent, axis=-1)
-        mask = jnp.asarray(zt == self.vocab_size, dtype=self.dtype)
+        mask = jnp.asarray(zt == self.vocab_size, dtype=jnp.float32)
 
         remaining_axis = list(range(x.ndim)[1:])
         # masked_neg_cross_ent: [bs]
@@ -353,23 +333,25 @@ class MD4(nn.Module):
             s = t - (1.0 / self.timesteps)
             gt = self.noise_schedule(t)
             gs = self.noise_schedule(s)
+            # Ensure numerical stability by casting to fp32
             loss_diff = (
-                self.timesteps
-                * jnp.expm1(gt - gs)
-                * self.noise_schedule.alpha(s)
+                jnp.asarray(self.timesteps, dtype=jnp.float32)
+                * jnp.expm1(gt - gs).astype(jnp.float32)
+                * self.noise_schedule.alpha(s).astype(jnp.float32)
                 * masked_neg_cross_ent
             )
         else:
             # cont-time loss
-            loss_diff = self.noise_schedule.dgamma_times_alpha(t) * masked_neg_cross_ent
+            loss_diff = (self.noise_schedule.dgamma_times_alpha(t).astype(jnp.float32) 
+                        * masked_neg_cross_ent)
 
         # loss_diff: [bs]
-        return loss_diff, 0.0
+        return loss_diff.astype(jnp.float32)
 
     @nn.compact
     def __call__(self, x, cond=None, train=False):
         bs = x.shape[0]
-        cond_embedding, fp_logits = self.get_cond_embedding(cond)
+        cond_embedding, fp_logits, cross_cond = self.get_cond_embedding(cond)
 
         # 0. FINGERPRINT ADAPTER LOSS: []
         loss_fp = jnp.array(0.0)
@@ -403,12 +385,16 @@ class MD4(nn.Module):
         else:
             t = jax.random.uniform(rng1, shape=[bs])
 
-        loss_diff, _ = self.diffusion_loss(t, x, cond=cond_embedding, train=train)
-        loss_diff = loss_diff.mean()
+        loss_diff = self.diffusion_loss(t, x, cond=cond_embedding, cross_conditioning=cross_cond, train=train).mean()
 
         if self.only_adapter:
             loss = loss_fp
         else:
+            # Cast all loss components to same dtype for stable addition
+            loss_diff = loss_diff.astype(jnp.float32)
+            loss_prior = loss_prior.astype(jnp.float32)
+            loss_recon = loss_recon.astype(jnp.float32)
+            loss_fp = loss_fp.astype(jnp.float32)
             loss = loss_diff + loss_prior + loss_recon + loss_fp
 
         model_stats = {
@@ -433,12 +419,12 @@ class MD4(nn.Module):
     def ancestral_sample_step(self, rng, i, timesteps, zt, conditioning=None):
         rng_body = jax.random.fold_in(rng, i)
         s, t = self.get_sampling_grid(i, timesteps)
-        cond, _ = self.get_cond_embedding(conditioning)
+        cond, _, cross_cond = self.get_cond_embedding(conditioning)
 
         alpha_t = self.noise_schedule.alpha(t)
         alpha_s = self.noise_schedule.alpha(s)
 
-        logits, _ = self.predict_x(zt, t, cond=cond)
+        logits, _ = self.predict_x(zt, t, cond=cond, cross_conditioning=cross_cond)
         mean_preds = jax.nn.softmax(logits, axis=-1)
 
         unmask_prob = (alpha_s - alpha_t) / (1 - alpha_t)
@@ -455,12 +441,12 @@ class MD4(nn.Module):
     def topp_sample_step(self, rng, i, timesteps, zt, conditioning=None, topp=0.98):
         rng_body = jax.random.fold_in(rng, i)
         s, t = self.get_sampling_grid(i, timesteps)
-        cond, _ = self.get_cond_embedding(conditioning)
+        cond, _, cross_cond = self.get_cond_embedding(conditioning)
 
         alpha_t = self.noise_schedule.alpha(t)
         alpha_s = self.noise_schedule.alpha(s)
 
-        logits, _ = self.predict_x(zt, t, cond=cond)
+        logits, _ = self.predict_x(zt, t, cond=cond, cross_conditioning=cross_cond)
         logits = binary_search.topp_mask(logits, topp, replace_val=jnp.array(-1e7))
         # mean_preds: [bs, ..., vocab]
         mean_preds = jax.nn.softmax(logits, axis=-1)
@@ -482,12 +468,12 @@ class MD4(nn.Module):
         # https://arxiv.org/abs/2406.04329.
         rng_body = jax.random.fold_in(rng, i)
         s, t = self.get_sampling_grid(i, timesteps)
-        cond, _ = self.get_cond_embedding(conditioning)
+        cond, _, cross_cond = self.get_cond_embedding(conditioning)
 
         alpha_t = self.noise_schedule.alpha(t)
         alpha_s = self.noise_schedule.alpha(s)
 
-        logits, _ = self.predict_x(zt, t, cond=cond)
+        logits, _ = self.predict_x(zt, t, cond=cond, cross_conditioning=cross_cond)
         unmask_prob = (alpha_s - alpha_t) / (1 - alpha_t)
 
         rng_body, rng = jax.random.split(rng_body)

@@ -2,7 +2,7 @@
 
 Memory Optimizations:
 - Worker functions moved to separate minimal module to avoid loading heavy dependencies
-- Heavy imports (tensorflow_datasets, transformers, polars, grain) are now conditional
+- Heavy imports (tensorflow_datasets, transformers, polars) are now conditional
 - Worker processes only load numpy, shared_memory, and rdkit_utils (when needed)
 - This reduces worker memory footprint by avoiding unnecessary module imports
 """
@@ -16,9 +16,9 @@ import numpy as np
 import polars as pl
 import tensorflow as tf
 import tensorflow_datasets as tfds
-import transformers
 from ml_collections import config_dict
 
+from md4.tokenizers import SMILESTokenizer
 from md4.utils.pubchem_worker import process_and_write_shard_tfrecord
 
 # Heavy imports are now imported conditionally within functions to reduce memory usage
@@ -32,7 +32,7 @@ def find_data_files(data_file_pattern):
 
 def preprocess_or_load_pubchem(
         data_dir, 
-        tokenizer: "transformers.PreTrainedTokenizerFast",
+        tokenizer: SMILESTokenizer,
         version="1.0.3",
         fp_radius=2, 
         fp_bits=2048, 
@@ -153,7 +153,7 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
     tokenizer_path = config.get("tokenizer", _SMILES_TOKENIZER)  
     batch_size = config.get("batch_size", 512)  
 
-    tokenizer = transformers.PreTrainedTokenizerFast.from_pretrained(tokenizer_path)
+    tokenizer = SMILESTokenizer(tokenizer_path)
 
     # Use preprocess_pubchem to get the dataset builder
     num_processes = config.get("num_processes", 64)
@@ -181,7 +181,7 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         shuffle_files=True,
     )
     train_dataset = train_dataset.repeat()  # Repeat for continuous training
-    train_dataset = train_dataset.shuffle(batch_size * 8)  # Shuffle with larger buffer
+    train_dataset = train_dataset.shuffle(batch_size * 8, seed=seed)  # Shuffle with larger buffer
     train_dataset = train_dataset.batch(batch_size, drop_remainder=True)
     train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
     train_dataset = train_dataset.as_numpy_iterator()
@@ -192,7 +192,7 @@ def create_pubchem_datasets(config: config_dict.ConfigDict, seed: int):
         shuffle_files=True,
     )
     eval_dataset = eval_dataset.repeat()  # Repeat for continuous evaluation
-    eval_dataset = eval_dataset.shuffle(batch_size * 8)  # Shuffle with larger buffer
+    eval_dataset = eval_dataset.shuffle(batch_size * 8, seed=seed + 1 if seed is not None else None)  # Shuffle with larger buffer
     eval_dataset = eval_dataset.batch(batch_size, drop_remainder=True)
     eval_dataset = eval_dataset.prefetch(tf.data.AUTOTUNE)
     eval_dataset = eval_dataset.as_numpy_iterator()
