@@ -97,8 +97,8 @@ def get_config() -> config_dict.ConfigDict:
     config.num_train_steps = 600_000
     # Evaluates for a full epoch if num_eval_steps==-1.
     config.num_eval_steps = 1000
-    config.batch_size = 3456
-    config.num_microbatches = 3
+    config.batch_size = 8192
+    config.num_microbatches = 4
     config.per_device_batch_size = -1
     # If batches should be added to evaluate the entire dataset.
     config.eval_pad_last_batch = False
