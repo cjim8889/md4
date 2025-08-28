@@ -164,20 +164,6 @@ def train_step(
         metrics0  = jax.tree.map(lambda a: jnp.zeros(a.shape, a.dtype), metrics_avals)
         loss0     = jnp.zeros(loss_aval.shape, loss_aval.dtype)
 
-
-        def body(carry, mb):
-            loop_rng, params, state, grad_acc, metrics_acc, loss_acc = carry
-            loop_rng, mbrng = jax.random.split(loop_rng)
-            (loss, (state_new, mdict)), grads_param_dtype = grad_fn(
-                train_state.params, state, mbrng, mb
-            )
-            grad_acc = jax.tree.map(
-                lambda a, g: a + g.astype(jnp.float32), grad_acc, grads_param_dtype
-            )
-            metrics_acc = jax.tree.map(lambda a, b: a + b, metrics_acc, mdict)
-            loss_acc = loss_acc + loss
-            return (loop_rng, params, state_new, grad_acc, metrics_acc, loss_acc), None
-
         # 5) Wrap the scan in shard_map to guarantee no communication across microbatches.
         #    Specs: train_state pieces replicated; batch_mb has P(None, 'data', ...).
         state_specs = jax.tree.map(lambda _: P(), train_state.state)
@@ -213,7 +199,7 @@ def train_step(
                 loss_acc   = loss_acc + loss
                 return (loop_rng, params_c, state_new, grad_acc, metrics_acc, loss_acc), None
 
-            ( _, _, new_state, grad_sum_f32, metrics_sum, loss_sum), _ = jax.lax.scan(
+            ( _, _, new_state, grad_sum_f32, metrics_sum, _), _ = jax.lax.scan(
                 body,
                 (rng_in, params, state, grad0, metrics0v, loss0v),
                 batch_mb_local,
@@ -221,12 +207,11 @@ def train_step(
             )
 
             # single communication point after the scan:
-            grad_sum_f32 = jax.tree.map(lambda g: jax.lax.psum(g, 'data'), grad_sum_f32)
+            grad_sum_f32 = jax.tree.map(lambda g: jax.lax.psum(g.astype(jnp.bfloat16), 'data'), grad_sum_f32)
             metrics_sum  = jax.tree.map(lambda m: jax.lax.psum(m, 'data'), metrics_sum)
-            loss_sum     = jax.lax.psum(loss_sum, 'data')
-            return new_state, grad_sum_f32, metrics_sum, loss_sum
+            return new_state, grad_sum_f32, metrics_sum
 
-        new_state, grad_sum_f32, metrics_sum, _ = per_shard_scan(
+        new_state, grad_sum_f32, metrics_sum = per_shard_scan(
             train_state.params, train_state.state, rng, batch_mb
         )
 
