@@ -32,7 +32,7 @@ def get_config() -> config_dict.ConfigDict:
     # Data directory configuration - paths for data storage and processing
     config.parquet_data_dir = "data/pubchem_large/data"  # Source directory with raw parquet files
     config.tfrecord_data_dir = "/mnt/data/pubchem_large_text"  # Directory for processed TFRecord files
-    config.interior_frac = 0.5  # Fraction of padding tokens placed in sequence interior vs edges
+    config.interior_frac = 0.1  # Fraction of padding tokens placed in sequence interior vs edges
     config.num_variants = 2  # Number of augmented variants per training example
 
     # High-entropy data loading configuration - ensures maximum diversity between epochs
