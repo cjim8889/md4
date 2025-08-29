@@ -56,6 +56,8 @@ class ModelArgs:
   mlp_type: str = 'swiglu'
   # adaln, adaln_zero
   cond_type: str = 'adaln'
+  # layernorm, rmsnorm
+  norm_type: str = "auto"  # "auto" means layernorm when cond, rmsnorm otherwise
   embed_input: bool = False
   n_embed_classes: int = 1024
   causal: bool = False

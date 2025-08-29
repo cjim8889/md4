@@ -55,6 +55,8 @@ class ModelArgs:
     mlp_type: str = "swiglu"
     # adaln, adaln_zero
     cond_type: str = "adaln"
+    # layernorm, rmsnorm
+    norm_type: str = "auto"  # "auto" means layernorm when cond, rmsnorm otherwise
     embed_input: bool = False
     n_embed_classes: int = 1024
     causal: bool = False
@@ -152,6 +154,52 @@ def repeat_kv(x, n_rep):
     return jnp.tile(x[:, :, :, None, :], [1, 1, 1, n_rep, 1]).reshape(
         bs, slen, n_kv_heads * n_rep, head_dim
     )
+
+
+def get_norm_layer(args: ModelArgs, use_scale: bool = True, use_bias: bool = False):
+    """Get normalization layer based on configuration."""
+    if args.norm_type == "layernorm":
+        return nn.LayerNorm(
+            epsilon=args.norm_eps,
+            use_bias=use_bias,
+            use_scale=use_scale,
+            dtype=args.dtype,
+            param_dtype=args.param_dtype,
+        )
+    elif args.norm_type == "rmsnorm":
+        return RMSNorm(
+            args.dim,
+            eps=args.norm_eps,
+            dtype=args.dtype,
+            param_dtype=args.param_dtype,
+        )
+    elif args.norm_type == "auto":
+        # Default behavior: will be determined at runtime based on cond presence
+        return None
+    else:
+        raise ValueError(f"Unknown norm_type: {args.norm_type}")
+
+
+def get_norm_layer_conditional(args: ModelArgs, has_cond: bool, use_scale: bool = True, use_bias: bool = False):
+    """Get normalization layer based on configuration and conditioning presence."""
+    if args.norm_type == "auto":
+        if has_cond:
+            return nn.LayerNorm(
+                epsilon=args.norm_eps,
+                use_bias=use_bias,
+                use_scale=use_scale,
+                dtype=args.dtype,
+                param_dtype=args.param_dtype,
+            )
+        else:
+            return RMSNorm(
+                args.dim,
+                eps=args.norm_eps,
+                dtype=args.dtype,
+                param_dtype=args.param_dtype,
+            )
+    else:
+        return get_norm_layer(args, use_scale, use_bias)
 
 
 class Dropout1d(nn.Module):
@@ -495,19 +543,11 @@ class TransformerBlock(nn.Module):
             # Use shared conditioning parameters for all layers
             shift_att, scale_att, gate_att, shift_mlp, scale_mlp, gate_mlp = cond_params
             
-            attention_norm = nn.LayerNorm(
-                epsilon=self.args.norm_eps,
-                use_bias=False,
-                use_scale=False,
-                dtype=self.args.dtype,
-                param_dtype=self.args.param_dtype,
+            attention_norm = get_norm_layer_conditional(
+                self.args, has_cond=True, use_scale=False, use_bias=False
             )
-            ffn_norm = nn.LayerNorm(
-                epsilon=self.args.norm_eps,
-                use_bias=False,
-                use_scale=False,
-                dtype=self.args.dtype,
-                param_dtype=self.args.param_dtype,
+            ffn_norm = get_norm_layer_conditional(
+                self.args, has_cond=True, use_scale=False, use_bias=False
             )
             # Self-attention
             h = x + gate_att * self.attention(
@@ -519,12 +559,8 @@ class TransformerBlock(nn.Module):
             
             # Cross-attention if configured and available
             if self.use_cross_attention and cross_conditioning is not None:
-                cross_norm = nn.LayerNorm(
-                    epsilon=self.args.norm_eps,
-                    use_bias=False,
-                    use_scale=False,
-                    dtype=self.args.dtype,
-                    param_dtype=self.args.param_dtype,
+                cross_norm = get_norm_layer_conditional(
+                    self.args, has_cond=True, use_scale=False, use_bias=False
                 )
                 # Apply cross-attention with same gating as self-attention
                 h = h + gate_att * self.cross_attention(
@@ -538,28 +574,19 @@ class TransformerBlock(nn.Module):
                 ffn_norm(h) * (scale_mlp + 1.0) + shift_mlp, train=train
             )
         else:
-            attention_norm = RMSNorm(
-                self.args.dim,
-                eps=self.args.norm_eps,
-                dtype=self.args.dtype,
-                param_dtype=self.args.param_dtype,
+            attention_norm = get_norm_layer_conditional(
+                self.args, has_cond=False, use_scale=True, use_bias=False
             )
-            ffn_norm = RMSNorm(
-                self.args.dim,
-                eps=self.args.norm_eps,
-                dtype=self.args.dtype,
-                param_dtype=self.args.param_dtype,
+            ffn_norm = get_norm_layer_conditional(
+                self.args, has_cond=False, use_scale=True, use_bias=False
             )
             # Self-attention
             h = x + self.attention(attention_norm(x), freqs_cos, freqs_sin, train=train)
             
             # Cross-attention if configured and available
             if self.use_cross_attention and cross_conditioning is not None:
-                cross_norm = RMSNorm(
-                    self.args.dim,
-                    eps=self.args.norm_eps,
-                    dtype=self.args.dtype,
-                    param_dtype=self.args.param_dtype,
+                cross_norm = get_norm_layer_conditional(
+                    self.args, has_cond=False, use_scale=True, use_bias=False
                 )
                 h = h + self.cross_attention(cross_norm(h), cross_conditioning, train=train)
             
@@ -675,12 +702,8 @@ class Transformer(nn.Module):
             )
 
         if cond is not None:
-            output_norm = nn.LayerNorm(
-                epsilon=args.norm_eps,
-                use_bias=False,
-                use_scale=False,
-                dtype=args.dtype,
-                param_dtype=args.param_dtype,
+            output_norm = get_norm_layer_conditional(
+                args, has_cond=True, use_scale=False, use_bias=False
             )
             activation = activation_map[args.mlp_type]
             if args.cond_type == "adaln":
@@ -729,8 +752,8 @@ class Transformer(nn.Module):
                 param_dtype=jnp.float32,
             )(output_norm(h) * (scale_out + 1) + shift_out)
         else:
-            h = RMSNorm(
-                args.dim, args.norm_eps, dtype=args.dtype, param_dtype=args.param_dtype
+            h = get_norm_layer_conditional(
+                args, has_cond=False, use_scale=True, use_bias=False
             )(h)
             logits = nn.Dense(
                 features=output_channels,

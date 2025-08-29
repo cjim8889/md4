@@ -93,6 +93,7 @@ class DiscreteClassifier(nn.Module):
     mlp_type: str = "swiglu"
     depth_scaled_init: bool = False
     cond_type: str = "adaln"
+    norm_type: str = "auto"
     outside_embed: bool = False
     model_sharding: bool = False
     multiple_of: int = 64
@@ -133,6 +134,7 @@ class DiscreteClassifier(nn.Module):
                     depth_scaled_init=self.depth_scaled_init,
                     mlp_type=self.mlp_type,
                     cond_type=self.cond_type,
+                    norm_type=self.norm_type,
                     embed_input=not self.outside_embed,
                     n_embed_classes=self.vocab_size + 1,
                     use_attn_dropout=self.use_attn_dropout,
@@ -151,6 +153,7 @@ class DiscreteClassifier(nn.Module):
                     depth_scaled_init=self.depth_scaled_init,
                     mlp_type=self.mlp_type,
                     cond_type=self.cond_type,
+                    norm_type=self.norm_type,
                     embed_input=not self.outside_embed,
                     n_embed_classes=self.vocab_size + 1,
                     dtype=self.dtype,

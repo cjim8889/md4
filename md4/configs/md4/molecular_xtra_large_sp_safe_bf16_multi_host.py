@@ -76,6 +76,7 @@ def get_config() -> config_dict.ConfigDict:
     config.mlp_type = "geglu"
     config.depth_scaled_init = True
     config.cond_type = "adaln_zero"
+    config.norm_type = "auto"  # "auto", "layernorm", "rmsnorm"
     
     # Cross-attention configuration
     config.use_cross_attention = True  # Set to True to enable cross-attention

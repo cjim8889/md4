@@ -91,6 +91,7 @@ class MD4(nn.Module):
     mlp_type: str = "swiglu"
     depth_scaled_init: bool = False
     cond_type: str = "adaln"
+    norm_type: str = "auto"  # "auto", "layernorm", "rmsnorm"
     outside_embed: bool = False
     # time_features: t or none
     time_features: str = "t"
@@ -136,6 +137,7 @@ class MD4(nn.Module):
             mlp_type=self.mlp_type,
             depth_scaled_init=self.depth_scaled_init,
             cond_type=self.cond_type,
+            norm_type=self.norm_type,
             outside_embed=self.outside_embed,
             model_sharding=self.model_sharding,
             multiple_of=self.multiple_of,
