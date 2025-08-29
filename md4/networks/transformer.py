@@ -167,9 +167,9 @@ def get_norm_layer(args: ModelArgs, use_scale: bool = True, use_bias: bool = Fal
             param_dtype=args.param_dtype,
         )
     elif args.norm_type == "rmsnorm":
-        return RMSNorm(
-            args.dim,
-            eps=args.norm_eps,
+        return nn.RMSNorm(
+            epsilon=args.norm_eps,
+            use_scale=use_scale,
             dtype=args.dtype,
             param_dtype=args.param_dtype,
         )
@@ -192,9 +192,9 @@ def get_norm_layer_conditional(args: ModelArgs, has_cond: bool, use_scale: bool 
                 param_dtype=args.param_dtype,
             )
         else:
-            return RMSNorm(
-                args.dim,
-                eps=args.norm_eps,
+            return nn.RMSNorm(
+                epsilon=args.norm_eps,
+                use_scale=use_scale,
                 dtype=args.dtype,
                 param_dtype=args.param_dtype,
             )
