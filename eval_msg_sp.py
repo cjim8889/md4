@@ -262,10 +262,12 @@ class MolecularEvaluator:
         # Set up output paths
         self._setup_output_paths()
 
-        # Create mesh for evaluation
-        self.mesh, mesh_config = self._create_mesh()
-
+        # Load config first
         self.config = self._load_config()
+        
+        # Create mesh for evaluation (can now use config defaults)
+        self.mesh, mesh_config = self._create_mesh()
+        
         # Override config's mesh configuration with our evaluation mesh
         self.config.mesh_config = mesh_config
         self.tokenizer = self._load_tokenizer()
@@ -353,9 +355,26 @@ class MolecularEvaluator:
 
     def _create_mesh(self):
         """Create device mesh for evaluation."""
-        # Create mesh configuration for evaluation (single data axis with 8 devices)
+        # Use config mesh settings as defaults
+        default_mesh_shape = getattr(self.config.mesh_config, 'mesh_shape', (8,))
+        default_mesh_axis_names = getattr(self.config.mesh_config, 'mesh_axis_names', ("data",))
+        
+        # Override with args if provided
+        mesh_shape = getattr(self.args, 'mesh_shape', None)
+        if mesh_shape is not None:
+            mesh_shape = tuple(mesh_shape)  # Convert list to tuple
+        else:
+            mesh_shape = default_mesh_shape
+            
+        mesh_axis_names = getattr(self.args, 'mesh_axis_names', None)
+        if mesh_axis_names is not None:
+            mesh_axis_names = tuple(mesh_axis_names)  # Convert list to tuple
+        else:
+            mesh_axis_names = default_mesh_axis_names
+        
+        # Create mesh configuration for evaluation
         mesh_config = ml_collections.ConfigDict(
-            {"mesh_shape": (8,), "mesh_axis_names": ("data",)}
+            {"mesh_shape": mesh_shape, "mesh_axis_names": mesh_axis_names}
         )
 
         # Create the mesh
@@ -981,6 +1000,20 @@ def parse_arguments() -> argparse.Namespace:
         "--use_conditional_init",
         action="store_true",
         help="Initialize zt from input SMILES using model.conditional_sample (masks after first token id 3)",
+    )
+
+    # Mesh configuration arguments
+    parser.add_argument(
+        "--mesh_shape",
+        type=int,
+        nargs="+",
+        help="Device mesh shape (e.g., --mesh_shape 8 or --mesh_shape 2 4). If not provided, uses config defaults",
+    )
+    parser.add_argument(
+        "--mesh_axis_names",
+        type=str,
+        nargs="+",
+        help="Device mesh axis names (e.g., --mesh_axis_names data or --mesh_axis_names model data). If not provided, uses config defaults",
     )
 
     return parser.parse_args()
