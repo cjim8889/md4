@@ -206,7 +206,7 @@ def train_step(
             )
 
             # single communication point after the scan:
-            grad_sum_f32 = jax.tree.map(lambda g: jax.lax.psum(g.astype(jnp.bfloat16), 'data'), grad_sum_f32)
+            grad_sum_f32 = jax.tree.map(lambda g: jax.lax.psum(g, 'data'), grad_sum_f32)
             metrics_sum  = jax.tree.map(lambda m: jax.lax.psum(m, 'data'), metrics_sum)
             return new_state, grad_sum_f32, metrics_sum
 
