@@ -560,7 +560,6 @@ def train_and_evaluate(
                         metrics=jax.tree_util.tree_map(
                             lambda x: x.item(), eval_metrics_cpu
                         ),
-                        metrics=eval_metrics_cpu
                     )
 
     logging.info("Finishing training at step %d", num_train_steps)
