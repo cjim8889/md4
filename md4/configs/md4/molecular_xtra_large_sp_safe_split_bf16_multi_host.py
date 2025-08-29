@@ -89,7 +89,7 @@ def get_config() -> config_dict.ConfigDict:
     config.learning_rate_schedule = "cosine"  # LR schedule type: cosine, linear, constant
     config.warmup_steps = 2000  # Number of warmup steps for learning rate scheduling
     config.weight_decay = 1e-2  # L2 regularization weight for AdamW optimizer
-    config.scale_by_muon = True  # Whether to use Muon optimizer scaling (experimental)
+    config.scale_by_muon = False  # Whether to use Muon optimizer scaling (experimental)
     config.clip = 0.0  # Gradient clipping norm (0.0 = no clipping)
     config.b2 = 0.999  # Beta2 parameter for Adam optimizer (momentum decay)
     config.num_epochs = -1  # Number of training epochs (-1 = use num_train_steps instead)
