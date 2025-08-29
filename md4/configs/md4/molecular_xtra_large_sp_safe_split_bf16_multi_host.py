@@ -22,7 +22,7 @@ def get_config() -> config_dict.ConfigDict:
     config.initialize_multihost = True  # Enable multi-host JAX initialization for TPU pods
 
     # dataset configs - defines the training data and vocabulary
-    config.vocab_size = 4000  # Vocabulary size for tokenizer - determines embedding table size
+    config.vocab_size = 1500  # Vocabulary size for tokenizer - determines embedding table size
     config.dataset = "pubchem_large_text"  # Dataset type - controls which input pipeline is used
     config.version = "1.2.0"  # Dataset version for reproducibility and data tracking
     config.training_shards = 160  # Number of training data shards for parallel processing
