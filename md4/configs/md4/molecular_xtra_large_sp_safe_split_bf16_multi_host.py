@@ -43,8 +43,8 @@ def get_config() -> config_dict.ConfigDict:
     config.batch_shuffle_buffer = 50       # Batch-level shuffle buffer size
 
     config.classes = -1
-    config.max_length = 128
-    config.tokenizer = "data/sentencepiece_tokenizer_safe_bpe_4000_split_number.model"
+    config.max_length = 160
+    config.tokenizer = "data/sentencepiece_tokenizer_safe_bpe_1500_split.model"
 
     config.min_frequency = 200
 
@@ -67,13 +67,13 @@ def get_config() -> config_dict.ConfigDict:
     config.fingerprint_dim = 4096
 
     config.feature_dim = 256
-    config.n_layers = 12
+    config.n_layers = 10
     config.dropout_rate = 0.0
     config.multiple_of = 256
 
     config.num_heads = 8
     config.n_kv_heads = 4
-    config.mlp_type = "swiglu"
+    config.mlp_type = "glu"
     config.depth_scaled_init = True
     config.cond_type = "adaln_zero"
     config.norm_type = "rmsnorm"  # "auto", "layernorm", "rmsnorm"
@@ -82,13 +82,13 @@ def get_config() -> config_dict.ConfigDict:
     config.use_cross_attention = True  # Set to True to enable cross-attention
     config.cross_attention_layers = None  # None for all layers, or number for first N layers
     config.cross_attention_proj_dim = 256
-    config.cross_conditioning_seq_length = 16  # Sequence length for cross-conditioning reshape
+    config.cross_conditioning_seq_length = 32  # Sequence length for cross-conditioning reshape
 
     config.learning_rate = 3e-4
     config.learning_rate_schedule = "cosine"
     config.warmup_steps = 2000
     config.weight_decay = 1e-2
-    config.scale_by_muon = False
+    config.scale_by_muon = True
     config.clip = 0.0
     config.b2 = 0.999
     config.num_epochs = -1
@@ -98,8 +98,8 @@ def get_config() -> config_dict.ConfigDict:
     config.num_train_steps = 200_000
     # Evaluates for a full epoch if num_eval_steps==-1.
     config.num_eval_steps = 1000
-    config.batch_size = 8192
-    config.num_microbatches = 4
+    config.batch_size = 4096
+    config.num_microbatches = 2
     config.per_device_batch_size = -1
     # If batches should be added to evaluate the entire dataset.
     config.eval_pad_last_batch = False
