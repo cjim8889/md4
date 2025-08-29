@@ -259,7 +259,6 @@ class Attention(nn.Module):
         scores = nn.softmax(scores, axis=-1).astype(self.dtype)
         if self.dropout_rate > 0.0:
             scores = self.attn_dropout(scores, deterministic=not train)
-
         # attention value product (no transposes)
         output = jnp.einsum("b h t s, b h s d -> b h t d", scores, xv)
 
